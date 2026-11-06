@@ -424,7 +424,13 @@ app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
 
 @app.get("/")
 async def index():
-    return FileResponse(HERE / "static" / "index.html", headers={"Cache-Control": "no-cache"})
+    # Version des fichiers dans leur adresse : après une mise à jour, le navigateur recharge
+    # app.js et style.css au lieu de garder en cache l'ancienne version (page incohérente)
+    html = (HERE / "static" / "index.html").read_text()
+    for f in ("app.js", "style.css"):
+        v = int((HERE / "static" / f).stat().st_mtime)
+        html = html.replace(f'"/static/{f}"', f'"/static/{f}?v={v}"')
+    return Response(html, media_type="text/html; charset=utf-8", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/manifest.webmanifest")
