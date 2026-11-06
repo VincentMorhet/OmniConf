@@ -28,7 +28,7 @@ log = logging.getLogger("agent")
 
 TOKEN = os.environ["AGENT_TOKEN"]
 DISPLAY = os.environ.get("DISPLAY", ":99")
-SCREEN = os.environ.get("SCREEN_SIZE", "1600x900")
+SCREEN = os.environ.get("SCREEN_SIZE", "1920x1200")
 NAME = os.environ.get("WORKER_NAME", os.uname().nodename)
 BOT_NAME = os.environ.get("BOT_DISPLAY_NAME", "Assistant")
 ICE = json.loads(os.environ.get("ICE_SERVERS", "[]"))

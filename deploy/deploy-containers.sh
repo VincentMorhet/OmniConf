@@ -8,7 +8,7 @@
 #   worker n°i : API 8000+i · VNC 6079+i · écran :98+i   (le 1er reprend les valeurs d'une VM : 8001, 6080, :99)
 #   données    : /srv/webconf/<nom>/{recordings,chrome-profile} sur l'hôte
 #   réglages   : /etc/webconf/containers/<nom>.env sur l'hôte (conservés ; clés ajoutées si absentes)
-# Variables : CPUS (4) et MEMORY (6g) par conteneur, OVH via .ovh_token, jeton via .agent_token,
+# Variables : CPUS (4) et MEMORY (6g) par conteneur, SCREEN_SIZE (1920x1200), OVH via .ovh_token, jeton via .agent_token,
 #   WORKER_URL_HOST (= HOST) : adresse des workers vue du contrôle (127.0.0.1 si même machine).
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -16,6 +16,7 @@ HOST=${HOST:?HOST manquant (ip de l hôte Docker)}
 NAMES=(${NAMES:-w3 w4})
 CONTROL_IPS=${CONTROL_IPS:-192.168.0.230}
 CPUS=${CPUS:-4}; MEMORY=${MEMORY:-6g}
+SCREEN=${SCREEN_SIZE:-}   # taille de l'écran des assistants (1920x1200 par défaut ; donnée ici, elle remplace la valeur existante)
 WORKER_URL_HOST=${WORKER_URL_HOST:-$HOST}
 SSH="ssh -o BatchMode=yes debian@$HOST"
 [ -f .agent_token ] || python3 -c "import secrets;print(secrets.token_urlsafe(24))" > .agent_token
@@ -65,7 +66,7 @@ for n in "${NAMES[@]}"; do
     f=/etc/webconf/containers/$n.env; sudo touch \$f; sudo chmod 600 \$f
     add() { sudo grep -q \"^\$1=\" \$f || echo \"\$1=\$2\" | sudo tee -a \$f >/dev/null; }
     add WORKER_NAME $n; add AGENT_TOKEN '$T'; add AGENT_PORT $api; add VNC_PORT $vnc; add RFB_PORT $rfb
-    add DISPLAY $disp; add SCREEN_SIZE 1600x900; add BOT_DISPLAY_NAME Assistant; add ICE_SERVERS '[]'
+    add DISPLAY $disp; add SCREEN_SIZE ${SCREEN:-1920x1200}; [ -z '$SCREEN' ] || sudo sed -i 's/^SCREEN_SIZE=.*/SCREEN_SIZE=$SCREEN/' \$f; add BOT_DISPLAY_NAME Assistant; add ICE_SERVERS '[]'
     [ -z '$OVH' ] || { sudo sed -i '/^OVH_AI_ENDPOINTS_ACCESS_TOKEN=/d' \$f; add OVH_AI_ENDPOINTS_ACCESS_TOKEN '$OVH'; }"
   # Port réel (un worker garde ses ports d'un déploiement à l'autre, même si l'ordre de NAMES change)
   api=$($SSH "sudo sed -n 's/^AGENT_PORT=//p' /etc/webconf/containers/$n.env")

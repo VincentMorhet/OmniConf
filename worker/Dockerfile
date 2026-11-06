@@ -42,7 +42,7 @@ RUN rm -rf /opt/webconf/worker/__pycache__ /opt/webconf/worker/container /opt/we
 # conteneur supplémentaire sur un même hôte (réseau de l'hôte partagé).
 ENV XDG_RUNTIME_DIR=/run/user/1500 \
     DISPLAY=:99 \
-    SCREEN_SIZE=1600x900 \
+    SCREEN_SIZE=1920x1200 \
     AGENT_PORT=8001 \
     VNC_PORT=6080 \
     RFB_PORT=5900 \

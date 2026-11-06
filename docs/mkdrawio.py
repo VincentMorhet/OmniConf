@@ -97,7 +97,7 @@ p1.box("<b>À retenir</b><br/>• ctl ne rejoint aucune réunion : il pilote.<br
 # ---------- Page 2 : circuit du son ----------
 p2 = Page("2. Circuit du son (worker)", "au")
 title(p2, "Intérieur d'un worker : le circuit du son", "PulseAudio virtuel · ta voix et celle des participants sont des flux séparés")
-p2.group("Chrome (Playwright) sur Xvfb :99 · 1600x900", 40, 110, 260, 380, "strokeColor=#2F5597;")
+p2.group("Chrome (Playwright) sur Xvfb :99 · 1920x1200", 40, 110, 260, 380, "strokeColor=#2F5597;")
 page = p2.box("<b>Page de la webconf</b><br/>(Teams, Zoom, Jitsi…)", 70, 240, 200, 90, BLUE)
 pulse = p2.group("PulseAudio virtuel", 380, 110, 260, 380, "strokeColor=#C55A11;")
 mo = p2.box("<b>meeting_out</b><br/>son de la réunion", 410, 150, 200, 60, ORANGE)

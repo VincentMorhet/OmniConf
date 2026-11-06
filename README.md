@@ -116,7 +116,7 @@ Mot de passe : `ADMIN_PASSWORD` dans `/etc/webconf/control.env` sur webconf-ctl.
    - ⬇ téléchargement du MP4, 📝⬇ de la transcription (Markdown),
      ✏️ renommage (titre affiché), 🗑 suppression (impossible tant que l'enregistrement est en cours) ;
    - l'espace disque libre de chaque worker.
-   Fichiers : `/srv/webconf/recordings/*.mp4` sur chaque worker. Vidéo 1600x900 à **2 images/s**, très
+   Fichiers : `/srv/webconf/recordings/*.mp4` sur chaque worker. Vidéo 1920x1200 (réglable : `SCREEN_SIZE`) à **2 images/s**, très
    compressée (H.264, environ 25 Mo/h) ; audio **AAC 192 kb/s, 48 kHz stéréo** (environ 85 Mo/h), soit environ 110 Mo/h au total.
    Réglables dans `worker.env` : `RECORD_FPS`, `RECORD_CRF`, `RECORD_AUDIO_BITRATE`, `SCREEN_SIZE`.
    À côté de chaque MP4 : un `.json` (métadonnées) et un `.jpg` (miniature). Le MP4 est fragmenté : il

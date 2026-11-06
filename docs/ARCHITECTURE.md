@@ -71,7 +71,7 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    subgraph CHROME["Chrome (Playwright) · Xvfb 1600x900"]
+    subgraph CHROME["Chrome (Playwright) · Xvfb 1920x1200"]
         PAGE["Page de la webconf"]
     end
 
@@ -215,7 +215,7 @@ Dans `/srv/webconf/recordings/` sur le worker :
 
 ```mermaid
 flowchart LR
-    S(["AAAAMMJJ-HHMMSS_titre"]) --> MP4[".mp4<br/>vidéo 1600x900 · 2 i/s<br/>son AAC 48 kHz"]
+    S(["AAAAMMJJ-HHMMSS_titre"]) --> MP4[".mp4<br/>vidéo 1920x1200 · 2 i/s<br/>son AAC 48 kHz"]
     S --> TJ[".transcript.json<br/>texte brut + mis en forme<br/>intervenants · points d'étape"]
     S --> MD[".md<br/>transcription lisible"]
     S --> RJ[".report.json<br/>compte rendu + traces<br/>(3 brouillons, arbitrages, corrections)"]
