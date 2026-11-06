@@ -30,6 +30,17 @@ $("#loginForm").onsubmit = async (e) => {
   try { await api("/api/login", { method: "POST", json: { password: $("#pw").value } }); boot(); }
   catch (err) { $("#loginErr").textContent = err.message; }
 };
+// ------------------------------------------------------------------ thème blanc / noir
+function applyTheme(t, save) {
+  document.documentElement.dataset.theme = t;
+  if (save) localStorage.theme = t;
+  $('meta[name="theme-color"]').content = t === "light" ? "#f5f7fb" : "#0b1020";
+  const b = $("#themeBtn"); b.textContent = t === "light" ? "🌙" : "☀️";
+  b.title = t === "light" ? "Passer en thème noir" : "Passer en thème blanc";
+}
+applyTheme(document.documentElement.dataset.theme || "dark");
+$("#themeBtn").onclick = () => applyTheme(document.documentElement.dataset.theme === "light" ? "dark" : "light", true);
+matchMedia("(prefers-color-scheme: light)").addEventListener?.("change", (e) => { if (!localStorage.theme) applyTheme(e.matches ? "light" : "dark"); });
 $("#logout").onclick = async () => { await api("/api/logout", { method: "POST" }); location.reload(); };
 
 // ------------------------------------------------------------------ navigation : #home, #rec, #m/<assistant>

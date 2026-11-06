@@ -10,6 +10,10 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ctext y=%22.9em%22 font-size=%2290%22%3E🎧%3C/text%3E%3C/svg%3E">
 <title>OmniConf</title>
 <link rel="stylesheet" href="/static/style.css">
+<script>/* thème avant l'affichage (pas de flash) : choix mémorisé, sinon celui de l'appareil */
+(function () { var t = localStorage.theme || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+  document.documentElement.dataset.theme = t;
+  document.querySelector('meta[name="theme-color"]').content = t === "light" ? "#f5f7fb" : "#0b1020"; })();</script>
 </head>
 <body>
 <div id="login" class="hidden">
@@ -30,6 +34,7 @@
       <button data-tab="home" class="tab active"><span class="ico">🏠</span><span>Accueil</span><span id="liveBadge" class="count live hidden"></span></button>
       <button data-tab="rec" class="tab"><span class="ico">📁</span><span>Enregistrements</span><span id="recCount" class="count hidden"></span></button>
     </nav>
+    <button id="themeBtn" class="ghost" title="Changer de thème">☀️</button>
     <button id="audioBtn" class="ghost" title="Réglages audio : micro et sortie">🎚</button>
     <button id="logout" class="ghost" title="Déconnexion">⎋</button>
   </header>

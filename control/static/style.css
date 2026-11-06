@@ -328,3 +328,46 @@ select.sink { max-width: 220px; min-height: 36px; padding: 6px 8px; font-size: 1
 .cr .method { margin-top: 12px; font-size: 13px; }
 .cr .method summary { cursor: pointer; color: var(--mute); }
 .ractions .cr.run { opacity: .7; }
+
+
+/* ================================================================ thème blanc */
+[data-theme=light] {
+  --bg: #f4f6fb; --card: #ffffff; --card2: #eef1f8; --line: #dce1ee; --fg: #18203a; --mute: #5b6582;
+  --field: #ffffff; --shadow: 0 6px 22px rgba(30,40,90,.08); color-scheme: light;
+}
+[data-theme=dark] { color-scheme: dark; }
+[data-theme=light] body { background: radial-gradient(1200px 600px at 10% -10%, rgba(109,114,246,.12), transparent 60%),
+  radial-gradient(900px 500px at 110% 0%, rgba(155,108,246,.08), transparent 60%), var(--bg); background-attachment: fixed; }
+[data-theme=light] a { color: #4f46e5; }
+[data-theme=light] button:hover { border-color: #c3cadd; }
+[data-theme=light] button.danger { background: #fee2e2; border-color: #fca5a5; color: #b91c1c; }
+[data-theme=light] button.off { background: #fef3c7; border-color: #f59e0b; color: #92400e; }
+[data-theme=light] header.top { background: rgba(255,255,255,.82); }
+@media (max-width: 700px) {
+  [data-theme=light] header.top { background: var(--card); }
+  [data-theme=light] nav.tabs { background: rgba(255,255,255,.97); }
+}
+[data-theme=light] .launch-bar, [data-theme=light] .tile, [data-theme=light] .side, [data-theme=light] .screen { box-shadow: var(--shadow); }
+[data-theme=light] .tile.err { border-color: #fca5a5; }
+[data-theme=light] .tnow { color: #3a4360; }
+[data-theme=light] .badge.in_meeting { background: #dcfce7; color: #15803d; }
+[data-theme=light] .badge.joining, [data-theme=light] .badge.lobby, [data-theme=light] .badge.leaving, [data-theme=light] .badge.manual { background: #fef3c7; color: #92400e; }
+[data-theme=light] .badge.error, [data-theme=light] .badge.offline { background: #fee2e2; color: #b91c1c; }
+[data-theme=light] .rec { color: #dc2626; }
+[data-theme=light] .ended { background: rgba(244,246,251,.9); }
+[data-theme=light] .wnote .e, [data-theme=light] .tr-head .tr-status.err, [data-theme=light] .cr-bar .err { color: #b91c1c; }
+[data-theme=light] .wnote .n { color: #92400e; }
+[data-theme=light] .an-sec.warn h4 { color: #b45309; }
+[data-theme=light] .cr th, [data-theme=light] .cr .bars .b { background: var(--card2); }
+[data-theme=light] .cr .concl { background: rgba(34,197,94,.12); }
+[data-theme=light] .an-sec.me { background: rgba(79,70,229,.07); border-color: rgba(79,70,229,.3); }
+[data-theme=light] .tr-body p.hl { background: rgba(79,70,229,.14); }
+[data-theme=light] .modal { background: rgba(244,246,251,.97); }
+[data-theme=light] .empty-state { background: rgba(255,255,255,.5); }
+/* couleurs des intervenants, plus foncées pour rester lisibles sur fond blanc */
+[data-theme=light] .c0 { --sc: #0369a1; } [data-theme=light] .c1 { --sc: #a16207; } [data-theme=light] .c2 { --sc: #15803d; }
+[data-theme=light] .c3 { --sc: #be185d; } [data-theme=light] .c4 { --sc: #6d28d9; } [data-theme=light] .c5 { --sc: #c2410c; }
+[data-theme=light] .c6 { --sc: #0f766e; } [data-theme=light] .c7 { --sc: #b91c1c; } [data-theme=light] .c8 { --sc: #4338ca; }
+[data-theme=light] .tr-body .spk, [data-theme=light] .tr-spk .chip, [data-theme=light] .an-body b.who { color: var(--sc, #a16207); }
+/* étiquettes posées sur les images (fond noir) : texte toujours blanc, quel que soit le thème */
+.tthumb > span:not(.tstate), .ritem .thumb > span { color: #fff; }
