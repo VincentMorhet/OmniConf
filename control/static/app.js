@@ -818,19 +818,26 @@ function recItem(r, started, opts = {}) {
       <small>${opts.short ? esc(dayLabel(started)) + " à " : ""}${started.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}${opts.short ? "" : ` · ${fmtSize(r.size)} · ${esc(r.worker)}`}</small>
       <div class="ractions">
         <button class="play">${video ? "▶ Lire" : "📝 Lire"}</button>
-        ${video ? `<a class="btn" href="${url}?download=1" download="${esc(r.name)}" title="Télécharger la vidéo">⬇</a>` : ""}
-        ${r.transcript ? `<a class="btn" href="${url}/transcript?fmt=md&download=1" title="Télécharger la transcription (Markdown)">📝⬇</a>` : ""}
-        ${r.report ? `<button class="cr" title="Compte rendu">📋 CR</button><a class="btn" href="${url}/report?fmt=docx&download=1" title="Télécharger le compte rendu (Word)">W⬇</a>`
-          : r.report_job?.state === "running" ? `<button class="cr run" title="${esc(r.report_job.step || "")}">⏳ CR</button>` : ""}
-        <button class="icon ren" title="Renommer">✏️</button>
-        <button class="icon del" title="Supprimer" ${r.recording ? "disabled" : ""}>🗑</button>
+        ${r.report ? `<button class="cr" title="Compte rendu">📋 Compte rendu</button>`
+          : r.report_job?.state === "running" ? `<button class="cr run" title="${esc(r.report_job.step || "")}">⏳ Compte rendu…</button>` : ""}
+        <button class="icon more" title="Télécharger, renommer, supprimer…" aria-haspopup="menu">⋯</button>
+      </div>
+      <div class="rmenu hidden" role="menu">
+        ${video ? `<a href="${url}?download=1" download="${esc(r.name)}">⬇ Télécharger la vidéo</a>` : ""}
+        ${r.transcript ? `<a href="${url}/transcript?fmt=md&download=1">📝 Télécharger la transcription</a>` : ""}
+        ${r.report ? `<a href="${url}/report?fmt=docx&download=1">📄 Compte rendu (Word)</a>` : ""}
+        <button class="ren">✏️ Renommer</button>
+        <button class="del" ${r.recording ? "disabled title=\"Enregistrement en cours\"" : ""}>🗑 Supprimer</button>
       </div>
     </div>`;
   const title = r.meta?.title || r.name;
   $(".rtitle", el).textContent = title; $(".rtitle", el).title = title;
   const img = $("img", el);
   if (img) { img.src = url + "/thumb" + (r.recording ? "?t=" + Date.now() : ""); img.onerror = () => img.remove(); }
-  const play = (tab) => openPlayer(url, title, r.name, { video, transcript: r.transcript, report: r.report || !!r.report_job, tab });
+  const play = (tab) => openPlayer(url, title, r.name, { video, transcript: r.transcript, report: r.report || !!r.report_job, tab, recording: r.recording });
+  const menu = $(".rmenu", el);
+  $(".more", el).onclick = (e) => { e.stopPropagation(); const open = menu.classList.contains("hidden"); closeMenus(); menu.classList.toggle("hidden", !open); };
+  menu.addEventListener("click", () => closeMenus());
   $(".thumb", el).onclick = () => play(); $(".play", el).onclick = () => play();
   if ($(".cr", el)) $(".cr", el).onclick = () => play("cr");
   $(".ren", el).onclick = async () => {
@@ -838,12 +845,17 @@ function recItem(r, started, opts = {}) {
     if (!t || t === title) return;
     try { await api(url, { method: "PATCH", json: { title: t } }); loadRecordings(); } catch (e) { toast(e.message); }
   };
-  $(".del", el).onclick = async () => {
-    if (!confirm(`Supprimer définitivement « ${title} » ?`)) return;
-    try { await api(url, { method: "DELETE" }); toast("Supprimé"); loadRecordings(); } catch (e) { toast(e.message); }
-  };
-  if (opts.short) el.querySelectorAll(".ractions .btn, .ren, .del").forEach(x => x.remove());
+  $(".del", el).onclick = () => deleteRecording(url, title);
+  if (opts.short) el.querySelectorAll(".more, .rmenu").forEach(x => x.remove());
   return el;
+}
+// Menu « ⋯ » des vignettes : un seul ouvert à la fois, fermé au moindre clic ailleurs
+function closeMenus() { document.querySelectorAll(".rmenu:not(.hidden)").forEach(m => m.classList.add("hidden")); }
+document.addEventListener("click", (e) => { if (!e.target.closest(".rmenu, .more")) closeMenus(); });
+async function deleteRecording(url, title) {
+  if (!confirm(`Supprimer définitivement « ${title} » ?\n\nLa vidéo, la transcription et le compte rendu seront effacés. Cette action est irréversible.`)) return false;
+  try { await api(url, { method: "DELETE" }); toast(`« ${title} » supprimé`); loadRecordings(); return true; }
+  catch (e) { toast("Suppression impossible : " + e.message, 5000); return false; }
 }
 // Accueil : les dernières réunions terminées
 function renderRecent() {
@@ -868,8 +880,9 @@ $("#refreshRec").onclick = loadRecordings;
 let player = { url: null, doc: null, rep: null, seek: null };
 async function openPlayer(url, title, file, o = { video: true }) {
   const v = $("#player video"), pl = $("#player"), box = $("#playerTr");
-  player = { url, doc: null, rep: null, seek: null, view: o.transcript ? (o.tab || "tr") : null };
+  player = { url, doc: null, rep: null, seek: null, view: o.transcript ? (o.tab || "tr") : null, title };
   $("#playerTitle").textContent = title;
+  $("#playerDel").disabled = !!o.recording; $("#playerDel").title = o.recording ? "Enregistrement en cours" : "Supprimer cet enregistrement";
   $("#playerDl").classList.toggle("hidden", !o.video);
   $("#playerDl").href = url + "?download=1"; $("#playerDl").setAttribute("download", file);
   $("#playerMd").classList.toggle("hidden", !o.transcript);
@@ -969,8 +982,9 @@ function closePlayer() {
   player = { url: null }; clearTimeout(loadPlayerReport._t);
 }
 $("#player .close").onclick = closePlayer;
+$("#playerDel").onclick = async () => { if (await deleteRecording(player.url, player.title)) closePlayer(); };
 $("#player").onclick = (e) => { if (e.target.id === "player") closePlayer(); };
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") closePlayer(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeMenus(); closePlayer(); } });
 
 // ------------------------------------------------------------------ démarrage
 let timers = [];

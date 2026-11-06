@@ -371,3 +371,21 @@ select.sink { max-width: 220px; min-height: 36px; padding: 6px 8px; font-size: 1
 [data-theme=light] .tr-body .spk, [data-theme=light] .tr-spk .chip, [data-theme=light] .an-body b.who { color: var(--sc, #a16207); }
 /* étiquettes posées sur les images (fond noir) : texte toujours blanc, quel que soit le thème */
 .tthumb > span:not(.tstate), .ritem .thumb > span { color: #fff; }
+
+/* ---- vignettes d'enregistrement : 2 boutons + menu « ⋯ » */
+.ritem { position: relative; overflow: visible; }
+.ritem .thumb { border-radius: 10px 10px 0 0; overflow: hidden; }
+.ritem .ractions { display: flex; gap: 6px; }
+.ritem .ractions > button { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ritem .ractions .more { flex: 0 0 44px; font-size: 18px; line-height: 1; padding: 6px; }
+.rmenu { position: absolute; right: 8px; bottom: 52px; z-index: 8; min-width: 230px; display: grid; padding: 6px;
+  background: var(--card); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 32px rgba(0,0,0,.35); }
+.rmenu > a, .rmenu > button { display: flex; align-items: center; gap: 8px; text-align: left; justify-content: flex-start;
+  background: transparent; border: 0; border-radius: 8px; padding: 10px 12px; min-height: 42px; color: var(--fg); text-decoration: none; font-size: 14px; }
+.rmenu > a:hover, .rmenu > button:hover:not(:disabled) { background: var(--card2); }
+.rmenu .del { color: #f87171; border-top: 1px solid var(--line); border-radius: 0 0 8px 8px; margin-top: 4px; }
+[data-theme=light] .rmenu .del { color: #b91c1c; }
+[data-theme=light] .rmenu { box-shadow: 0 12px 32px rgba(30,40,90,.16); }
+#playerDel { min-height: 36px; padding: 6px 12px; }
+.modal-head { flex-wrap: wrap; }
+.storage .bar { background: var(--line); }
