@@ -438,3 +438,15 @@ body.focus header.top, body.focus nav.tabs { display: none !important; }
   background: rgba(5,7,15,.78); border: 1px solid rgba(255,255,255,.25); color: #fff; }
 .tthumb .tfollow:hover { background: var(--accent); }
 .stage > .b-follow { min-height: 46px; font-size: 15px; }
+
+/* ---- diapositives lues à l'écran, dans la transcription */
+.tr-body .slide { display: grid; grid-template-columns: minmax(90px, 32%) 1fr; gap: 10px; margin: 6px 0 12px; padding: 8px;
+  border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 10px; background: var(--card2); font-size: 14px; }
+.tr-body .slide .sl-img img { width: 100%; border-radius: 6px; display: block; border: 1px solid var(--line); }
+.tr-body .slide .sl-h { margin-bottom: 4px; }
+.tr-body .slide ul { margin: 0; padding-left: 1.1em; }
+.tr-body .slide li { margin: 0 0 2px; }
+.tr-body .slide .sl-v { margin: 6px 0 0; color: var(--mute); font-style: italic; }
+@media (max-width: 560px) { .tr-body .slide { grid-template-columns: 1fr; } }
+#playerSlides { min-height: 36px; padding: 6px 12px; }
+.tr-body .slide.again { grid-template-columns: 70px 1fr; padding: 4px 8px; border-left-color: var(--line); opacity: .85; }

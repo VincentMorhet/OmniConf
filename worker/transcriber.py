@@ -25,6 +25,7 @@ import httpx
 import numpy as np
 
 import analyst
+import slides as slides_mod
 from speakers import Diarizer
 
 log = logging.getLogger("transcriber")
@@ -111,6 +112,8 @@ class Transcriber:
         self.meta: dict = {}
         self.raw: list[dict] = []          # {id, t, te, spk, text, done}
         self.paragraphs: list[dict] = []   # {id, t, spk, text}
+        self.slides: list[dict] = []       # diapositives lues à l'écran : {n, t, titre, texte, visuel}
+        self.slide_reader = None
         self._next_id = 1
         self.diar.reset()
         self.inflight = 0
@@ -129,7 +132,8 @@ class Transcriber:
                 "lines": len(self.raw), "paragraphs": len(self.paragraphs), "error": self.last_error,
                 "llm": LLM_MODEL, "asr": ASR_MODEL, "n_speakers": len(self.diar.spk),
                 "voice_id": self.diar.extractor is not None, "ui_speaker": self.diar.ui_active,
-                "analysis": self.analysis_status()}
+                "analysis": self.analysis_status(), "slides": len(self.slides),
+                "slides_error": self.slide_reader.error if self.slide_reader else None}
 
     def analysis_status(self) -> dict:
         a = self.analysis
@@ -152,6 +156,10 @@ class Transcriber:
         for source, speaker in (("meeting_out.monitor", "meet"), ("user_in.monitor", "ME")):
             self.tasks.append(asyncio.create_task(self._capture(source, speaker)))
         self.tasks.append(asyncio.create_task(self._format_loop()))
+        if slides_mod.ENABLED:   # diapositives partagées : lues par un modèle d'image
+            self.slide_reader = slides_mod.SlideReader(self.http, API, base, self.slides, on_change=self._save)
+            self.tasks.append(asyncio.create_task(self.slide_reader.live(
+                os.environ.get("DISPLAY", ":99"), os.environ.get("SCREEN_SIZE", "1920x1200"), t0, lambda: self.active)))
         self._save()
         log.info("transcription -> %s", base)
 
@@ -320,6 +328,17 @@ class Transcriber:
                 p["spk"] = self.diar.assign(emb, p["te"] - p["t"], ui)
             p["ui"] = ui
 
+    def meeting_speech_since(self, secs: float) -> bool:
+        """Un participant (pas « Moi ») a parlé dans les `secs` dernières secondes."""
+        now = time.time() - (self.t0 or time.time())
+        return any(e["spk"] != "ME" and now - e.get("te", e["t"]) < secs for e in self.raw[-20:])
+
+    def save_extra(self, kind: str, data: dict):
+        """Fichier annexe de la réunion : <stem>.<kind>.json (diagnostics…)."""
+        if self.base:
+            p = Path(str(self.base) + f".{kind}.json")
+            p.write_text(json.dumps(data, ensure_ascii=False, indent=1))
+
     def ui_sample(self, names):
         if self.active:
             self.diar.ui_sample(time.time(), names)
@@ -479,10 +498,13 @@ class Transcriber:
                 "pending": pending, "transcribing": self.inflight, "speakers": self.labels(),
                 "aliases": dict(self.diar.aliases)}
 
+    def slides_after(self, after: int = 0) -> dict:
+        return {"file": self.base.name if self.base else None, "total": len(self.slides), "slides": self.slides[after:]}
+
     def doc(self) -> dict:
         a = self.analysis
         return {"meta": self.meta, "t0": self.t0, "speakers": self.labels(), "diarizer": self.diar.state(),
-                "paragraphs": self.paragraphs,
+                "paragraphs": self.paragraphs, "slides": self.slides,
                 "raw": [{k: e.get(k) for k in ("t", "te", "spk", "ui", "text")} for e in self.raw if e["text"]],
                 "analysis": {"state": a["state"], "flashes": a["flashes"], "upto": a["upto"], "at": a["at"]}}
 
@@ -529,8 +551,17 @@ def to_markdown(doc: dict) -> str:
            if any(p.get("spk") == k for p in doc.get("paragraphs", []))]
     if spk:
         lines += ["Intervenants : " + ", ".join(spk), ""]
-    for p in doc.get("paragraphs", []):
-        lines.append(f"**[{_fmt_t(p['t'])}] {speaker_label(doc, p)}** : {p['text']}")
+    items = [(p["t"], f"**[{_fmt_t(p['t'])}] {speaker_label(doc, p)}** : {p['text']}") for p in doc.get("paragraphs", [])]
+    for s in doc.get("slides") or []:   # diapositives à leur place dans le fil de la réunion
+        if s.get("repeat_of"):
+            items.append((s["t"] - 0.01, f"> 🖥 [{_fmt_t(s['t'])}] retour à « {s.get('titre') or 'la diapositive'} »"))
+            continue
+        q = [f"> 🖥 **[{_fmt_t(s['t'])}] {s.get('titre') or 'Diapositive'}**"] + [f"> - {x}" for x in s.get("texte") or []]
+        if s.get("visuel"):
+            q.append(f"> _{s['visuel']}_")
+        items.append((s["t"] - 0.01, "\n".join(q)))
+    for _, line in sorted(items, key=lambda x: x[0]):
+        lines.append(line)
         lines.append("")
     if not doc.get("paragraphs"):
         lines.append("_(aucune parole transcrite)_")

@@ -1,9 +1,13 @@
 """Distinction des interlocuteurs (diarisation en ligne) pour le flux « réunion ».
 
 Deux indices complémentaires :
-1. **Empreinte vocale** : un embedding (WeSpeaker ResNet34, ONNX, CPU) est calculé pour chaque phrase
-   transcrite, puis regroupé en ligne par similarité cosinus → « Intervenant 1, 2… ». Fonctionne sur
-   toutes les plateformes, et distingue aussi plusieurs personnes derrière un même micro.
+1. **Empreinte vocale** : un embedding (3D-Speaker CAM++ zh/en, ONNX, CPU, ~30 ms par phrase) est
+   calculé pour chaque phrase transcrite, puis regroupé en ligne par similarité cosinus → « Intervenant
+   1, 2… ». Le son d'une visio (Opus, réduction de bruit, même salle) donne à toutes les voix une
+   « signature de canal » commune : on la retire en soustrayant l'empreinte moyenne de la séance
+   avant de comparer (sans cela, toutes les voix se ressemblent : similarité ~0,8 entre personnes
+   différentes avec l'ancien modèle WeSpeaker ResNet34, d'où un seul « Intervenant 1 »).
+   Fonctionne sur toutes les plateformes, et distingue aussi plusieurs personnes derrière un même micro.
 2. **Orateur actif affiché par la plateforme** (Teams/Zoom/Jitsi/Meet) : relevé ~4 fois par seconde
    dans la page. Chaque phrase vote pour le nom affiché pendant qu'elle était prononcée → les voix
    reçoivent les vrais noms.
@@ -21,10 +25,14 @@ import numpy as np
 
 log = logging.getLogger("speakers")
 
-MODEL = os.environ.get("TRANSCRIPT_SPK_MODEL", "/opt/webconf/models/wespeaker_en_voxceleb_resnet34_LM.onnx")
-NEW_T = float(os.environ.get("TRANSCRIPT_SPK_NEW", "0.50"))      # sous ce score : nouvelle voix
-MERGE_T = float(os.environ.get("TRANSCRIPT_SPK_MERGE", "0.62"))  # au-dessus : deux groupes fusionnés
-NAME_MERGE_T = 0.45       # deux groupes au même nom affiché et voix assez proches → même personne
+MODEL = os.environ.get("TRANSCRIPT_SPK_MODEL",
+                       "/opt/webconf/models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx")
+# Seuils sur empreintes centrées (moyenne de la séance retirée), réglés sur deux vraies réunions
+# (Teams, Meet) et une réunion de synthèse à 4 voix passée par Opus : tests/diar_real_eval.py
+NEW_T = float(os.environ.get("TRANSCRIPT_SPK_NEW", "0.23"))      # sous ce score : nouvelle voix
+MERGE_T = float(os.environ.get("TRANSCRIPT_SPK_MERGE", "0.48"))  # au-dessus : deux groupes fusionnés
+NAME_MERGE_T = float(os.environ.get("TRANSCRIPT_SPK_NAME_MERGE", "0.12"))  # même nom affiché + voix assez proches
+WARMUP = 8                # empreintes avant de retirer la moyenne de séance (trop bruitée avant)
 MIN_EMB_SEC = 1.0         # en dessous, l'empreinte est trop bruitée : pas de nouveau groupe
 RATE = 16000
 
@@ -53,6 +61,16 @@ class Diarizer:
         self.ui_t: list[float] = []
         self.last_id = None
         self.aliases: dict[str, str] = {}  # id fusionné -> id survivant
+        self.mu_sum = None   # somme des empreintes de la séance (signature du canal)
+        self.mu_n = 0
+
+    def _mu(self):
+        return self.mu_sum / self.mu_n if self.mu_n >= WARMUP else None
+
+    @staticmethod
+    def _unit(v):
+        n = np.linalg.norm(v)
+        return v / n if n else v
 
     # ------------------------------------------------------------------ orateur actif (page web)
     def ui_sample(self, ts: float, names):
@@ -94,9 +112,14 @@ class Diarizer:
         return e / n if n else None
 
     def _centroid(self, sid):
-        c = self.spk[sid]["sum"]
-        n = np.linalg.norm(c)
-        return c / n if n else c
+        """Centroïde d'un groupe, débarrassé de la signature commune du canal."""
+        v = self.spk[sid]
+        c, mu = v["sum"] / max(1, v["n"]), self._mu()
+        return self._unit(c if mu is None else c - mu)
+
+    def _center(self, emb):
+        mu = self._mu()
+        return self._unit(emb if mu is None else emb - mu)
 
     def _new(self) -> str:
         self.counter += 1
@@ -107,7 +130,8 @@ class Diarizer:
     def assign(self, emb: np.ndarray | None, dur: float, ui_name: str | None) -> str:
         """Attribue un intervenant à une phrase (empreinte + nom affiché)."""
         sid = None
-        scored = [(float(emb @ self._centroid(k)), k) for k, v in self.spk.items()
+        ce = self._center(emb) if emb is not None else None
+        scored = [(float(ce @ self._centroid(k)), k) for k, v in self.spk.items()
                   if emb is not None and v["sum"] is not None]
         if ui_name:
             # une même voix ne parle pas depuis deux appareils : on écarte les voix déjà associées
@@ -118,19 +142,21 @@ class Diarizer:
             if bid and best >= NEW_T:
                 sid = bid
             elif ui_name and (k := self._by_name(ui_name)) and \
-                    (self.spk[k]["sum"] is None or float(emb @ self._centroid(k)) >= NAME_MERGE_T):
+                    (self.spk[k]["sum"] is None or float(ce @ self._centroid(k)) >= NAME_MERGE_T):
                 sid = k  # voix un peu différente (micro, ton) mais même orateur affiché
             else:
                 sid = self._new()
             v = self.spk[sid]
             v["sum"] = emb.copy() if v["sum"] is None else v["sum"] + emb
             v["n"] += 1
+            self.mu_sum = emb.copy() if self.mu_sum is None else self.mu_sum + emb
+            self.mu_n += 1
         else:  # phrase trop courte ou pas de modèle : nom affiché, sinon meilleure voix, sinon précédent
             if ui_name:
                 sid = self._by_name(ui_name)
                 if sid is None and self.extractor is None:
                     sid = self._new()
-            if sid is None and bid and best >= 0.35:
+            if sid is None and bid and best >= NEW_T:
                 sid = bid
             if sid is None:
                 sid = self.last_id if self.last_id in self.spk else (next(iter(self.spk), None) or self._new())

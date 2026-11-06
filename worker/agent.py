@@ -19,9 +19,10 @@ from pydantic import BaseModel
 
 import analyst
 from audio_bridge import AudioBridge
-from meetings import PLATFORMS, SPEAKER_DEBUG_JS, Browser, active_speakers, clean_name, detect_platform
+from meetings import PLATFORMS, SPEAKER_DEBUG_JS, Browser, active_speakers, clean_name, detect_platform, unwrap_url
 from recorder import Recorder, _slug
-from transcriber import Transcriber, rename_in_doc, save_doc, to_markdown
+import slides as slides_mod
+from transcriber import API as AI_API, Transcriber, rename_in_doc, save_doc, to_markdown
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger("agent")
@@ -49,6 +50,7 @@ speaker_task: asyncio.Task | None = None
 bot_name: str = BOT_NAME
 REPORT_AUTO = os.environ.get("REPORT_AUTO", "1") == "1"
 reports: dict[str, dict] = {}   # stem -> {state: running|done|error|skipped, step, started, error}
+slides_jobs: dict[str, dict] = {}   # stem -> lecture des diapositives après coup {state, step, n, error}
 
 app = FastAPI(title="webconf-worker")
 
@@ -204,13 +206,34 @@ def _start_speaker_loop():
 
 async def _speaker_loop():
     """Relève ~4 fois/s l'orateur actif affiché par la plateforme (pour nommer les voix)."""
+    last_dbg, shots = time.time(), []
     while transcriber.active:
         try:
             if state["state"] == "in_meeting" and browser.ctx:
-                transcriber.ui_sample(await active_speakers(await browser.page()))
+                page = await browser.page()
+                transcriber.ui_sample(await active_speakers(page))
+                # Des participants parlent mais aucun nom n'est relevé (interface de la plateforme
+                # changée ?) : instantanés des éléments « parole » de la page, gardés à côté de la
+                # réunion (<stem>.speakerdebug.json) pour adapter SPEAKER_JS
+                if time.time() - last_dbg > 30 and len(shots) < 6 and not transcriber.diar.ui_active \
+                        and transcriber.meeting_speech_since(20):
+                    last_dbg = time.time()
+                    shots.append({"at": dt.datetime.now().astimezone().isoformat(), "url": page.url[:200],
+                                  **await _speaker_candidates(page)})
+                    transcriber.save_extra("speakerdebug", {"platform": state["platform"], "snapshots": shots})
         except Exception as e:
             log.debug("speaker probe: %s", e)
         await asyncio.sleep(0.25)
+
+
+async def _speaker_candidates(page) -> dict:
+    cands = []
+    for f in page.frames:
+        try:
+            cands += [{"frame": f.url[:80], **c} for c in await f.evaluate(SPEAKER_DEBUG_JS)]
+        except Exception:
+            pass
+    return {"active": await active_speakers(page), "candidates": cands[:80]}
 
 
 def _site(url: str, platform: str) -> str:
@@ -253,6 +276,7 @@ async def join(req: JoinReq):
     global join_task, watch_task
     if state["state"] in ("joining", "lobby", "in_meeting"):
         raise HTTPException(409, f"worker occupé ({state['state']})")
+    req.url = unwrap_url(req.url)   # lien safelinks / redirection Google : on rejoint le vrai lien
     platform = req.platform if req.platform in ("teams", "zoom", "web", "open") else detect_platform(req.url)
     leave_at = None
     if req.duration_min:
@@ -449,6 +473,70 @@ async def debug_speakers():
             "recent": transcriber.diar.ui[-20:], "speakers": transcriber.labels()}
 
 
+@app.get("/transcript/slides", dependencies=[Depends(auth)])
+async def transcript_slides(after: int = 0):
+    """Diapositives lues à l'écran pendant la réunion en cours (après les `after` premières)."""
+    return transcriber.slides_after(max(0, after))
+
+
+@app.get("/slides/{stem}/{n}", dependencies=[Depends(auth)])
+async def slide_image(stem: str, n: int):
+    p = recorder.dir / f"{os.path.basename(stem)}.slide-{n:03d}.jpg"
+    if not p.exists():
+        raise HTTPException(404)
+    return FileResponse(p, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
+
+
+async def _slides_job(stem: str):
+    """Lit après coup les diapositives d'une réunion enregistrée (images de la vidéo)."""
+    job = slides_jobs[stem]
+    try:
+        mp4, tp = recorder.dir / (stem + ".mp4"), recorder.dir / (stem + ".transcript.json")
+        rmeta_p = recorder.dir / (stem + ".mp4.json")
+        rmeta = json.loads(rmeta_p.read_text()) if rmeta_p.exists() else {}
+        try:
+            rec_t0 = dt.datetime.fromisoformat(rmeta["started_at"]).timestamp()
+        except (KeyError, ValueError):
+            rec_t0 = mp4.stat().st_mtime
+        doc = json.loads(tp.read_text()) if tp.exists() else None
+        offset = (doc.get("t0") or rec_t0) - rec_t0 if doc else 0.0   # temps vidéo -> temps transcription
+        dur = recorder._duration(rmeta, False) or 0
+        for old in recorder.dir.glob(f"{stem}.slide-*.jpg"):
+            old.unlink(missing_ok=True)
+        found: list = []
+        reader = slides_mod.SlideReader(transcriber.http, AI_API, recorder.dir / stem, found,
+                                        on_change=lambda: job.update(n=len(found)))
+        await reader.from_video(mp4, offset, progress=lambda tv: job.update(
+            step=f"{int(tv // 60)} min" + (f" sur {int(dur // 60)}" if dur else "")))
+        doc = json.loads(tp.read_text()) if tp.exists() else {   # relu : renommages faits entre-temps
+            "meta": {k: rmeta.get(k) for k in ("title", "platform", "url", "site", "started_at", "ended_at")},
+            "t0": rec_t0, "speakers": {}, "paragraphs": [], "raw": []}
+        doc["slides"] = found
+        save_doc(recorder.dir / stem, doc)
+        job.update(state="done", step=None, n=len(found), error=reader.error if not found else None)
+        log.info("diapositives %s : %d", stem, len(found))
+    except Exception as e:
+        log.exception("diapositives %s", stem)
+        job.update(state="error", step=None, error=str(e)[:300])
+
+
+@app.post("/recordings/{name}/slides", dependencies=[Depends(auth)])
+async def recording_slides(name: str):
+    """(Re)lit les diapositives d'un enregistrement ; ensuite, régénérer le compte rendu pour en tenir compte."""
+    stem = recorder.stem(name)
+    if not (recorder.dir / (stem + ".mp4")).exists():
+        raise HTTPException(404, "pas de vidéo")
+    if not transcriber.enabled:
+        raise HTTPException(400, "clé OVH AI Endpoints absente")
+    if transcriber.active and transcriber.base and transcriber.base.name == stem:
+        raise HTTPException(409, "réunion en cours : les diapositives sont déjà lues en direct")
+    if (slides_jobs.get(stem) or {}).get("state") == "running":
+        raise HTTPException(409, "lecture des diapositives déjà en cours")
+    slides_jobs[stem] = {"state": "running", "step": "démarrage", "n": 0, "error": None, "started": time.time()}
+    asyncio.create_task(_slides_job(stem))
+    return slides_jobs[stem]
+
+
 @app.get("/transcript", dependencies=[Depends(auth)])
 async def transcript_live(after: int = 0):
     """Transcription en direct : paragraphes mis en forme après `after` + lignes brutes en attente."""
@@ -473,6 +561,7 @@ async def recordings():
         stem = recorder.stem(x["name"])
         x["report"] = (recorder.dir / (stem + ".report.json")).exists()
         x["report_job"] = reports.get(stem)
+        x["slides_job"] = slides_jobs.get(stem)
     return items
 
 

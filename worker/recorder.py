@@ -144,9 +144,11 @@ class Recorder:
         t = self.transcript_path(name)
         if not p and not t:
             return False
-        extras = [self.dir / (stem + ".transcript.json"), self.dir / (stem + ".md"), self.dir / (stem + ".report.json")]
+        extras = [self.dir / (stem + ".transcript.json"), self.dir / (stem + ".md"), self.dir / (stem + ".report.json"),
+                  self.dir / (stem + ".speakerdebug.json")]
         if p:
             extras += [p, Path(str(p) + ".json"), Path(str(p) + ".log"), Path(str(p) + ".jpg")]
+        extras += list(self.dir.glob(f"{stem}.slide-*.jpg"))   # captures des diapositives
         for extra in extras:
             extra.unlink(missing_ok=True)
         return True

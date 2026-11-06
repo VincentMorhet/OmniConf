@@ -134,9 +134,9 @@ Mot de passe : `ADMIN_PASSWORD` dans `/etc/webconf/control.env` sur webconf-ctl.
 | `TRANSCRIPT_ASR_MODEL` | `whisper-large-v3` | `whisper-large-v3-turbo` est plus rapide mais moins fidèle |
 | `TRANSCRIPT_FORMAT_EVERY` | `20` | secondes entre deux passes de mise en forme |
 | `TRANSCRIPT_VAD_DB` | `-45` | seuil de détection de parole (dBFS) |
-| `TRANSCRIPT_SPK_NEW` | `0.50` | similarité de voix sous laquelle une nouvelle voix est créée (monter = plus de voix distinctes) |
-| `TRANSCRIPT_SPK_MERGE` | `0.62` | similarité au-dessus de laquelle deux voix sont fusionnées |
-| `TRANSCRIPT_SPK_MODEL` | `/opt/webconf/models/wespeaker_en_voxceleb_resnet34_LM.onnx` | modèle d'empreinte vocale (téléchargé par `install-worker.sh`) |
+| `TRANSCRIPT_SPK_NEW` | `0.23` | similarité de voix (empreintes centrées sur la moyenne de la séance) sous laquelle une nouvelle voix est créée (monter = plus de voix distinctes) |
+| `TRANSCRIPT_SPK_MERGE` | `0.48` | similarité au-dessus de laquelle deux voix sont fusionnées |
+| `TRANSCRIPT_SPK_MODEL` | `/opt/webconf/models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx` | modèle d'empreinte vocale (dans l'image ; téléchargé par `install-worker.sh` sur VM). Réglage évalué avec `tests/diar_real_eval.py` |
 | `ANALYSIS_EVERY` | `300` | secondes entre deux points d'étape |
 | `ANALYSIS_MODEL` | `Qwen3.8-27B:low` | modèle des points d'étape (`:none`/`:low`/`:medium`/`:high` = niveau de réflexion) |
 | `REPORT_MODELS` | `Qwen3.8-27B:low,Qwen3.5-397B-A17B:none,gpt-oss-120b:low` | rédacteurs indépendants du compte rendu |

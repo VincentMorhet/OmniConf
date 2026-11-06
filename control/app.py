@@ -31,7 +31,25 @@ DEFAULT_NAMES = json.loads(os.environ.get("DEFAULT_NAMES") or
 DEFAULT_DURATION = int(os.environ.get("DEFAULT_DURATION_MIN", "180"))
 
 
+def unwrap_url(url: str) -> str:
+    """Lien réel derrière un lien de protection (Outlook « safelinks ») ou une redirection Google."""
+    for _ in range(3):
+        try:
+            u = httpx.URL(url)
+        except Exception:
+            return url
+        host, q = (u.host or "").lower(), u.params
+        if host.endswith("safelinks.protection.outlook.com") and q.get("url"):
+            url = q["url"]
+        elif (host.startswith("www.google.") or host.startswith("google.")) and u.path == "/url" and (q.get("q") or q.get("url")):
+            url = q.get("q") or q.get("url")
+        else:
+            break
+    return url
+
+
 def detect_platform(url: str) -> str:
+    url = unwrap_url(url)
     host = (httpx.URL(url).host or "") if url.startswith("http") else ""
     if "teams.microsoft" in host or "teams.live" in host:
         return "teams"
@@ -144,6 +162,7 @@ async def start_meeting(m: StartMeeting) -> dict:
                 break
     if not target:
         raise HTTPException(409, "aucun worker libre")
+    m.url = unwrap_url(m.url)
     body = m.model_dump(exclude={"worker"})
     platform = m.platform or detect_platform(m.url)
     body["platform"] = platform
@@ -176,6 +195,23 @@ async def worker_action(name: str, action: str, request: Request):
 async def live_transcript(name: str, after: int = 0):
     r = await wcall(name, "GET", f"/transcript?after={after}", timeout=5)
     return JSONResponse(r.json(), headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/workers/{name}/slides", dependencies=AUTH)
+async def live_slides(name: str, after: int = 0):
+    r = await wcall(name, "GET", f"/transcript/slides?after={after}", timeout=5)
+    return JSONResponse(r.json(), headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/slides/{name}/{stem}/{n}", dependencies=AUTH)
+async def slide_image(name: str, stem: str, n: int):
+    r = await wcall(name, "GET", f"/slides/{stem}/{n}", timeout=10)
+    return Response(r.content, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
+
+
+@app.post("/api/recordings/{name}/{file}/slides", dependencies=AUTH)
+async def recording_slides(name: str, file: str):
+    return (await wcall(name, "POST", f"/recordings/{file}/slides")).json()
 
 
 @app.get("/api/workers/{name}/analysis", dependencies=AUTH)

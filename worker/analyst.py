@@ -209,14 +209,20 @@ def speaker_table(doc: dict) -> str:
 
 
 def transcript_text(doc: dict, mark_from: float | None = None) -> str:
+    """Transcription lisible par les modèles ; les diapositives lues à l'écran y sont insérées à leur heure."""
+    from slides import slides_text
     lab = labels(doc)
-    out, marked = [], False
+    items = []
     for p in paragraphs(doc):
-        if mark_from is not None and not marked and p["t"] >= mark_from:
+        sid = p.get("spk") or "?"
+        items.append((p["t"], f"[{fmt_t(p['t'])}] {{{sid}}} {lab.get(sid, sid)} : {p['text']}"))
+    items += [(t - 0.01, line) for t, line in slides_text(doc.get("slides"), fmt_t)]
+    out, marked = [], False
+    for t, line in sorted(items, key=lambda x: x[0]):
+        if mark_from is not None and not marked and t >= mark_from:
             out.append(f"\n===== NOUVEAU DEPUIS LE DERNIER POINT ({fmt_t(mark_from)}) =====")
             marked = True
-        sid = p.get("spk") or "?"
-        out.append(f"[{fmt_t(p['t'])}] {{{sid}}} {lab.get(sid, sid)} : {p['text']}")
+        out.append(line)
     return "\n".join(out)
 
 
@@ -261,7 +267,10 @@ def context_block(doc: dict) -> str:
     meta = doc.get("meta") or {}
     parts = [f"Titre saisi : {meta.get('title')}" if meta.get("title") else "",
              f"Plateforme : {meta.get('site') or meta.get('platform')}" if (meta.get("site") or meta.get("platform")) else "",
-             calendar_hint(doc), "Intervenants :\n" + speaker_table(doc)]
+             calendar_hint(doc), "Intervenants :\n" + speaker_table(doc),
+             ("Les lignes « [ÉCRAN PARTAGÉ] » décrivent ce qui était affiché à l'écran à ce moment (diapositive, "
+              "document) : utilise-les pour comprendre et compléter ce qui est dit (titres, chiffres, schémas), "
+              "sans les attribuer à un intervenant." if doc.get("slides") else "")]
     return "\n".join(p for p in parts if p)
 
 

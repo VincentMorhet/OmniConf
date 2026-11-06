@@ -16,8 +16,23 @@ from playwright.async_api import BrowserContext, Page, async_playwright
 log = logging.getLogger("meetings")
 
 
+def unwrap_url(url: str) -> str:
+    """Lien réel derrière un lien de protection (Outlook « safelinks ») ou une redirection Google."""
+    for _ in range(3):
+        u = urlparse(url)
+        host = (u.hostname or "").lower()
+        q = parse_qs(u.query)
+        if host.endswith("safelinks.protection.outlook.com") and q.get("url"):
+            url = q["url"][0]
+        elif (host.startswith("www.google.") or host.startswith("google.")) and u.path == "/url" and (q.get("q") or q.get("url")):
+            url = (q.get("q") or q.get("url"))[0]
+        else:
+            break
+    return url
+
+
 def detect_platform(url: str) -> str:
-    host = urlparse(url).hostname or ""
+    host = urlparse(unwrap_url(url)).hostname or ""
     if "teams.microsoft" in host or "teams.live" in host:
         return "teams"
     if "zoom.us" in host or "zoom.com" in host:

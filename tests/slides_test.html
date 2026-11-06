@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="fr"><head><meta charset="utf-8"><title>Présentation de test</title>
+<style>
+html, body { margin: 0; height: 100%; background: #f3f3f3; font: 22px "Segoe UI", sans-serif; color: #222; }
+#slide { position: absolute; inset: 40px 260px 40px 40px; background: #fff; box-shadow: 0 2px 12px #0002; padding: 50px 60px; }
+h1 { margin: 0 0 30px; color: #1f4e79; font-size: 44px; }
+li { margin: 12px 0; }
+table { border-collapse: collapse; margin-top: 20px; } td, th { border: 1px solid #999; padding: 8px 16px; }
+#tile { position: absolute; right: 40px; top: 40px; width: 180px; height: 110px; border-radius: 8px; background: #333; overflow: hidden; }
+#dot { position: absolute; width: 30px; height: 30px; border-radius: 50%; background: #6c6; }
+</style></head>
+<body><div id="slide"></div><div id="tile"><div id="dot"></div></div>
+<script>
+// 4 diapositives de 25 s ; une petite « vignette vidéo » animée dans le coin (ne doit pas déclencher de lecture)
+const S = [
+  `<h1>Déploiement du portail client</h1><ul><li>4 agences pilotes le 15 janvier</li><li>Généralisation aux 12 agences le 2 février</li><li>Comité de pilotage le 12 décembre</li></ul>`,
+  `<h1>Anomalies bloquantes</h1><ul><li>Authentification par carte à puce en mode kiosque</li><li>Synchronisation du compte client</li><li>Import des documents de plus de 5 Mo : plus de 40 s</li></ul>`,
+  `<h1>Budget de la phase pilote</h1><table><tr><th>Poste</th><th>Prévu</th><th>Consommé</th></tr><tr><td>Développement</td><td>120 000 €</td><td>104 000 €</td></tr><tr><td>Formation</td><td>60 000 €</td><td>38 000 €</td></tr><tr><td>Total</td><td>180 000 €</td><td>142 000 €</td></tr></table>`,
+  `<h1>Prochaines étapes</h1><ul><li>Corriger les 3 bloquantes avant le 20 décembre</li><li>Envoyer l'analyse de risques vendredi</li><li>Réunion de suivi le 28 novembre à 14 h</li></ul>`];
+let i = 0; const show = () => { document.getElementById("slide").innerHTML = S[i % S.length]; i++; };
+show(); setInterval(show, 25000);
+const d = document.getElementById("dot"); let a = 0;
+(function anim() { a += .05; d.style.left = 75 + Math.cos(a) * 60 + "px"; d.style.top = 40 + Math.sin(a) * 30 + "px"; requestAnimationFrame(anim); })();
+</script></body></html>

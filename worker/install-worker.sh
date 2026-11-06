@@ -21,11 +21,11 @@ rm -rf /opt/webconf/worker && cp -r "$SRC" /opt/webconf/worker
 [ -d /opt/webconf/venv ] || python3 -m venv /opt/webconf/venv
 /opt/webconf/venv/bin/pip install -q --upgrade pip
 /opt/webconf/venv/bin/pip install -q -r /opt/webconf/worker/requirements.txt
-# Modèle d'empreinte vocale (distinction des intervenants dans la transcription), ~26 Mo
+# Modèle d'empreinte vocale (distinction des intervenants dans la transcription) : CAM++ zh/en, ~28 Mo
 mkdir -p /opt/webconf/models
-SPK=/opt/webconf/models/wespeaker_en_voxceleb_resnet34_LM.onnx
+SPK=/opt/webconf/models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx
 [ -s "$SPK" ] || curl -fsSL -o "$SPK" \
-  https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/wespeaker_en_voxceleb_resnet34_LM.onnx \
+  https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx \
   || echo "ATTENTION : modèle d'empreinte vocale non téléchargé (intervenants non distingués par la voix)"
 chown -R bot:bot /srv/webconf
 

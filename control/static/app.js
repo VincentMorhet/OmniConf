@@ -111,8 +111,18 @@ $("#btnSchedule").onclick = async () => {
 // Nom affiché pré-rempli selon la plateforme (tant qu'il n'a pas été modifié à la main)
 const platOf = r => ["teams", "zoom"].includes(r.meta?.platform) ? r.meta.platform : "web";
 function siteOf(u) { try { return new URL(u).hostname.replace(/^www\./, ""); } catch (e) { return u; } }
+function unwrapUrl(u) {   // lien Outlook « safelinks » ou redirection Google -> vrai lien
+  for (let i = 0; i < 3; i++) {
+    try { const x = new URL(u), h = x.hostname.toLowerCase();
+      if (h.endsWith("safelinks.protection.outlook.com") && x.searchParams.get("url")) u = x.searchParams.get("url");
+      else if (/^(www\.)?google\./.test(h) && x.pathname === "/url" && (x.searchParams.get("q") || x.searchParams.get("url"))) u = x.searchParams.get("q") || x.searchParams.get("url");
+      else break;
+    } catch (e) { break; }
+  }
+  return u;
+}
 function detectPlatform(u) {
-  try { const h = new URL(u).hostname;
+  try { const h = new URL(unwrapUrl(u)).hostname;
     if (/teams\.(microsoft|live)/.test(h)) return "teams";
     if (/zoom\.(us|com)$/.test(h)) return "zoom";
     return "web";
@@ -181,7 +191,7 @@ function card(name) {
   bindSeek($(".an-body", el), (sec) => {   // clic sur un horodatage : retour à la transcription, au bon endroit
     const t = trState(name); t.view = "tr"; renderTr(name);
     const body = $(".tr-body", el); let best = null;
-    body.querySelectorAll("p").forEach(p => { if (+p.dataset.t <= sec + 1) best = p; });
+    body.querySelectorAll(":scope > p").forEach(p => { if (+p.dataset.t <= sec + 1) best = p; });
     if (best) { best.scrollIntoView({ block: "center" }); best.classList.add("hl"); setTimeout(() => best.classList.remove("hl"), 2500); }
   });
   $(".b-audio", el).onclick = () => sessions[name] ? stopAudio(name) : startAudio(name);
@@ -325,6 +335,27 @@ function paraEl(p, opts = {}) {
   paintSpk(el, opts.speakers, opts.aliases, p.speaker);
   return el;
 }
+// Diapositive lue à l'écran : carte insérée dans la transcription à son heure
+function slideEl(s, imgUrl, seek) {
+  const el = document.createElement("div"); el.className = "slide" + (s.repeat_of ? " again" : ""); el.dataset.t = s.t;
+  if (s.repeat_of) {   // retour sur une diapositive déjà montrée
+    el.innerHTML = `<a class="sl-img" href="${imgUrl}" target="_blank" title="Agrandir"><img loading="lazy" alt="" src="${imgUrl}"></a>
+      <div class="sl-body"><div class="sl-h"><span class="ts${seek ? " seek" : ""}">${fmtT(s.t)}</span> 🖥 retour à <b>${esc(s.titre || "la diapositive")}</b></div></div>`;
+    if (seek) el.querySelector(".ts").onclick = () => seek(s.t);
+    return el;
+  }
+  el.innerHTML = `<a class="sl-img" href="${imgUrl}" target="_blank" title="Agrandir"><img loading="lazy" alt="" src="${imgUrl}"></a>
+    <div class="sl-body"><div class="sl-h"><span class="ts${seek ? " seek" : ""}">${fmtT(s.t)}</span> 🖥 <b>${esc(s.titre || "Diapositive")}</b></div>
+    ${(s.texte || []).length ? "<ul>" + s.texte.map(x => `<li>${esc(String(x).replace(/^[•●▪◦·\-–*]\s*/, ""))}</li>`).join("") + "</ul>" : ""}
+    ${s.visuel ? `<p class="sl-v">${esc(s.visuel)}</p>` : ""}</div>`;
+  if (seek) el.querySelector(".ts").onclick = () => seek(s.t);
+  return el;
+}
+function insertByTime(box, el) {   // avant le premier élément plus tardif (paroles et diapositives mêlées)
+  const t = +el.dataset.t;
+  const after = [...box.children].find(x => x.dataset.t !== undefined && +x.dataset.t > t);
+  box.insertBefore(el, after || null);
+}
 function paintSpk(el, speakers, aliases, fallback) {
   const s = spkOf(speakers, aliases, el.dataset.spk);
   el.dataset.spk = s.id;
@@ -380,7 +411,7 @@ function renderTr(name) {
     return;
   }
   stEl.textContent = tr.error ? "⚠ " + tr.error
-    : tr.active ? `en direct · ${tr.paragraphs || 0} paragraphes · ${tr.n_speakers || 0} voix${tr.ui_speaker ? " · noms de la plateforme ✓" : ""}`
+    : tr.active ? `en direct · ${tr.paragraphs || 0} paragraphes · ${tr.n_speakers || 0} voix${tr.ui_speaker ? " · noms de la plateforme ✓" : ""}${tr.slides ? ` · 🖥 ${tr.slides} diapositive${tr.slides > 1 ? "s" : ""}` : ""}`
     : !tr.enabled ? "transcription non configurée" : tr.file ? "terminée" : "inactive";
 }
 async function pollTranscripts() {
@@ -396,7 +427,7 @@ async function pollTranscript(name) {
       const d = await api(`/api/workers/${name}/transcript?after=${t.n}`);
       const body = $(".tr-body", cards[name]);
       if (d.file !== t.file || d.total < t.n) {   // nouvelle transcription : on repart de zéro
-        body.innerHTML = ""; t.file = d.file;
+        body.innerHTML = ""; t.file = d.file; t.slN = 0;
         if (t.n) { t.n = 0; return; }
       }
       const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
@@ -408,12 +439,21 @@ async function pollTranscript(name) {
         t.speakers = r.speakers; repaint(); });
       const o = { speakers: d.speakers, aliases: d.aliases, rename };
       body.querySelectorAll(".pending").forEach(x => x.remove());
-      d.paragraphs.forEach(p => body.appendChild(paraEl(p, o)));
+      d.paragraphs.forEach(p => insertByTime(body, paraEl(p, o)));
       t.n += d.paragraphs.length;
-      d.pending.forEach(p => body.appendChild(paraEl(p, { ...o, pending: true })));
+      d.pending.forEach(p => insertByTime(body, paraEl(p, { ...o, pending: true })));
+      if ((d.slides || 0) > (t.slN || 0)) {   // nouvelles diapositives lues à l'écran
+        try {
+          const r = await api(`/api/workers/${name}/slides?after=${t.slN || 0}`);
+          if (r.file === d.file) {
+            r.slides.forEach(s => insertByTime(body, slideEl(s, `/api/slides/${encodeURIComponent(name)}/${encodeURIComponent(r.file)}/${s.repeat_of || s.n}`)));
+            t.slN = (t.slN || 0) + r.slides.length;
+          }
+        } catch (e) { }
+      }
       const repaint = () => {   // noms et fusions de voix peuvent changer : on repeint tout
         const used = new Set();
-        body.querySelectorAll("p").forEach(el => { paintSpk(el, t.speakers, t.aliases); used.add(el.dataset.spk); });
+        body.querySelectorAll(":scope > p").forEach(el => { paintSpk(el, t.speakers, t.aliases); used.add(el.dataset.spk); });
         renderChips($(".tr-spk", cards[name]), t.speakers, used, rename);
         paintAnalysis(name);
       };
@@ -983,6 +1023,8 @@ async function openPlayer(url, title, file, o = { video: true }) {
   player = { url, doc: null, rep: null, seek: null, view: o.transcript ? (o.tab || "tr") : null, title };
   $("#playerTitle").textContent = title;
   $("#playerDel").disabled = !!o.recording; $("#playerDel").title = o.recording ? "Enregistrement en cours" : "Supprimer cet enregistrement";
+  $("#playerSlides").classList.toggle("hidden", !o.video || !!o.recording);
+  $("#playerSlides").disabled = false; $("#playerSlides").textContent = "🖥 Lire les diapositives";
   $("#playerDl").classList.toggle("hidden", !o.video);
   $("#playerDl").href = url + "?download=1"; $("#playerDl").setAttribute("download", file);
   $("#playerMd").classList.toggle("hidden", !o.transcript);
@@ -997,7 +1039,7 @@ async function openPlayer(url, title, file, o = { video: true }) {
   if (o.video) { v.src = url; applySink(v).then(() => v.play().catch(() => { })); }
   if (!o.transcript) return;
   const seek = o.video ? (t) => { v.currentTime = Math.max(0, t - 1); v.play().catch(() => { }); }
-    : (t) => { showPlayerView("tr"); let best = null; box.querySelectorAll("p").forEach(p => { if (+p.dataset.t <= t + 1) best = p; });
+    : (t) => { showPlayerView("tr"); let best = null; box.querySelectorAll(":scope > p").forEach(p => { if (+p.dataset.t <= t + 1) best = p; });
                if (best) { best.scrollIntoView({ block: "center" }); best.classList.add("hl"); setTimeout(() => best.classList.remove("hl"), 2500); } };
   player.seek = seek;
   try {
@@ -1006,7 +1048,7 @@ async function openPlayer(url, title, file, o = { video: true }) {
     player.doc = doc;
     const repaint = () => {
       const used = new Set();
-      box.querySelectorAll("p").forEach(el => { paintSpk(el, doc.speakers); used.add(el.dataset.spk); });
+      box.querySelectorAll(":scope > p").forEach(el => { paintSpk(el, doc.speakers); used.add(el.dataset.spk); });
       renderChips($("#playerSpk"), doc.speakers, used, rename);
       paintPlayerCr(); paintPlayerAn();
     };
@@ -1014,6 +1056,9 @@ async function openPlayer(url, title, file, o = { video: true }) {
       const r = await api(url + "/speakers", { method: "PATCH", json: { id: sid, name: nm } });
       doc.speakers = r.speakers; repaint(); toast("Intervenant renommé (transcription et compte rendu mis à jour)"); });
     (doc.paragraphs || []).forEach(p => box.appendChild(paraEl(p, { seek, speakers: doc.speakers, rename })));
+    const [, w, f] = url.match(/^\/api\/recordings\/([^/]+)\/([^/?]+)/) || [];
+    const stem = decodeURIComponent(f || "").replace(/\.(mp4|transcript\.json)$/, "");
+    (doc.slides || []).forEach(s => insertByTime(box, slideEl(s, `/api/slides/${w}/${encodeURIComponent(stem)}/${s.repeat_of || s.n}`, seek)));
     repaint();
     if (!box.children.length) box.textContent = "Aucune parole transcrite.";
     $('#playerTabs [data-v="an"]').classList.toggle("hidden", !doc.analysis?.state);
@@ -1083,6 +1128,29 @@ function closePlayer() {
 }
 $("#player .close").onclick = closePlayer;
 $("#playerDel").onclick = async () => { if (await deleteRecording(player.url, player.title)) closePlayer(); };
+// Réunion passée : lecture des diapositives à partir de la vidéo (modèle d'image d'OVH)
+$("#playerSlides").onclick = async () => {
+  const url = player.url, b = $("#playerSlides");
+  if (!confirm("Lire les diapositives et documents partagés dans cette vidéo ?\n\nL'IA retranscrit leur texte et décrit les schémas ; ils s'insèrent dans la transcription. Compter environ 1 minute par quart d'heure de réunion. Ensuite, « ↻ Régénérer » le compte rendu pour qu'il en tienne compte.")) return;
+  try { await api(url + "/slides", { method: "POST" }); } catch (e) { return toast(e.message, 5000); }
+  b.disabled = true;
+  const [, w, f] = url.match(/^\/api\/recordings\/([^/]+)\/([^/?]+)/);
+  const poll = async () => {
+    if (player.url !== url) return;
+    try {
+      const r = (await api("/api/recordings")).find(x => x.worker === decodeURIComponent(w) && x.name === decodeURIComponent(f));
+      const j = r?.slides_job || {};
+      if (j.state === "running") { b.textContent = `⏳ ${j.step || ""} · ${j.n || 0} diapositive${(j.n || 0) > 1 ? "s" : ""}`; return setTimeout(poll, 4000); }
+      b.disabled = false; b.textContent = "🖥 Lire les diapositives";
+      if (j.state === "error") return toast("Lecture des diapositives : " + (j.error || "échec"), 6000);
+      toast(j.n ? `${j.n} diapositive${j.n > 1 ? "s" : ""} lue${j.n > 1 ? "s" : ""} : elles sont dans la transcription. Régénérez le compte rendu pour qu'il en tienne compte.` : "Aucune diapositive ni document partagé trouvé dans cette vidéo.", 7000);
+      const r2 = recItems.find(x => x.worker === decodeURIComponent(w) && x.name === decodeURIComponent(f)) || r;
+      if (r2) playRec({ ...r2, transcript: true }, "tr");
+      loadRecordings();
+    } catch (e) { setTimeout(poll, 6000); }
+  };
+  poll();
+};
 $("#player").onclick = (e) => { if (e.target.id === "player") closePlayer(); };
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeMenus(); closePlayer(); } });
 
