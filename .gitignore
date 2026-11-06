@@ -1,0 +1,23 @@
+# Secrets (ne jamais versionner)
+.ovh_token
+.agent_token
+.gitlab_token
+*.env
+.env*
+*.key
+*.pem
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Données et sorties de tests
+*.mp4
+*.webm
+*.wav
+*.png
+*.log
+recordings/
+out*/

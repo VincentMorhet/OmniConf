@@ -1,0 +1,16 @@
+[Unit]
+Description=webconf - agent worker (Teams/Zoom, enregistrement, pont audio)
+After=webconf-xvfb.service webconf-pulse.service network-online.target
+Requires=webconf-xvfb.service webconf-pulse.service
+[Service]
+User=bot
+EnvironmentFile=/etc/webconf/worker.env
+Environment=XDG_RUNTIME_DIR=/run/user/1500
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+WorkingDirectory=/opt/webconf/worker
+ExecStartPre=/bin/sleep 2
+ExecStart=/opt/webconf/venv/bin/uvicorn agent:app --host 0.0.0.0 --port 8001
+Restart=always
+RestartSec=3
+[Install]
+WantedBy=multi-user.target

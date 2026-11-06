@@ -1,0 +1,201 @@
+"""Enregistrement écran (Xvfb) + audio réunion + voix de l'utilisateur via ffmpeg."""
+import asyncio
+import datetime as dt
+import json
+import logging
+import os
+import re
+import signal
+from pathlib import Path
+
+log = logging.getLogger("recorder")
+
+
+def _slug(s: str) -> str:
+    s = re.sub(r"[^A-Za-z0-9._-]+", "-", s or "").strip("-")
+    return s[:60] or "reunion"
+
+
+class Recorder:
+    def __init__(self, record_dir: str, display: str, size: str,
+                 fps: float = float(os.environ.get("RECORD_FPS", "2")),
+                 crf: int = int(os.environ.get("RECORD_CRF", "32")),
+                 audio_bitrate: str = os.environ.get("RECORD_AUDIO_BITRATE", "192k")):
+        self.crf = crf
+        self.audio_bitrate = audio_bitrate
+        self.dir = Path(record_dir)
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.display = display
+        self.size = size
+        self.fps = fps
+        self.proc = None
+        self.file: Path | None = None
+        self.meta: dict = {}
+        self.started_at: dt.datetime | None = None
+
+    @property
+    def active(self) -> bool:
+        return self.proc is not None and self.proc.returncode is None
+
+    async def start(self, title: str, meta: dict):
+        if self.active:
+            return self.file.name
+        self.started_at = dt.datetime.now().astimezone()
+        name = f"{self.started_at:%Y%m%d-%H%M%S}_{_slug(title)}.mp4"
+        self.file = self.dir / name
+        self.meta = {**meta, "title": title, "started_at": self.started_at.isoformat()}
+        gop = max(2, round(self.fps * 10))  # une image clé toutes les ~10 s (navigation dans la vidéo)
+        pulse_in = ["-thread_queue_size", "4096", "-f", "pulse", "-sample_rate", "48000", "-channels", "2",
+                    "-fragment_size", "3840"]
+        cmd = [
+            "ffmpeg", "-y", "-loglevel", "warning", "-nostdin",
+            # Vidéo : 2 i/s par défaut, compressée au maximum (contenu quasi statique : partage d'écran, visages)
+            "-thread_queue_size", "64", "-f", "x11grab", "-draw_mouse", "0",
+            "-framerate", str(self.fps), "-video_size", self.size, "-i", self.display,
+            # Audio : son de la réunion + ta voix, 48 kHz stéréo
+            *pulse_in, "-i", "meeting_out.monitor",
+            *pulse_in, "-i", "user_in.monitor",
+            "-filter_complex",
+            "[1:a]aresample=async=1:first_pts=0[a1];[2:a]aresample=async=1:first_pts=0[a2];"
+            "[a1][a2]amix=inputs=2:duration=longest:normalize=0,alimiter=limit=0.97:level=false[a]",
+            "-map", "0:v", "-map", "[a]",
+            "-c:v", "libx264", "-preset", "slow", "-tune", "stillimage", "-crf", str(self.crf),
+            "-pix_fmt", "yuv420p", "-g", str(gop), "-bf", "0",
+            "-c:a", "aac", "-b:a", self.audio_bitrate, "-ar", "48000", "-ac", "2",
+            # MP4 fragmenté : le fichier reste lisible même si ffmpeg est tué
+            "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
+            str(self.file),
+        ]
+        log.info("recording -> %s", self.file)
+        self.proc = await asyncio.create_subprocess_exec(*cmd, stderr=open(str(self.file) + ".log", "w"))
+        self._write_meta()
+        return name
+
+    async def stop(self):
+        if not self.active:
+            return None
+        self.proc.send_signal(signal.SIGINT)
+        try:
+            await asyncio.wait_for(self.proc.wait(), 15)
+        except asyncio.TimeoutError:
+            self.proc.kill()
+            await self.proc.wait()
+        self.meta["ended_at"] = dt.datetime.now().astimezone().isoformat()
+        self._write_meta()
+        name = self.file.name
+        self.proc = None
+        return name
+
+    def _write_meta(self):
+        if self.file:
+            Path(str(self.file) + ".json").write_text(json.dumps(self.meta, ensure_ascii=False, indent=1))
+
+    @staticmethod
+    def stem(name: str) -> str:
+        name = os.path.basename(name)
+        for ext in (".transcript.json", ".report.json", ".mp4", ".md"):
+            if name.endswith(ext):
+                return name[: -len(ext)]
+        return name
+
+    def transcript_path(self, name: str, kind: str = "json") -> Path | None:
+        p = self.dir / (self.stem(name) + (".transcript.json" if kind == "json" else ".md"))
+        return p if p.exists() else None
+
+    def list(self) -> list[dict]:
+        out = []
+        # transcriptions sans vidéo (réunion transcrite sans enregistrement)
+        for t in self.dir.glob("*.transcript.json"):
+            if (self.dir / (self.stem(t.name) + ".mp4")).exists():
+                continue
+            try:
+                meta = json.loads(t.read_text()).get("meta", {})
+            except ValueError:
+                meta = {}
+            st = t.stat()
+            out.append({"name": t.name, "kind": "transcript", "transcript": True, "size": st.st_size,
+                        "mtime": st.st_mtime, "meta": meta, "recording": False,
+                        "duration": self._duration(meta, False)})
+        for f in sorted(self.dir.glob("*.mp4"), reverse=True):
+            meta = {}
+            mf = Path(str(f) + ".json")
+            if mf.exists():
+                try:
+                    meta = json.loads(mf.read_text())
+                except ValueError:
+                    pass
+            st = f.stat()
+            live = self.active and self.file == f
+            out.append({"name": f.name, "kind": "video", "size": st.st_size, "mtime": st.st_mtime, "meta": meta,
+                        "recording": live, "duration": self._duration(meta, live),
+                        "transcript": (self.dir / (self.stem(f.name) + ".transcript.json")).exists()})
+        return sorted(out, key=lambda x: -x["mtime"])
+
+    def path(self, name: str) -> Path | None:
+        p = (self.dir / os.path.basename(name))
+        return p if p.suffix == ".mp4" and p.exists() else None
+
+    def delete(self, name: str, busy_stems: tuple = ()) -> bool:
+        """Supprime la vidéo et/ou la transcription associée (sauf si en cours)."""
+        stem = self.stem(name)
+        if stem in busy_stems or (self.active and self.stem(self.file.name) == stem):
+            return False
+        p = self.path(name)
+        t = self.transcript_path(name)
+        if not p and not t:
+            return False
+        extras = [self.dir / (stem + ".transcript.json"), self.dir / (stem + ".md"), self.dir / (stem + ".report.json")]
+        if p:
+            extras += [p, Path(str(p) + ".json"), Path(str(p) + ".log"), Path(str(p) + ".jpg")]
+        for extra in extras:
+            extra.unlink(missing_ok=True)
+        return True
+
+    @staticmethod
+    def _duration(meta: dict, live: bool) -> float | None:
+        try:
+            start = dt.datetime.fromisoformat(meta["started_at"])
+            end = dt.datetime.now().astimezone() if live else dt.datetime.fromisoformat(meta["ended_at"])
+            return round((end - start).total_seconds())
+        except (KeyError, ValueError, TypeError):
+            return None
+
+    def rename(self, name: str, title: str) -> bool:
+        """Change le titre affiché (métadonnées), pas le nom du fichier."""
+        t = self.transcript_path(name)
+        if t:
+            try:
+                doc = json.loads(t.read_text())
+                doc.setdefault("meta", {})["title"] = title
+                t.write_text(json.dumps(doc, ensure_ascii=False, indent=1))
+            except ValueError:
+                pass
+        p = self.path(name)
+        if not p:
+            return bool(t)
+        mf = Path(str(p) + ".json")
+        meta = json.loads(mf.read_text()) if mf.exists() else {}
+        meta["title"] = title
+        mf.write_text(json.dumps(meta, ensure_ascii=False, indent=1))
+        if self.active and p == self.file:
+            self.meta["title"] = title
+        return True
+
+    async def thumbnail(self, name: str) -> Path | None:
+        """Miniature JPEG (image à ~10 s), générée une fois puis mise en cache."""
+        p = self.path(name)
+        if not p:
+            return None
+        thumb = Path(str(p) + ".jpg")
+        live = self.active and p == self.file
+        if thumb.exists() and not live:
+            return thumb
+        for ss in ("10", "1", "0"):
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-loglevel", "error", "-y", "-ss", ss, "-i", str(p), "-frames:v", "1",
+                "-vf", "scale=320:-2", "-q:v", "5", str(thumb),
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            await proc.wait()
+            if thumb.exists() and thumb.stat().st_size > 0:
+                return thumb
+        return None

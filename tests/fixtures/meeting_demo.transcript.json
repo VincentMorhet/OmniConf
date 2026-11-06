@@ -1,0 +1,471 @@
+{
+ "meta": {
+  "title": "Point avancement portail client",
+  "platform": "teams",
+  "url": "https://teams.microsoft.com/l/meetup-join/x",
+  "started_at": "2026-11-20T10:00:00+01:00",
+  "ended_at": "2026-11-20T10:06:10+01:00"
+ },
+ "t0": 0,
+ "speakers": {
+  "S1": {
+   "label": "Alice Martin",
+   "auto": "Alice Martin",
+   "name": null,
+   "color": 1,
+   "source": "ui"
+  },
+  "S2": {
+   "label": "Bruno Petit",
+   "auto": "Bruno Petit",
+   "name": null,
+   "color": 2,
+   "source": "ui"
+  },
+  "S3": {
+   "label": "Salle Nord",
+   "auto": "Salle Nord",
+   "name": null,
+   "color": 3,
+   "source": "ui"
+  },
+  "S4": {
+   "label": "Salle Nord (2)",
+   "auto": "Salle Nord (2)",
+   "name": null,
+   "color": 4,
+   "source": "ui"
+  },
+  "ME": {
+   "label": "Moi",
+   "auto": "Moi",
+   "name": null,
+   "color": 0,
+   "source": "me"
+  }
+ },
+ "paragraphs": [
+  {
+   "id": 1,
+   "t": 5.0,
+   "spk": "S1",
+   "text": "Bonjour à tous, merci d'être là. L'objet de la réunion c'est le point d'avancement sur le déploiement du nouveau portail client dans les agences, et la préparation du comité de pilotage du 12 décembre."
+  },
+  {
+   "id": 2,
+   "t": 21.0,
+   "spk": "S2",
+   "text": "Bonjour. Côté technique on a terminé la recette fonctionnelle la semaine dernière, sur 214 cas de test on en a 197 qui passent, donc il reste 17 anomalies dont 3 bloquantes."
+  },
+  {
+   "id": 3,
+   "t": 40.0,
+   "spk": "S1",
+   "text": "Les 3 bloquantes, c'est quoi exactement ?"
+  },
+  {
+   "id": 4,
+   "t": 44.0,
+   "spk": "S2",
+   "text": "La première c'est l'authentification par carte à puce qui échoue sur les postes Windows 11 en mode kiosque. La deuxième c'est la synchronisation avec le CRM quand le client a un identifiant non vérifié, on a un rejet silencieux. Et la troisième c'est un problème de performance, l'envoi des documents de plus de 5 mégas prend plus de 40 secondes."
+  },
+  {
+   "id": 5,
+   "t": 75.0,
+   "spk": "S3",
+   "text": "Pour l'identifiant non vérifié, on a eu le même retour de l'agence de Lille. Il faudrait que l'interface affiche un message clair au conseiller plutôt qu'un rejet silencieux."
+  },
+  {
+   "id": 6,
+   "t": 90.0,
+   "spk": "S1",
+   "text": "D'accord. Camille, est-ce que tu peux nous dire où on en est côté certification de sécurité ?"
+  },
+  {
+   "id": 7,
+   "t": 97.0,
+   "spk": "ME",
+   "text": "Oui, le dossier de certification a été déposé le 3 novembre. On attend un retour sous six semaines en théorie, donc mi-décembre. Par contre ils nous ont demandé une pièce complémentaire, l'analyse de risques RGPD mise à jour, que je n'ai pas encore."
+  },
+  {
+   "id": 8,
+   "t": 125.0,
+   "spk": "S4",
+   "text": "L'analyse de risques c'est nous qui l'avons, on peut te l'envoyer d'ici vendredi."
+  },
+  {
+   "id": 9,
+   "t": 132.0,
+   "spk": "ME",
+   "text": "Parfait, merci."
+  },
+  {
+   "id": 10,
+   "t": 135.0,
+   "spk": "S1",
+   "text": "Bon. Sur le calendrier, initialement on visait une mise en production le 15 janvier pour la première vague de 12 agences."
+  },
+  {
+   "id": 11,
+   "t": 148.0,
+   "spk": "S2",
+   "text": "Honnêtement, avec 3 bloquantes et la certification pas encore obtenue, le 15 janvier c'est très risqué. Je proposerais plutôt le 2 février."
+  },
+  {
+   "id": 12,
+   "t": 161.0,
+   "spk": "S3",
+   "text": "Nous on a des agences qui sont prêts et qui attendent, ça fait déjà deux reports. Si on repousse encore, on risque de perdre l'adhésion des équipes terrain."
+  },
+  {
+   "id": 13,
+   "t": 178.0,
+   "spk": "S1",
+   "text": "Je comprends. Proposition : on maintient le 15 janvier mais seulement pour 4 agences pilotes, et la vague complète des 12 agences passe au 2 février. Ça vous va ?"
+  },
+  {
+   "id": 14,
+   "t": 192.0,
+   "spk": "S2",
+   "text": "Ça me va si les 3 bloquantes sont corrigées avant le 20 décembre."
+  },
+  {
+   "id": 15,
+   "t": 198.0,
+   "spk": "S3",
+   "text": "Oui pour nous c'est acceptable."
+  },
+  {
+   "id": 16,
+   "t": 201.0,
+   "spk": "S1",
+   "text": "Donc c'est acté : 4 agences pilotes au 15 janvier, généralisation aux 12 agences le 2 février."
+  },
+  {
+   "id": 17,
+   "t": 210.0,
+   "spk": "S2",
+   "text": "Pour la correction des bloquantes, je mets deux développeurs dessus dès lundi. Pour la carte à puce je dois quand même vérifier avec l'éditeur du middleware, ça dépend de leur version."
+  },
+  {
+   "id": 18,
+   "t": 228.0,
+   "spk": "S1",
+   "text": "Tu peux me faire un point écrit sur les bloquantes d'ici mercredi prochain ?"
+  },
+  {
+   "id": 19,
+   "t": 233.0,
+   "spk": "S2",
+   "text": "Oui, mercredi prochain."
+  },
+  {
+   "id": 20,
+   "t": 236.0,
+   "spk": "S4",
+   "text": "Et pour la formation des conseillers, on avait prévu des sessions en visio. Il nous faudrait le support de formation finalisé."
+  },
+  {
+   "id": 21,
+   "t": 248.0,
+   "spk": "S1",
+   "text": "Le support, c'est Bruno ou c'est la MOA ?"
+  },
+  {
+   "id": 22,
+   "t": 252.0,
+   "spk": "S2",
+   "text": "C'est la MOA normalement, mais je peux fournir les captures d'écran."
+  },
+  {
+   "id": 23,
+   "t": 258.0,
+   "spk": "S1",
+   "text": "OK, je relance la MOA. Personne ne prend de date pour l'instant, on verra au copil."
+  },
+  {
+   "id": 24,
+   "t": 266.0,
+   "spk": "S3",
+   "text": "Il y a aussi la question du budget. On avait 180 000 euros pour la phase pilote, et on a déjà consommé 142 000. Avec le décalage on va dépasser."
+  },
+  {
+   "id": 25,
+   "t": 283.0,
+   "spk": "S1",
+   "text": "De combien à peu près ?"
+  },
+  {
+   "id": 26,
+   "t": 286.0,
+   "spk": "S3",
+   "text": "On estime le dépassement à 25 000 euros environ, essentiellement de la régie développement."
+  },
+  {
+   "id": 27,
+   "t": 295.0,
+   "spk": "S1",
+   "text": "Ça il faudra le présenter au copil, je ne peux pas le valider seule. Camille, tu peux préparer une note sur le dépassement budgétaire pour le copil ?"
+  },
+  {
+   "id": 28,
+   "t": 305.0,
+   "spk": "ME",
+   "text": "Oui, je la prépare. Je la veux pour le 5 décembre pour qu'on ait le temps de la relire."
+  },
+  {
+   "id": 29,
+   "t": 313.0,
+   "spk": "S2",
+   "text": "Petite remarque, le serveur de pré-production [inaudible] la semaine du 25, il y aura une coupure d'une demi-journée."
+  },
+  {
+   "id": 30,
+   "t": 325.0,
+   "spk": "S1",
+   "text": "Il faudra prévenir les testeurs. Bruno tu t'en occupes ?"
+  },
+  {
+   "id": 31,
+   "t": 329.0,
+   "spk": "S2",
+   "text": "Oui."
+  },
+  {
+   "id": 32,
+   "t": 331.0,
+   "spk": "S4",
+   "text": "Dernier point de notre côté : est-ce qu'on a une réponse sur l'accès au portail pour les partenaires sous-traitants ? C'était une question ouverte depuis septembre."
+  },
+  {
+   "id": 33,
+   "t": 344.0,
+   "spk": "S1",
+   "text": "Non, pas encore, c'est au niveau de la direction juridique. Je n'ai pas de visibilité."
+  },
+  {
+   "id": 34,
+   "t": 350.0,
+   "spk": "ME",
+   "text": "Je peux poser la question à mon contact à la direction des achats, mais sans garantie."
+  },
+  {
+   "id": 35,
+   "t": 356.0,
+   "spk": "S1",
+   "text": "Merci. Bon, prochaine réunion de suivi le jeudi 28 novembre à 14 heures, même lien. Merci à tous."
+  }
+ ],
+ "raw": [
+  {
+   "t": 5.0,
+   "te": 20.5,
+   "spk": "S1",
+   "text": "Bonjour à tous, merci d'être là. L'objet de la réunion c'est le point d'avancement sur le déploiement du nouveau portail client dans les agences, et la préparation du comité de pilotage du 12 décembre."
+  },
+  {
+   "t": 21.0,
+   "te": 39.5,
+   "spk": "S2",
+   "text": "Bonjour. Côté technique on a terminé la recette fonctionnelle la semaine dernière, sur 214 cas de test on en a 197 qui passent, donc il reste 17 anomalies dont 3 bloquantes."
+  },
+  {
+   "t": 40.0,
+   "te": 43.5,
+   "spk": "S1",
+   "text": "Les 3 bloquantes, c'est quoi exactement ?"
+  },
+  {
+   "t": 44.0,
+   "te": 74.5,
+   "spk": "S2",
+   "text": "La première c'est l'authentification par carte à puce qui échoue sur les postes Windows 11 en mode kiosque. La deuxième c'est la synchronisation avec le CRM quand le client a un identifiant non vérifié, on a un rejet silencieux. Et la troisième c'est un problème de performance, l'envoi des documents de plus de 5 mégas prend plus de 40 secondes."
+  },
+  {
+   "t": 75.0,
+   "te": 89.5,
+   "spk": "S3",
+   "text": "Pour l'identifiant non vérifié, on a eu le même retour de l'agence de Lille. Il faudrait que l'interface affiche un message clair au conseiller plutôt qu'un rejet silencieux."
+  },
+  {
+   "t": 90.0,
+   "te": 96.5,
+   "spk": "S1",
+   "text": "D'accord. Camille, est-ce que tu peux nous dire où on en est côté certification de sécurité ?"
+  },
+  {
+   "t": 97.0,
+   "te": 124.5,
+   "spk": "ME",
+   "text": "Oui, le dossier de certification a été déposé le 3 novembre. On attend un retour sous six semaines en théorie, donc mi-décembre. Par contre ils nous ont demandé une pièce complémentaire, l'analyse de risques RGPD mise à jour, que je n'ai pas encore."
+  },
+  {
+   "t": 125.0,
+   "te": 131.5,
+   "spk": "S4",
+   "text": "L'analyse de risques c'est nous qui l'avons, on peut te l'envoyer d'ici vendredi."
+  },
+  {
+   "t": 132.0,
+   "te": 134.5,
+   "spk": "ME",
+   "text": "Parfait, merci."
+  },
+  {
+   "t": 135.0,
+   "te": 147.5,
+   "spk": "S1",
+   "text": "Bon. Sur le calendrier, initialement on visait une mise en production le 15 janvier pour la première vague de 12 agences."
+  },
+  {
+   "t": 148.0,
+   "te": 160.5,
+   "spk": "S2",
+   "text": "Honnêtement, avec 3 bloquantes et la certification pas encore obtenue, le 15 janvier c'est très risqué. Je proposerais plutôt le 2 février."
+  },
+  {
+   "t": 161.0,
+   "te": 177.5,
+   "spk": "S3",
+   "text": "Nous on a des agences qui sont prêts et qui attendent, ça fait déjà deux reports. Si on repousse encore, on risque de perdre l'adhésion des équipes terrain."
+  },
+  {
+   "t": 178.0,
+   "te": 191.5,
+   "spk": "S1",
+   "text": "Je comprends. Proposition : on maintient le 15 janvier mais seulement pour 4 agences pilotes, et la vague complète des 12 agences passe au 2 février. Ça vous va ?"
+  },
+  {
+   "t": 192.0,
+   "te": 197.5,
+   "spk": "S2",
+   "text": "Ça me va si les 3 bloquantes sont corrigées avant le 20 décembre."
+  },
+  {
+   "t": 198.0,
+   "te": 200.5,
+   "spk": "S3",
+   "text": "Oui pour nous c'est acceptable."
+  },
+  {
+   "t": 201.0,
+   "te": 209.5,
+   "spk": "S1",
+   "text": "Donc c'est acté : 4 agences pilotes au 15 janvier, généralisation aux 12 agences le 2 février."
+  },
+  {
+   "t": 210.0,
+   "te": 227.5,
+   "spk": "S2",
+   "text": "Pour la correction des bloquantes, je mets deux développeurs dessus dès lundi. Pour la carte à puce je dois quand même vérifier avec l'éditeur du middleware, ça dépend de leur version."
+  },
+  {
+   "t": 228.0,
+   "te": 232.5,
+   "spk": "S1",
+   "text": "Tu peux me faire un point écrit sur les bloquantes d'ici mercredi prochain ?"
+  },
+  {
+   "t": 233.0,
+   "te": 235.5,
+   "spk": "S2",
+   "text": "Oui, mercredi prochain."
+  },
+  {
+   "t": 236.0,
+   "te": 247.5,
+   "spk": "S4",
+   "text": "Et pour la formation des conseillers, on avait prévu des sessions en visio. Il nous faudrait le support de formation finalisé."
+  },
+  {
+   "t": 248.0,
+   "te": 251.5,
+   "spk": "S1",
+   "text": "Le support, c'est Bruno ou c'est la MOA ?"
+  },
+  {
+   "t": 252.0,
+   "te": 257.5,
+   "spk": "S2",
+   "text": "C'est la MOA normalement, mais je peux fournir les captures d'écran."
+  },
+  {
+   "t": 258.0,
+   "te": 265.5,
+   "spk": "S1",
+   "text": "OK, je relance la MOA. Personne ne prend de date pour l'instant, on verra au copil."
+  },
+  {
+   "t": 266.0,
+   "te": 282.5,
+   "spk": "S3",
+   "text": "Il y a aussi la question du budget. On avait 180 000 euros pour la phase pilote, et on a déjà consommé 142 000. Avec le décalage on va dépasser."
+  },
+  {
+   "t": 283.0,
+   "te": 285.5,
+   "spk": "S1",
+   "text": "De combien à peu près ?"
+  },
+  {
+   "t": 286.0,
+   "te": 294.5,
+   "spk": "S3",
+   "text": "On estime le dépassement à 25 000 euros environ, essentiellement de la régie développement."
+  },
+  {
+   "t": 295.0,
+   "te": 304.5,
+   "spk": "S1",
+   "text": "Ça il faudra le présenter au copil, je ne peux pas le valider seule. Camille, tu peux préparer une note sur le dépassement budgétaire pour le copil ?"
+  },
+  {
+   "t": 305.0,
+   "te": 312.5,
+   "spk": "ME",
+   "text": "Oui, je la prépare. Je la veux pour le 5 décembre pour qu'on ait le temps de la relire."
+  },
+  {
+   "t": 313.0,
+   "te": 324.5,
+   "spk": "S2",
+   "text": "Petite remarque, le serveur de pré-production [inaudible] la semaine du 25, il y aura une coupure d'une demi-journée."
+  },
+  {
+   "t": 325.0,
+   "te": 328.5,
+   "spk": "S1",
+   "text": "Il faudra prévenir les testeurs. Bruno tu t'en occupes ?"
+  },
+  {
+   "t": 329.0,
+   "te": 330.5,
+   "spk": "S2",
+   "text": "Oui."
+  },
+  {
+   "t": 331.0,
+   "te": 343.5,
+   "spk": "S4",
+   "text": "Dernier point de notre côté : est-ce qu'on a une réponse sur l'accès au portail pour les partenaires sous-traitants ? C'était une question ouverte depuis septembre."
+  },
+  {
+   "t": 344.0,
+   "te": 349.5,
+   "spk": "S1",
+   "text": "Non, pas encore, c'est au niveau de la direction juridique. Je n'ai pas de visibilité."
+  },
+  {
+   "t": 350.0,
+   "te": 355.5,
+   "spk": "ME",
+   "text": "Je peux poser la question à mon contact à la direction des achats, mais sans garantie."
+  },
+  {
+   "t": 356.0,
+   "te": 360.0,
+   "spk": "S1",
+   "text": "Merci. Bon, prochaine réunion de suivi le jeudi 28 novembre à 14 heures, même lien. Merci à tous."
+  }
+ ]
+}

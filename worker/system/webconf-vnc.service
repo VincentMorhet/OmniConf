@@ -1,0 +1,12 @@
+[Unit]
+Description=webconf - écran distant (x11vnc + noVNC websockify)
+After=webconf-xvfb.service
+Requires=webconf-xvfb.service
+[Service]
+User=bot
+EnvironmentFile=/etc/webconf/worker.env
+ExecStartPre=/bin/sleep 2
+ExecStart=/bin/sh -c '/usr/bin/x11vnc -display $DISPLAY -forever -shared -nopw -localhost -rfbport 5900 -quiet & exec /usr/bin/websockify 6080 localhost:5900'
+Restart=always
+[Install]
+WantedBy=multi-user.target

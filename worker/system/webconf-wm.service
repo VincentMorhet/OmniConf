@@ -1,0 +1,12 @@
+[Unit]
+Description=webconf - gestionnaire de fenêtres minimal (plein écran)
+After=webconf-xvfb.service
+Requires=webconf-xvfb.service
+[Service]
+User=bot
+EnvironmentFile=/etc/webconf/worker.env
+ExecStartPre=/bin/sleep 1
+ExecStart=/usr/bin/matchbox-window-manager -use_titlebar no -use_cursor no
+Restart=always
+[Install]
+WantedBy=multi-user.target

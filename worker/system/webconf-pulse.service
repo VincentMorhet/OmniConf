@@ -1,0 +1,9 @@
+[Unit]
+Description=webconf - PulseAudio (périphériques virtuels)
+[Service]
+User=bot
+Environment=XDG_RUNTIME_DIR=/run/user/1500
+ExecStart=/usr/bin/pulseaudio --daemonize=no --exit-idle-time=-1 --disallow-exit -n -F /etc/webconf/pulse.pa --log-target=journal
+Restart=always
+[Install]
+WantedBy=multi-user.target

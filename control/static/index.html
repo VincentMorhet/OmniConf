@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0f1419">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ctext y=%22.9em%22 font-size=%2290%22%3E🎧%3C/text%3E%3C/svg%3E">
+<title>WebConf</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="login" class="hidden">
+  <form id="loginForm" class="card narrow">
+    <h1>WebConf</h1>
+    <input type="password" id="pw" placeholder="Mot de passe" autocomplete="current-password" required>
+    <button class="primary">Se connecter</button>
+    <p id="loginErr" class="err"></p>
+  </form>
+</div>
+
+<div id="app" class="hidden">
+  <header>
+    <h1>WebConf</h1>
+    <nav class="tabs">
+      <button data-tab="live" class="tab active"><span class="ico">🎥</span><span>Réunions</span></button>
+      <button data-tab="rec" class="tab"><span class="ico">📁</span><span>Enregistrements</span><span id="recCount" class="count hidden"></span></button>
+    </nav>
+    <button id="audioBtn" class="ghost" title="Réglages audio : micro et sortie">🎚</button>
+    <button id="logout" class="ghost" title="Déconnexion">⎋</button>
+  </header>
+
+  <main id="tab-live">
+    <section class="card">
+      <h2>Nouvelle réunion</h2>
+      <form id="startForm">
+        <input id="f-url" type="url" placeholder="Lien de la réunion (Teams, Zoom, Meet, Jitsi, Webex, BBB…)" required>
+        <div class="row">
+          <select id="f-platform">
+            <option value="">Auto</option><option value="teams">Teams</option>
+            <option value="zoom">Zoom</option><option value="web">Autre webconf (auto)</option>
+            <option value="open">Ouvrir seulement (manuel)</option>
+          </select>
+          <select id="f-worker"><option value="auto">Worker libre</option></select>
+        </div>
+        <div class="row">
+          <input id="f-name" placeholder="Nom affiché">
+          <input id="f-pass" placeholder="Code / mot de passe">
+        </div>
+        <input id="f-title" placeholder="Titre (nom du fichier)">
+        <div class="row">
+          <label class="chk"><input id="f-rec" type="checkbox" checked> Enregistrer</label>
+          <label class="chk" title="Transcription en direct (Whisper) mise en forme par Qwen, points d'étape toutes les 5 min et compte rendu en fin de réunion"><input id="f-tr" type="checkbox" checked> Transcrire + CR</label>
+          <input id="f-dur" type="number" min="1" placeholder="Durée max (min)" title="Durée max en minutes (défaut 180)">
+        </div>
+        <div class="row">
+          <button class="primary" id="btnStart">Lancer maintenant</button>
+        </div>
+        <details>
+          <summary>Planifier</summary>
+          <div class="row">
+            <input id="f-when" type="datetime-local">
+            <button type="button" id="btnSchedule">Planifier</button>
+          </div>
+        </details>
+      </form>
+    </section>
+
+    <section id="workers"></section>
+
+    <section class="card" id="schedCard">
+      <h2>Planifiées</h2>
+      <ul id="schedule" class="list"></ul>
+    </section>
+  </main>
+
+  <main id="tab-rec" class="hidden">
+    <section class="card">
+      <h2>Enregistrements</h2>
+      <div class="rec-toolbar">
+        <input id="r-search" type="search" placeholder="🔍 Rechercher (titre, date…)">
+        <select id="r-platform"><option value="">Toutes plateformes</option><option value="teams">Teams</option>
+          <option value="zoom">Zoom</option><option value="web">Autres webconfs</option></select>
+        <select id="r-worker"><option value="">Tous les workers</option></select>
+        <button id="refreshRec" title="Actualiser">↻</button>
+      </div>
+      <div id="storage" class="storage"></div>
+      <div id="recordings"></div>
+    </section>
+  </main>
+</div>
+
+<template id="tplWorker">
+  <article class="card worker">
+    <div class="whead">
+      <h2 class="wname"></h2>
+      <span class="badge"></span>
+      <span class="rec hidden">● REC <span class="rectime"></span></span>
+      <span class="trb hidden" title="Transcription en direct">📝</span>
+    </div>
+    <div class="winfo"></div>
+    <img class="shot" alt="" loading="lazy">
+    <div class="audio-ctl">
+      <button class="primary b-audio">🎧 Rejoindre l'audio</button>
+      <button class="b-mic hidden" title="Activer/couper mon micro">🎙️ Micro</button>
+      <button class="b-ptt hidden" title="Maintenir pour parler">✋ Parler</button>
+      <button class="b-devs" title="Choisir le micro et la sortie audio">🎚</button>
+      <input class="vol hidden" type="range" min="0" max="1" step="0.05" value="1" title="Volume">
+      <meter class="lvl hidden" min="0" max="1" value="0"></meter>
+    </div>
+    <div class="tr-panel hidden">
+      <div class="vtabs">
+        <button class="vt on" data-v="tr">📝 Transcription</button>
+        <button class="vt" data-v="an">🧠 Points d'étape <span class="an-new hidden">nouveau</span></button>
+      </div>
+      <div class="tr-head">
+        <span class="tr-status"></span>
+        <button class="an-now hidden" title="Faire un point d'étape tout de suite">↻ Analyser</button>
+        <button class="tr-toggle"></button>
+        <button class="tr-copy icon" title="Copier le texte">📋</button>
+      </div>
+      <div class="tr-spk"></div>
+      <div class="tr-body"></div>
+      <div class="an-body hidden"></div>
+    </div>
+    <div class="actions">
+      <button class="b-mute" title="Bascule le micro du bot dans la réunion">Muet réunion</button>
+      <button class="b-rec">⏺ Enregistrer</button>
+      <button class="b-screen">🖥 Écran</button>
+      <button class="b-tr" title="Afficher la transcription en direct">📝 Transcription</button>
+      <button class="b-open" title="Ouvrir une page (ex: se connecter à son compte Teams/Zoom)">🔑 Ouvrir…</button>
+      <button class="danger b-leave">Quitter</button>
+    </div>
+  </article>
+</template>
+
+<div id="player" class="modal hidden">
+  <div class="modal-body">
+    <div class="modal-head">
+      <b id="playerTitle"></b>
+      <button class="ghost" onclick="openAudioPanel()" title="Sortie audio">🎚</button>
+      <a id="playerMd" class="btn hidden" download title="Transcription (Markdown)">📝 Texte</a>
+      <a id="playerDocx" class="btn hidden" download title="Compte rendu (Word)">📋 Word</a>
+      <a id="playerDl" class="btn" download>⬇ Vidéo</a>
+      <button class="ghost close" title="Fermer">✕</button>
+    </div>
+    <video controls playsinline preload="metadata"></video>
+    <div id="playerTabs" class="vtabs hidden">
+      <button class="vt on" data-v="tr">📝 Transcription</button>
+      <button class="vt" data-v="cr">📋 Compte rendu</button>
+      <button class="vt" data-v="an">🧠 Points d'étape</button>
+    </div>
+    <div id="playerSpk" class="tr-spk hidden"></div>
+    <div id="playerTr" class="tr-body hidden"></div>
+    <div id="playerCr" class="an-body cr hidden"></div>
+    <div id="playerAn" class="an-body hidden"></div>
+  </div>
+</div>
+<div id="audioModal" class="modal hidden">
+  <div class="modal-body card audio-panel">
+    <div class="modal-head"><b>🎚 Réglages audio</b><button class="ghost close" title="Fermer">✕</button></div>
+    <button id="devPerm" class="primary hidden">Autoriser l'accès au micro pour voir les périphériques</button>
+    <label>🎙️ Entrée (micro)</label>
+    <select id="micSel"></select>
+    <div class="row">
+      <button id="micTestBtn" type="button">🎙️ Tester le micro</button>
+      <meter id="micTestLvl" min="0" max="1" value="0" low="0.05" high="0.9" optimum="0.3"></meter>
+    </div>
+    <label>🔈 Sortie (casque / haut-parleurs)</label>
+    <select id="spkSel"></select>
+    <p id="spkNote" class="note hidden">Ce navigateur (Safari / iPhone / iPad) ne permet pas de choisir la sortie depuis la page :
+      utilisez le Centre de contrôle (icône AirPlay) ou les réglages du système.</p>
+    <div class="row"><button id="beepBtn" type="button">🔔 Tester la sortie</button></div>
+    <p class="note">Casque Bluetooth sous Windows : quand le micro est actif, choisissez la sortie
+      « Mains libres / Hands-Free » du casque, sinon le son part vers la sortie « Stéréo » devenue muette.
+      Les choix sont mémorisés sur cet appareil et s'appliquent aussi pendant une réunion.</p>
+  </div>
+</div>
+<div id="toast"></div>
+<audio id="dummy" playsinline></audio>
+<script src="/static/app.js"></script>
+</body>
+</html>

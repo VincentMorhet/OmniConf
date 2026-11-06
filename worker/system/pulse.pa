@@ -1,0 +1,11 @@
+# PulseAudio du worker : périphériques virtuels
+.fail
+load-module module-native-protocol-unix auth-anonymous=1
+# Tout ce que Chrome joue (le son de la réunion) arrive ici
+load-module module-null-sink sink_name=meeting_out rate=48000 sink_properties=device.description=MeetingOut
+# La voix de l'utilisateur (reçue en WebRTC) est écrite ici...
+load-module module-null-sink sink_name=user_in rate=48000 sink_properties=device.description=UserIn
+# ...et exposée à Chrome comme micro
+load-module module-remap-source source_name=virtmic master=user_in.monitor source_properties=device.description=VirtualMic
+set-default-sink meeting_out
+set-default-source virtmic

@@ -1,0 +1,8 @@
+<!DOCTYPE html><html><body style="background:#123;color:#fff;font:40px sans-serif">
+<h1>Loopback test</h1><div id=s>...</div><audio id=a autoplay></audio>
+<script>
+navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}}).then(st=>{
+  document.getElementById('a').srcObject=st;
+  document.getElementById('s').textContent='mic: '+st.getAudioTracks()[0].label;
+}).catch(e=>document.getElementById('s').textContent='ERR '+e);
+</script></body></html>

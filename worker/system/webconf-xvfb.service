@@ -1,0 +1,9 @@
+[Unit]
+Description=webconf - écran virtuel Xvfb
+[Service]
+User=bot
+EnvironmentFile=/etc/webconf/worker.env
+ExecStart=/bin/sh -c 'exec /usr/bin/Xvfb $DISPLAY -screen 0 ${SCREEN_SIZE}x24 -nolisten tcp -ac'
+Restart=always
+[Install]
+WantedBy=multi-user.target

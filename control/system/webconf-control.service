@@ -1,0 +1,12 @@
+[Unit]
+Description=webconf - IHM et API de contrôle
+After=network-online.target
+[Service]
+User=webconf
+EnvironmentFile=/etc/webconf/control.env
+WorkingDirectory=/opt/webconf/control
+ExecStart=/opt/webconf/venv/bin/uvicorn app:app --host 127.0.0.1 --port 8000 --proxy-headers
+Restart=always
+RestartSec=3
+[Install]
+WantedBy=multi-user.target
