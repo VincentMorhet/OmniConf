@@ -1,5 +1,8 @@
 "use strict";
-const $ = (s, el = document) => el.querySelector(s);
+// Recherche dans un élément ; pour une vue de réunion, aussi dans son panneau et ses boutons d'écoute
+// quand ils ont été déplacés dans l'onglet « Suivre en grand »
+const inEl = (root, s) => root.matches(s) ? root : root.querySelector(s);
+const $ = (s, el = document) => el.querySelector(s) || (el._side && (inEl(el._side, s) || inEl(el._actl, s))) || null;
 const STATE_FR = { idle: "libre", joining: "connexion…", lobby: "salle d'attente", in_meeting: "en réunion",
   leaving: "départ…", error: "erreur", offline: "hors ligne", manual: "navigation manuelle" };
 let cfg = { iceServers: [], workers: [] };
@@ -45,22 +48,27 @@ $("#logout").onclick = async () => { await api("/api/logout", { method: "POST" }
 
 // ------------------------------------------------------------------ navigation : #home, #rec, #m/<assistant>
 let cur = null;   // assistant affiché dans la vue « réunion »
-const view = () => cur ? "meet" : !$("#tab-rec").classList.contains("hidden") ? "rec" : "home";
+const view = () => fName ? "focus" : cur ? "meet" : !$("#tab-rec").classList.contains("hidden") ? "rec" : "home";
 function showTab(tab) {
   let w = null;
   if (tab.startsWith("m/")) { w = decodeURIComponent(tab.slice(2)); tab = cfg.workers.includes(w) ? "meet" : "home"; }
-  if (!["home", "rec", "meet"].includes(tab)) tab = "home";
-  if (tab !== "meet") w = null;
+  else if (tab.startsWith("suivre/")) { w = decodeURIComponent(tab.slice(7)); tab = cfg.workers.includes(w) ? "focus" : "home"; }
+  if (!["home", "rec", "meet", "focus"].includes(tab)) tab = "home";
+  if (tab !== "meet" && tab !== "focus") w = null;
+  if (tab !== "focus" || fName !== w) exitFocus();
   document.querySelectorAll(".tab").forEach(x => x.classList.toggle("active", x.dataset.tab === (tab === "meet" ? "home" : tab)));
-  ["home", "meet", "rec"].forEach(t => $("#tab-" + t).classList.toggle("hidden", tab !== t));
-  const want = tab === "meet" ? "m/" + encodeURIComponent(w) : tab;
+  ["home", "meet", "rec", "focus"].forEach(t => $("#tab-" + t).classList.toggle("hidden", tab !== t));
+  const want = tab === "meet" ? "m/" + encodeURIComponent(w) : tab === "focus" ? "suivre/" + encodeURIComponent(w) : tab;
   if (location.hash !== "#" + want) history.replaceState(null, "", "#" + want);
   setCur(w);
+  if (tab === "focus") enterFocus(w);
   if (tab === "rec") loadRecordings();
   if (tab === "home") { refreshShots(); loadRecordings(); }
   window.scrollTo(0, 0);
 }
 const openMeeting = (name) => { location.hash = "#m/" + encodeURIComponent(name); };
+// « Suivre en grand » : un onglet par assistant (réutilisé s'il est déjà ouvert)
+const openFollow = (name) => { const w = window.open("/#suivre/" + encodeURIComponent(name), "omniconf-" + name); if (!w) location.hash = "#suivre/" + encodeURIComponent(name); };
 function setCur(w) {
   if (cur && cur !== w && cards[cur]) { cards[cur].classList.add("hidden"); toggleVnc(cur, false); }
   cur = w;
@@ -152,6 +160,8 @@ function card(name) {
   $(".shot", el).onclick = () => toggleVnc(name, true);
   $(".b-full", el).onclick = () => { toggleVnc(name, false); window.open(vncUrl(name), "_blank"); };
   $(".b-final", el).onclick = () => openFinal(name);
+  $(".b-follow", el).onclick = () => openFollow(name);
+  el._side = $(".side", el); el._actl = $(".audio-ctl", el);
   $(".b-open", el).onclick = () => {
     const u = prompt("Adresse à ouvrir dans le navigateur de l'assistant (ex : se connecter une fois à son compte, la session est conservée)",
       "https://teams.microsoft.com/");
@@ -239,6 +249,7 @@ function render(st) {
   if (tr.analysis && tr.analysis.v !== t.anV && !t.anLoading) fetchAnalysis(st.name);
   renderTr(st.name);
   renderTile(st);
+  if (fName === st.name) renderFocus(st);
 }
 
 // ------------------------------------------------------------------ accueil : vignettes des réunions en cours
@@ -249,6 +260,7 @@ function tile(name) {
   el.onclick = () => openMeeting(name);
   el.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openMeeting(name); } };
   $("img", el).onerror = function () { this.removeAttribute("src"); };
+  $(".tfollow", el).onclick = (e) => { e.stopPropagation(); openFollow(name); };
   $("#liveGrid").appendChild(el);
   const c = document.createElement("button"); c.type = "button"; c.className = "wchip";
   c.onclick = () => openMeeting(name);
@@ -345,7 +357,7 @@ function renderTr(name) {
   tog.disabled = !tr.enabled || (!tr.active && lastStatus[name]?.state !== "in_meeting");
   tog.title = !tr.enabled ? "Clé OVH AI Endpoints non configurée sur cet assistant" : tr.active ? "Arrêter la transcription" : "Démarrer la transcription";
   const an = t.view === "an", a = tr.analysis || {};
-  el.querySelectorAll(".tr-panel .vt").forEach(b => b.classList.toggle("on", b.dataset.v === t.view));
+  (el._side || el).querySelectorAll(".vt").forEach(b => b.classList.toggle("on", b.dataset.v === t.view));
   $(".tr-body", el).classList.toggle("hidden", an); $(".tr-spk", el).classList.toggle("hidden", an);
   $(".an-body", el).classList.toggle("hidden", !an);
   $(".an-new", el).classList.toggle("hidden", an || !a.v || a.v === t.anSeen);
@@ -389,6 +401,8 @@ async function pollTranscript(name) {
       }
       const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
       t.speakers = d.speakers; t.aliases = d.aliases;
+      t.capPars = (d.file === t.capFile ? (t.capPars || []) : []).concat(d.paragraphs).slice(-3); t.capFile = d.file;
+      if (fName === name) renderCaps(name, d.pending);
       const rename = (id) => askRename(t.speakers, id, async (sid, nm) => {
         const r = await api(`/api/workers/${name}/speakers`, { method: "POST", json: { id: sid, name: nm } });
         t.speakers = r.speakers; repaint(); });
@@ -408,6 +422,87 @@ async function pollTranscript(name) {
     } catch (e) { }
   }
 }
+// ------------------------------------------------------------------ suivre en grand : écran fluide, sous-titres, résumé de l'IA
+let fName = null, fRfb = null, fLive = false, fHand = false;
+let fCc = localStorage.fcc !== "0", fSideOn = localStorage.fside !== "0";
+async function focusConnect(name) {
+  fLive = false; $("#fVnc").innerHTML = ""; $("#fMsg").textContent = "Connexion à l'écran…"; $("#fMsg").classList.remove("hidden");
+  try {
+    const { default: RFB } = await import("/novnc/core/rfb.js");
+    if (fName !== name) return;
+    const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/vnc/${encodeURIComponent(name)}/websockify`;
+    const rfb = new RFB($("#fVnc"), url, { wsProtocols: ["binary"] });
+    rfb.viewOnly = !fHand; rfb.scaleViewport = true; rfb.background = "#000";
+    rfb.qualityLevel = 6; rfb.compressionLevel = 2; rfb.focusOnClick = true;
+    rfb.addEventListener("connect", () => { if (fRfb !== rfb) return; fLive = true; $("#fMsg").classList.add("hidden"); $("#fShot").classList.add("hidden"); });
+    rfb.addEventListener("disconnect", () => {
+      if (fRfb !== rfb) return;
+      fRfb = null; fLive = false; $("#fShot").classList.remove("hidden");   // en attendant : images de l'écran
+      $("#fMsg").textContent = "Écran fluide interrompu : reconnexion…"; $("#fMsg").classList.remove("hidden");
+      setTimeout(() => { if (fName === name && !fRfb) focusConnect(name); }, 3000);
+    });
+    fRfb = rfb;
+  } catch (e) {   // noVNC indisponible : images de l'écran rafraîchies
+    $("#fShot").classList.remove("hidden"); $("#fMsg").classList.add("hidden");
+  }
+}
+function enterFocus(name) {
+  if (fName === name) return;
+  fName = name; document.body.classList.add("focus");
+  const el = cards[name];
+  $("#fSidebox").appendChild(el._side); $("#fCtl").appendChild(el._actl);
+  const t = trState(name); t.view = "an"; renderTr(name);
+  $("#tab-focus").classList.toggle("noside", !fSideOn);
+  $("#fFull").classList.toggle("hidden", !document.documentElement.requestFullscreen);
+  fHand = false; syncFocusButtons();
+  focusConnect(name);
+  if (lastStatus[name]) renderFocus(lastStatus[name]);
+}
+function exitFocus() {
+  if (!fName) return;
+  const el = cards[fName];
+  $(".mgrid", el).appendChild(el._side); $(".stage", el).insertBefore(el._actl, $(".b-follow", el));
+  const r = fRfb; fRfb = null; fLive = false; try { r?.disconnect(); } catch (e) { }
+  $("#fVnc").innerHTML = ""; $("#fCaps").classList.add("hidden");
+  fName = null; document.body.classList.remove("focus"); document.title = "OmniConf";
+}
+function syncFocusButtons() {
+  $("#fCc").classList.toggle("on", fCc); $("#fSide").classList.toggle("on", fSideOn);
+  $("#fHand").classList.toggle("on", fHand); $("#fHand").textContent = fHand ? "✋ Rendre la main" : "🖐 Prendre la main";
+  $("#fCaps").classList.toggle("off", !fCc);
+}
+function renderFocus(st) {
+  const busy = isBusy(st), title = busy ? (st.title || platLabel(st) || "Réunion") : `Assistant ${st.name}`;
+  $("#fTitle").textContent = title; document.title = title + " · OmniConf";
+  $("#fInfo").textContent = busy ? [platLabel(st) !== st.title ? platLabel(st) : "", STATE_FR[st.state] || st.state].filter(Boolean).join(" · ")
+    : st.online ? "libre" : "hors ligne";
+  $("#fRec").classList.toggle("hidden", !st.recording);
+  if (st.recording) $("#fRec").textContent = "● REC " + fmtDur(st.recording_since);
+  const t = trState(st.name);
+  $("#fEnded").classList.toggle("hidden", busy || !st.online || !t.ended);
+  $("#fFinal").classList.toggle("hidden", !(st.transcript?.file || t.lastRec));
+}
+function renderCaps(name, pending) {
+  const t = trState(name), box = $("#fCaps");
+  // les lignes brutes en attente sont les plus récentes ; à défaut, le dernier paragraphe mis en forme
+  const items = (pending.length >= 2 ? pending.slice(-2) : [...(t.capPars || []).slice(-(2 - pending.length)), ...pending]).filter(x => x?.text);
+  const html = items.map(x => {
+    const s = spkOf(t.speakers, t.aliases, x.spk), txt = x.text.length > 220 ? "…" + x.text.slice(-220) : x.text;
+    return `<p><b class="who c${(s.color || 0) % 9}">${esc(s.label)}</b> ${esc(txt)}</p>`;
+  }).join("");
+  if (html && html !== box._html) { box._html = html; box.innerHTML = html; box._at = Date.now(); }
+  box.classList.toggle("hidden", !html || Date.now() - (box._at || 0) > 15000);   // effacés après 15 s de silence
+}
+$("#fBack").onclick = () => { location.hash = "#m/" + encodeURIComponent(fName); };
+$("#fCc").onclick = () => { fCc = !fCc; localStorage.fcc = fCc ? "1" : "0"; syncFocusButtons(); };
+$("#fSide").onclick = () => {
+  fSideOn = !fSideOn; localStorage.fside = fSideOn ? "1" : "0"; $("#tab-focus").classList.toggle("noside", !fSideOn); syncFocusButtons();
+  setTimeout(() => window.dispatchEvent(new Event("resize")), 50);   // noVNC recalcule l'échelle
+};
+$("#fHand").onclick = () => { fHand = !fHand; if (fRfb) { fRfb.viewOnly = !fHand; if (fHand) fRfb.focus(); } syncFocusButtons(); };
+$("#fFull").onclick = () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen().catch(() => { });
+$("#fFinal").onclick = () => fName && openFinal(fName);
+
 // ------------------------------------------------------------------ points d'étape et comptes rendus
 const parseT = (s) => { if (typeof s === "number") return s;
   const m = /^\s*(\d+):(\d{1,2})(?::(\d{1,2}))?\s*$/.exec(s || ""); if (!m) return null;
@@ -501,7 +596,10 @@ async function copyText(txt) {
 }
 
 async function refresh() {
-  try { const list = await api("/api/workers"); list.forEach(render); renderHome(list); } catch (e) { }
+  let list;
+  try { list = await api("/api/workers"); } catch (e) { return; }   // réseau : on réessaie au prochain tour
+  for (const st of list) { try { render(st); } catch (e) { console.error("affichage de " + st.name, e); } }
+  renderHome(list);
 }
 
 // Aperçus d'écran : celui de la réunion ouverte (souvent), les vignettes de l'accueil (moins souvent)
@@ -515,7 +613,9 @@ async function refreshShots() {
   refreshShots.busy = true; shotTick++;
   try {
     const v = view();
-    if (v === "meet" && lastStatus[cur]?.online && !cards[cur].classList.contains("vnc-on")) {
+    if (v === "focus") {
+      if (!fLive && lastStatus[fName]?.online) await shotInto(fName, $("#fShot"), $("#fShot").clientWidth || 1200).catch(() => { });
+    } else if (v === "meet" && lastStatus[cur]?.online && !cards[cur].classList.contains("vnc-on")) {
       const img = $(".shot", cards[cur]);
       await shotInto(cur, img, img.clientWidth || 800).catch(() => { });
     } else if (v === "home" && (shotTick % 2 === 1 || !refreshShots.homeOnce)) {
@@ -1002,6 +1102,6 @@ async function boot() {
   showTab(location.hash.slice(1) || "home");   // charge aussi les enregistrements (accueil, compteur du menu)
   if (view() === "meet") loadRecordings();
   timers = [setInterval(refresh, 3000), setInterval(refreshShots, 1500), setInterval(loadSchedule, 30000),
-    setInterval(pollTranscripts, 2500), setInterval(() => view() === "home" && loadRecordings(), 60000)];
+    setInterval(pollTranscripts, 1500), setInterval(() => view() === "home" && loadRecordings(), 60000)];
 }
 boot();

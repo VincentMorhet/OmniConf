@@ -100,6 +100,29 @@
   <!-- ============================================================ vue d'une réunion -->
   <main id="tab-meet" class="hidden"><div id="workers"></div></main>
 
+  <!-- ============================================================ suivre une réunion en grand (onglet séparé) -->
+  <main id="tab-focus" class="hidden">
+    <div class="fbar">
+      <button id="fBack" class="ghost" title="Revenir à la vue normale de la réunion">←</button>
+      <div class="ftitle"><b id="fTitle"></b><small id="fInfo"></small></div>
+      <span id="fRec" class="rec hidden"></span>
+      <span id="fCtl" class="fctl"></span>
+      <button id="fCc" class="on" title="Afficher / masquer les sous-titres">💬 Sous-titres</button>
+      <button id="fHand" title="Prendre la main sur l'écran de l'assistant">🖐 Prendre la main</button>
+      <button id="fSide" class="on" title="Afficher / masquer le résumé de l'IA">🧠 Résumé</button>
+      <button id="fFull" class="icon" title="Plein écran">⛶</button>
+    </div>
+    <div class="fscreen">
+      <div id="fVnc" class="fvnc"></div>
+      <img id="fShot" class="fshot hidden" alt="Écran de la réunion">
+      <div id="fCaps" class="fcaps hidden" aria-live="polite"></div>
+      <div id="fMsg" class="fmsg">Connexion à l'écran…</div>
+      <div id="fEnded" class="ended hidden"><b>Réunion terminée</b><span>Le compte rendu final est rédigé automatiquement (2 à 10 minutes).</span>
+        <button id="fFinal" class="primary">📋 Voir le compte rendu final</button></div>
+    </div>
+    <aside id="fSidebox" class="fside"></aside>
+  </main>
+
   <!-- ============================================================ enregistrements -->
   <main id="tab-rec" class="hidden">
     <section class="card">
@@ -123,6 +146,7 @@
       <span class="tstate"></span>
       <span class="plat"></span>
       <span class="ttime"></span>
+      <button class="tfollow" title="Suivre en grand dans un nouvel onglet : écran, sous-titres et résumé de l'IA">⛶ Suivre en grand</button>
     </div>
     <div class="tbody">
       <b class="ttitle"></b>
@@ -158,6 +182,7 @@
           <input class="vol hidden" type="range" min="0" max="1" step="0.05" value="1" title="Volume">
           <meter class="lvl hidden" min="0" max="1" value="0"></meter>
         </div>
+        <button class="primary b-follow" title="Ouvre un nouvel onglet : écran en grand, sous-titres en direct et résumé de l'IA">⛶ Suivre en grand (nouvel onglet)</button>
         <div class="actions">
           <button class="b-screen" title="Prendre la main sur l'écran de l'assistant (ici)">🖐 Prendre la main</button>
           <button class="b-full icon" title="Ouvrir l'écran dans un nouvel onglet">⛶</button>
