@@ -215,6 +215,12 @@ HOST=192.168.0.233 NAMES="w3 w4" CONTROL_IPS="192.168.0.230" ./deploy/deploy-con
 - Test : `tests/container_ui_test.py` (IHM, VNC de chaque conteneur, audio, lecture) et
   `tests/container_meeting_e2e.sh` (réunion Jitsi avec participants, transcription, compte rendu).
 
+### Chez OVHcloud (Terraform)
+
+Une instance Public Cloud porte l'IHM et les workers en conteneurs, avec une IP publique (WebRTC
+sans Tailscale ni TURN), un certificat Let's Encrypt et un disque de données séparé :
+`cd deploy/ovh && terraform apply && ./deploy-ovh.sh`. Détails : [deploy/ovh/README.md](deploy/ovh/README.md).
+
 ## Limites à connaître
 
 - **Interfaces web mouvantes** : l'entrée automatique s'appuie sur les écrans web actuels, avec

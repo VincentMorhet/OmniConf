@@ -8,13 +8,15 @@
 #   worker n°i : API 8000+i · VNC 6079+i · écran :98+i   (le 1er reprend les valeurs d'une VM : 8001, 6080, :99)
 #   données    : /srv/webconf/<nom>/{recordings,chrome-profile} sur l'hôte
 #   réglages   : /etc/webconf/containers/<nom>.env sur l'hôte (conservés ; clés ajoutées si absentes)
-# Variables : CPUS (4) et MEMORY (6g) par conteneur, OVH via .ovh_token, jeton via .agent_token.
+# Variables : CPUS (4) et MEMORY (6g) par conteneur, OVH via .ovh_token, jeton via .agent_token,
+#   WORKER_URL_HOST (= HOST) : adresse des workers vue du contrôle (127.0.0.1 si même machine).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 HOST=${HOST:?HOST manquant (ip de l hôte Docker)}
 NAMES=(${NAMES:-w3 w4})
 CONTROL_IPS=${CONTROL_IPS:-192.168.0.230}
 CPUS=${CPUS:-4}; MEMORY=${MEMORY:-6g}
+WORKER_URL_HOST=${WORKER_URL_HOST:-$HOST}
 SSH="ssh -o BatchMode=yes debian@$HOST"
 [ -f .agent_token ] || python3 -c "import secrets;print(secrets.token_urlsafe(24))" > .agent_token
 T=$(cat .agent_token)
@@ -23,12 +25,12 @@ OVH=$( [ -f .ovh_token ] && cat .ovh_token || true )
 echo "=== $HOST : Docker"
 $SSH 'command -v docker >/dev/null || {
   set -e; export DEBIAN_FRONTEND=noninteractive
-  sudo apt-get update -q >/dev/null && sudo apt-get install -y -q ca-certificates curl nftables >/dev/null
+  sudo apt-get update -q >/dev/null && sudo -E apt-get install -y -q ca-certificates curl nftables >/dev/null
   sudo install -m 0755 -d /etc/apt/keyrings
   sudo curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
   echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
   sudo apt-get update -q >/dev/null
-  sudo apt-get install -y -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin >/dev/null; }
+  sudo -E apt-get install -y -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin >/dev/null; }
   sudo docker version --format "Docker {{.Server.Version}}"'
 
 echo "=== $HOST : image webconf-worker"
@@ -51,7 +53,6 @@ services:"
 i=0; WL=""
 for n in "${NAMES[@]}"; do
   i=$((i+1)); api=$((8000+i)); vnc=$((6079+i)); rfb=$((5899+i)); disp=":$((98+i))"
-  WL="${WL:+$WL,}$n=http://$HOST:$api"
   COMPOSE+="
   $n:
     <<: *worker
@@ -66,6 +67,11 @@ for n in "${NAMES[@]}"; do
     add WORKER_NAME $n; add AGENT_TOKEN '$T'; add AGENT_PORT $api; add VNC_PORT $vnc; add RFB_PORT $rfb
     add DISPLAY $disp; add SCREEN_SIZE 1600x900; add BOT_DISPLAY_NAME Assistant; add ICE_SERVERS '[]'
     [ -z '$OVH' ] || { sudo sed -i '/^OVH_AI_ENDPOINTS_ACCESS_TOKEN=/d' \$f; add OVH_AI_ENDPOINTS_ACCESS_TOKEN '$OVH'; }"
+  # Port réel (un worker garde ses ports d'un déploiement à l'autre, même si l'ordre de NAMES change)
+  api=$($SSH "sudo sed -n 's/^AGENT_PORT=//p' /etc/webconf/containers/$n.env")
+  case " ${PORTS:-} " in *" $api "*) echo "port $api attribué deux fois ($n) : corriger /etc/webconf/containers/$n.env"; exit 1;; esac
+  PORTS="${PORTS:-} $api"
+  WL="${WL:+$WL,}$n=http://$WORKER_URL_HOST:$api"
 done
 printf '%s\n' "$COMPOSE" | $SSH 'sudo tee /opt/webconf/compose.yml >/dev/null && cd /opt/webconf && sudo docker compose up -d --remove-orphans 2>&1 | tail -n +1 | grep -vE "^\s*$" | tail -4'
 
@@ -87,7 +93,7 @@ table inet webconf {
   }
 }
 NFT
-sudo apt-get install -y -q nftables >/dev/null 2>&1 || true
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q nftables >/dev/null 2>&1 || true
 sudo systemctl enable -q nftables && sudo nft -f /etc/nftables.conf"
 
 echo "=== $HOST : état"

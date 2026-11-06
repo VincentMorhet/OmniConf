@@ -1,0 +1,20 @@
+#cloud-config
+# Préparation minimale ; Docker, les workers et l'IHM sont installés par deploy-ovh.sh.
+hostname: ${hostname}
+timezone: Europe/Paris
+package_update: true
+package_upgrade: true
+packages:
+  - nftables
+  - unattended-upgrades
+  - curl
+  - ca-certificates
+ssh_pwauth: false
+write_files:
+  - path: /etc/ssh/sshd_config.d/10-omniconf.conf
+    content: |
+      PasswordAuthentication no
+      PermitRootLogin no
+runcmd:
+  - systemctl reload ssh || true
+  - systemctl enable --now unattended-upgrades

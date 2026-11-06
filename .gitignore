@@ -21,3 +21,12 @@ venv/
 *.log
 recordings/
 out*/
+# Terraform (état et variables locales ; le fichier .terraform.lock.hcl est versionné)
+.terraform/
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+*.auto.tfvars
+crash.log
+*.plan
+*.tfplan

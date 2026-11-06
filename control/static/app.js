@@ -32,17 +32,34 @@ $("#loginForm").onsubmit = async (e) => {
 };
 $("#logout").onclick = async () => { await api("/api/logout", { method: "POST" }); location.reload(); };
 
-// ------------------------------------------------------------------ onglets (menu)
+// ------------------------------------------------------------------ navigation : #home, #rec, #m/<assistant>
+let cur = null;   // assistant affiché dans la vue « réunion »
+const view = () => cur ? "meet" : !$("#tab-rec").classList.contains("hidden") ? "rec" : "home";
 function showTab(tab) {
-  if (!["live", "rec"].includes(tab)) tab = "live";
-  document.querySelectorAll(".tab").forEach(x => x.classList.toggle("active", x.dataset.tab === tab));
-  $("#tab-live").classList.toggle("hidden", tab !== "live");
-  $("#tab-rec").classList.toggle("hidden", tab !== "rec");
-  if (location.hash !== "#" + tab) history.replaceState(null, "", "#" + tab);
+  let w = null;
+  if (tab.startsWith("m/")) { w = decodeURIComponent(tab.slice(2)); tab = cfg.workers.includes(w) ? "meet" : "home"; }
+  if (!["home", "rec", "meet"].includes(tab)) tab = "home";
+  if (tab !== "meet") w = null;
+  document.querySelectorAll(".tab").forEach(x => x.classList.toggle("active", x.dataset.tab === (tab === "meet" ? "home" : tab)));
+  ["home", "meet", "rec"].forEach(t => $("#tab-" + t).classList.toggle("hidden", tab !== t));
+  const want = tab === "meet" ? "m/" + encodeURIComponent(w) : tab;
+  if (location.hash !== "#" + want) history.replaceState(null, "", "#" + want);
+  setCur(w);
   if (tab === "rec") loadRecordings();
+  if (tab === "home") { refreshShots(); loadRecordings(); }
   window.scrollTo(0, 0);
 }
-document.querySelectorAll(".tab").forEach(b => b.onclick = () => showTab(b.dataset.tab));
+const openMeeting = (name) => { location.hash = "#m/" + encodeURIComponent(name); };
+function setCur(w) {
+  if (cur && cur !== w && cards[cur]) { cards[cur].classList.add("hidden"); toggleVnc(cur, false); }
+  cur = w;
+  if (!w) return;
+  cards[w].classList.remove("hidden");
+  trState(w).open = true;
+  if (lastStatus[w]) render(lastStatus[w]);
+  refreshShots(); pollTranscripts();
+}
+document.querySelectorAll(".tab").forEach(b => b.onclick = () => { location.hash = "#" + b.dataset.tab; });
 window.addEventListener("hashchange", () => showTab(location.hash.slice(1)));
 
 // ------------------------------------------------------------------ lancement
@@ -59,7 +76,8 @@ $("#startForm").onsubmit = async (e) => {
   const btn = $("#btnStart"); btn.disabled = true;
   try {
     const r = await api("/api/meetings", { method: "POST", json: formMeeting() });
-    toast(`Connexion en cours sur ${r.name}…`); $("#f-url").value = ""; nameEdited = false; prefillName(); refresh();
+    toast(`L'assistant ${r.name} rejoint la réunion…`); $("#opts").open = false; $("#f-url").value = ""; $("#f-title").value = "";
+    nameEdited = false; prefillName(); await refresh(); openMeeting(r.name);
   } catch (err) { toast("Erreur : " + err.message, 5000); }
   btn.disabled = false;
 };
@@ -92,7 +110,21 @@ $("#f-name").oninput = () => nameEdited = $("#f-name").value !== "";
 $("#f-url").addEventListener("input", prefillName);
 $("#f-platform").addEventListener("change", prefillName);
 
-// ------------------------------------------------------------------ workers
+// ------------------------------------------------------------------ assistants (workers)
+const BUSY = ["joining", "lobby", "in_meeting", "leaving", "manual", "error"];
+const isBusy = (st) => st?.online && BUSY.includes(st.state);
+const platLabel = (st) => st.platform === "teams" ? "Teams" : st.platform === "zoom" ? "Zoom"
+  : st.url ? siteOf(st.url) : st.platform === "open" ? "Web" : "";
+const vncUrl = (name) => `/novnc/vnc.html?path=vnc/${encodeURIComponent(name)}/websockify&autoconnect=1&resize=scale&reconnect=1&show_dot=1`;
+function toggleVnc(name, on) {
+  const el = cards[name]; if (!el) return;
+  const f = $(".vnc", el); on = on ?? f.classList.contains("hidden");
+  if (on === !f.classList.contains("hidden")) return;
+  if (on) f.src = vncUrl(name); else f.src = "about:blank";
+  f.classList.toggle("hidden", !on); el.classList.toggle("vnc-on", on);
+  const b = $(".b-screen", el); b.textContent = on ? "✋ Rendre la main" : "🖐 Prendre la main"; b.classList.toggle("on", on);
+}
+// Vue « réunion » d'un assistant (une par assistant, une seule affichée)
 function card(name) {
   if (cards[name]) return cards[name];
   const el = $("#tplWorker").content.firstElementChild.cloneNode(true);
@@ -101,19 +133,19 @@ function card(name) {
     try { await api(`/api/workers/${name}/${a}`, { method: "POST", json: body || {} }); refresh(); }
     catch (err) { toast("Erreur : " + err.message, 5000); }
   };
-  $(".b-leave", el).onclick = () => confirm(`Quitter la réunion sur ${name} ?`) && act("leave")();
+  $(".back", el).onclick = () => { location.hash = "#home"; };
+  $(".b-leave", el).onclick = () => confirm(`L'assistant ${name} quitte la réunion ?`) && act("leave")();
   $(".b-mute", el).onclick = act("mute");
   $(".b-rec", el).onclick = () => act(lastStatus[name]?.recording ? "rec-stop" : "rec-start")();
-  const openScreen = () => window.open(`/novnc/vnc.html?path=vnc/${name}/websockify&autoconnect=1&resize=scale&reconnect=1&show_dot=1`, "_blank");
-  $(".b-screen", el).onclick = openScreen;
-  $(".shot", el).onclick = openScreen;
+  $(".b-screen", el).onclick = () => toggleVnc(name);
+  $(".shot", el).onclick = () => toggleVnc(name, true);
+  $(".b-full", el).onclick = () => { toggleVnc(name, false); window.open(vncUrl(name), "_blank"); };
+  $(".b-final", el).onclick = () => openFinal(name);
   $(".b-open", el).onclick = () => {
-    const u = prompt("URL à ouvrir dans le navigateur du worker (ex : se connecter une fois à son compte, la session est conservée)",
+    const u = prompt("Adresse à ouvrir dans le navigateur de l'assistant (ex : se connecter une fois à son compte, la session est conservée)",
       "https://teams.microsoft.com/");
-    if (u) act("open", { url: u })().then(() => openScreen());
+    if (u) act("open", { url: u })().then(() => toggleVnc(name, true));
   };
-  $(".b-devs", el).onclick = openAudioPanel;
-  $(".b-tr", el).onclick = () => { const t = trState(name); t.open = !t.open; t.userToggled = true; renderTr(name); };
   $(".tr-toggle", el).onclick = () => act(lastStatus[name]?.transcript?.active ? "tr-stop" : "tr-start")();
   $(".tr-copy", el).onclick = () => copyText($(trState(name).view === "an" ? ".an-body" : ".tr-body", el).innerText);
   el.querySelectorAll(".vt").forEach(b => b.onclick = () => {
@@ -152,37 +184,106 @@ function fmtDur(iso) {
 }
 
 function render(st) {
-  const el = card(st.name);
+  const el = card(st.name), prev = lastStatus[st.name];
   lastStatus[st.name] = st;
+  const t = trState(st.name), tr = st.transcript || {};
+  if (st.recording_file) t.lastRec = st.recording_file;
+  if (isBusy(prev) && !isBusy(st)) { t.ended = true; setTimeout(loadRecordings, 4000); if (sessions[st.name]) stopAudio(st.name); }   // fin de réunion
+  if (isBusy(st)) t.ended = false;
   const b = $(".badge", el); b.className = "badge " + st.state; b.textContent = STATE_FR[st.state] || st.state;
   $(".rec", el).classList.toggle("hidden", !st.recording);
   if (st.recording) $(".rectime", el).textContent = fmtDur(st.recording_since);
+  const plat = platLabel(st);
+  $(".wtitle", el).textContent = isBusy(st) ? (st.title || plat || "Réunion") : `Assistant ${st.name}`;
   const info = [];
-  if (st.platform) info.push(["teams", "zoom"].includes(st.platform) || !st.url ? st.platform.toUpperCase() : siteOf(st.url));
-  if (st.title) info.push(st.title);
-  if (st.url) info.push(`<span title="${st.url}">${st.url.slice(0, 60)}${st.url.length > 60 ? "…" : ""}</span>`);
-  if (st.listeners) info.push(`🎧 ${st.listeners}`);
-  if (st.auto_leave_at) info.push("fin auto " + new Date(st.auto_leave_at).toLocaleTimeString().slice(0, 5));
-  let html = info.join(" · ");
-  if (st.error) html += `<div class="e">⚠ ${st.error} — terminez à la main via « Écran ».</div>`;
-  else if (st.note && st.state === "in_meeting") html += `<div class="n">ℹ ${st.note}</div>`;
-  $(".winfo", el).innerHTML = html;
-  $(".b-rec", el).textContent = st.recording ? "⏹ Arrêter rec" : "⏺ Enregistrer";
-  const busy = ["joining", "lobby", "in_meeting"].includes(st.state);
-  $(".b-leave", el).disabled = !busy && st.state !== "manual" && st.state !== "error";
+  if (isBusy(st)) {
+    if (plat && plat !== st.title) info.push(esc(plat));
+    if (st.since) info.push("depuis " + new Date(st.since).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }));
+    if (st.listeners) info.push(`🎧 ${st.listeners} à l'écoute`);
+    if (st.auto_leave_at) info.push("départ auto à " + new Date(st.auto_leave_at).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }));
+  } else info.push(st.online ? "libre" : "hors ligne");
+  $(".winfo", el).innerHTML = info.join(" · ");
+  $(".winfo", el).title = st.url || "";
+  let note = "";
+  if (st.error) note = `<div class="e">⚠ ${esc(st.error)} — terminez à la main avec « 🖐 Prendre la main ».</div>`;
+  else if (st.note && st.state === "in_meeting") note = `<div class="n">ℹ ${esc(st.note.replace("« Écran »", "« 🖐 Prendre la main »"))}</div>`;
+  $(".wnote", el).innerHTML = note;
+  $(".b-rec", el).textContent = st.recording ? "⏹ Arrêter l'enregistrement" : "⏺ Enregistrer";
+  $(".b-leave", el).disabled = !isBusy(st);
+  $(".audio-ctl", el).classList.toggle("hidden", !isBusy(st) && !sessions[st.name]);
   $(".b-mute", el).disabled = st.state !== "in_meeting";
-  el.style.opacity = st.online ? 1 : .55;
-  const tr = st.transcript || {}, t = trState(st.name);
+  // écran « réunion terminée » / « assistant libre »
+  const idle = st.online && !isBusy(st), endedBox = $(".ended", el);
+  endedBox.classList.toggle("hidden", !(idle || !st.online));
+  const final = idle && (t.ended || t.lastRec) && (tr.file || t.lastRec);
+  $(".ended b", el).textContent = !st.online ? "Assistant hors ligne" : t.ended ? "Réunion terminée" : "Assistant libre";
+  $(".ended-txt", el).textContent = !st.online ? "Il ne répond pas : vérifier le conteneur ou la VM."
+    : t.ended ? (tr.enabled && tr.file ? "Le compte rendu final est rédigé automatiquement (2 à 10 minutes)." : "L'enregistrement est dans « Enregistrements ».")
+    : "Collez un lien sur l'accueil pour l'envoyer en réunion, ou « 🔑 Ouvrir une page » pour vous connecter à un compte.";
+  $(".b-final", el).classList.toggle("hidden", !final);
+  $(".b-final", el).textContent = tr.file ? "📋 Voir le compte rendu final" : "▶ Voir l'enregistrement";
+  el.classList.toggle("offline", !st.online);
   $(".trb", el).classList.toggle("hidden", !tr.active);
-  if (tr.active && !t.userToggled) t.open = true;           // s'ouvre tout seul au début d'une transcription
   t.status = tr;
   if (tr.analysis && tr.analysis.v !== t.anV && !t.anLoading) fetchAnalysis(st.name);
   renderTr(st.name);
+  renderTile(st);
+}
+
+// ------------------------------------------------------------------ accueil : vignettes des réunions en cours
+const tiles = {}, chips = {};
+function tile(name) {
+  if (tiles[name]) return tiles[name];
+  const el = $("#tplTile").content.firstElementChild.cloneNode(true);
+  el.onclick = () => openMeeting(name);
+  el.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openMeeting(name); } };
+  $("img", el).onerror = function () { this.removeAttribute("src"); };
+  $("#liveGrid").appendChild(el);
+  const c = document.createElement("button"); c.type = "button"; c.className = "wchip";
+  c.onclick = () => openMeeting(name);
+  $("#pool").appendChild(c);
+  chips[name] = c;
+  return tiles[name] = el;
+}
+function renderTile(st) {
+  const el = tile(st.name), t = trState(st.name), busy = isBusy(st);
+  el.classList.toggle("hidden", !busy);
+  const live = st.state === "in_meeting";
+  const s = $(".tstate", el); s.className = "tstate " + st.state;
+  s.textContent = live ? "● EN DIRECT" : (STATE_FR[st.state] || st.state);
+  $(".plat", el).textContent = platLabel(st);
+  $(".ttime", el).textContent = live && (st.recording_since || st.since) ? fmtDur(st.recording_since || st.since) : "";
+  $(".ttitle", el).textContent = st.title || platLabel(st) || "Réunion";
+  const meta = [`Assistant ${st.name}`];
+  if (st.transcript?.active) meta.push("📝 transcription");
+  if (st.recording) meta.push("⏺ enregistrement");
+  if (sessions[st.name]) meta.push("🎧 vous écoutez");
+  $(".tmeta", el).textContent = meta.join(" · ");
+  const now = t.an?.state?.en_cours, p = $(".tnow", el);
+  p.classList.toggle("hidden", !now || !busy);
+  if (now) p.innerHTML = "🎯 " + whoH(now, t.speakers || t.an.speakers, t.aliases || t.an.aliases);
+  el.classList.toggle("err", st.state === "error");
+  const c = chips[st.name];
+  c.className = "wchip s-" + (st.online ? st.state : "offline");
+  c.innerHTML = `<i></i>${esc(st.name)} <small>${esc(STATE_FR[st.online ? st.state : "offline"] || st.state)}</small>`;
+  c.title = isBusy(st) ? (st.title || st.url || "") : "Ouvrir l'écran de cet assistant";
+}
+function renderHome(list) {
+  const busy = list.filter(isBusy), free = list.filter(s => s.online && !isBusy(s)).length;
+  $("#liveEmpty").classList.toggle("hidden", busy.length > 0);
+  const lc = $("#liveCount"); lc.textContent = busy.length; lc.classList.toggle("hidden", !busy.length);
+  const lb = $("#liveBadge"); lb.textContent = busy.length; lb.classList.toggle("hidden", !busy.length);
+  const h = new Date().getHours();
+  $("#hello").textContent = h >= 18 || h < 5 ? "Bonsoir" : "Bonjour";
+  const d = new Date().toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" });
+  $("#today").textContent = `${d.charAt(0).toUpperCase() + d.slice(1)} · ${busy.length ? busy.length + (busy.length > 1 ? " réunions en cours" : " réunion en cours") + " · " : ""}`
+    + (free ? `${free} assistant${free > 1 ? "s" : ""} disponible${free > 1 ? "s" : ""} sur ${list.length}` : "aucun assistant disponible");
+  $("#btnStart").disabled = !free && $("#f-worker").value === "auto";
 }
 
 // ------------------------------------------------------------------ transcription en direct
 const trStates = {};
-function trState(name) { return trStates[name] ||= { open: false, n: 0, file: null, status: {}, userToggled: false, view: "tr", anV: undefined, anSeen: 0 }; }
+function trState(name) { return trStates[name] ||= { open: false, n: 0, file: null, status: {}, view: "an", anV: undefined, anSeen: 0 }; }
 const fmtT = (sec) => { sec = Math.max(0, Math.floor(sec || 0)); const h = Math.floor(sec / 3600), m = Math.floor(sec / 60) % 60;
   return (h ? h + ":" : "") + String(m).padStart(2, "0") + ":" + String(sec % 60).padStart(2, "0"); };
 // Intervenants : {id: {label, color, source}} ; alias = groupes de voix fusionnés (ancien id -> nouvel id)
@@ -228,12 +329,10 @@ async function askRename(speakers, id, save) {
 function renderTr(name) {
   const el = cards[name]; if (!el) return;
   const t = trState(name), tr = t.status || {};
-  $(".tr-panel", el).classList.toggle("hidden", !t.open);
-  const b = $(".b-tr", el); b.classList.toggle("on", t.open);
   const tog = $(".tr-toggle", el);
   tog.textContent = tr.active ? "⏹ Arrêter" : "▶ Démarrer";
   tog.disabled = !tr.enabled || (!tr.active && lastStatus[name]?.state !== "in_meeting");
-  tog.title = tr.enabled ? "" : "Clé OVH AI Endpoints non configurée sur ce worker";
+  tog.title = !tr.enabled ? "Clé OVH AI Endpoints non configurée sur cet assistant" : tr.active ? "Arrêter la transcription" : "Démarrer la transcription";
   const an = t.view === "an", a = tr.analysis || {};
   el.querySelectorAll(".tr-panel .vt").forEach(b => b.classList.toggle("on", b.dataset.v === t.view));
   $(".tr-body", el).classList.toggle("hidden", an); $(".tr-spk", el).classList.toggle("hidden", an);
@@ -243,29 +342,39 @@ function renderTr(name) {
   $(".an-now", el).disabled = !!a.running;
   const stEl = $(".tr-status", el);
   stEl.className = "tr-status" + (tr.active ? " on" : "") + ((an ? a.error : tr.error) ? " err" : "");
+  if (!t.an || !tr.active && !tr.file) {   // rien à montrer encore : message d'accueil du panneau
+    $(".an-body", el).innerHTML = !tr.enabled ? `<p class="empty">Transcription non configurée sur cet assistant (clé OVH AI Endpoints absente).</p>`
+      : !tr.active && !tr.file ? `<p class="empty">Pas de transcription en cours.${lastStatus[name]?.state === "in_meeting" ? " Cliquer sur « ▶ Démarrer » pour la lancer." : ""}</p>`
+      : analysisHtml(a);
+    if (!tr.active && !tr.file) t.an = null;
+  } else if (!t.an.state) paintAnalysis(name);   // message d'attente : suit le statut (fin de réunion…)
   if (an) {
     const at = a.at ? new Date(a.at).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }) : null;
-    stEl.textContent = a.running ? "⏳ point d'étape en cours…" : a.error ? "⚠ " + a.error
-      : (at ? `point n°${a.count || a.v} à ${at}` : "aucun point d'étape")
-        + (tr.active && a.next_in != null ? ` · prochain dans ~${Math.max(1, Math.round(a.next_in / 60))} min` : "")
-        + (!tr.active && tr.file ? " · compte rendu final : 📁 Enregistrements" : "");
+    stEl.textContent = a.running ? "⏳ mise à jour en cours…" : a.error ? "⚠ " + a.error
+      : [at ? `mis à jour à ${at}` : tr.active ? "en attente du premier point" : "",
+         tr.active && a.next_in != null ? `suivant dans ~${Math.max(1, Math.round(a.next_in / 60))} min` : "",
+         !tr.active && tr.file ? "réunion terminée" : ""].filter(Boolean).join(" · ");
     return;
   }
   stEl.textContent = tr.error ? "⚠ " + tr.error
     : tr.active ? `en direct · ${tr.paragraphs || 0} paragraphes · ${tr.n_speakers || 0} voix${tr.ui_speaker ? " · noms de la plateforme ✓" : ""}`
-    : !tr.enabled ? "transcription non configurée" : tr.file ? "terminée (voir 📁 Enregistrements)" : "inactive";
+    : !tr.enabled ? "transcription non configurée" : tr.file ? "terminée" : "inactive";
 }
 async function pollTranscripts() {
-  if (document.hidden || $("#tab-live").classList.contains("hidden")) return;
-  for (const name of Object.keys(cards)) {
+  if (document.hidden || !cur || pollTranscripts.busy) return;
+  pollTranscripts.busy = true;
+  try { await pollTranscript(cur); } finally { pollTranscripts.busy = false; }
+}
+async function pollTranscript(name) {
+  {
     const t = trState(name);
-    if (!t.open || !(t.status?.active || t.status?.file)) continue;
+    if (!t.open || !(t.status?.active || t.status?.file)) return;
     try {
       const d = await api(`/api/workers/${name}/transcript?after=${t.n}`);
       const body = $(".tr-body", cards[name]);
       if (d.file !== t.file || d.total < t.n) {   // nouvelle transcription : on repart de zéro
         body.innerHTML = ""; t.file = d.file;
-        if (t.n) { t.n = 0; continue; }
+        if (t.n) { t.n = 0; return; }
       }
       const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
       t.speakers = d.speakers; t.aliases = d.aliases;
@@ -302,8 +411,9 @@ function bindSeek(box, seek) { box.addEventListener("click", (e) => { const ts =
 
 function analysisHtml(a, sp, al) {
   const W = (x) => whoH(x, sp, al), st = a?.state;
-  if (!st) return `<p class="empty">${a?.running ? "Premier point d'étape en cours de rédaction…" :
-    a?.next_in != null ? `Premier point d'étape dans ~${Math.max(1, Math.round(a.next_in / 60))} min (ou « ↻ Analyser »).` : "Aucun point d'étape pour cette réunion."}</p>`;
+  if (!st) return `<p class="empty">${a?.running ? "Rédaction du premier point en cours…" :
+    a?.next_in != null ? `Le compte rendu en direct apparaîtra ici dans ~${Math.max(1, Math.round(a.next_in / 60))} min, puis sera mis à jour toutes les ${Math.round((a.every || 300) / 60)} minutes (ou tout de suite avec « ↻ Mettre à jour »).<br><br>En attendant, l'onglet « 📝 Transcription » défile en direct.`
+      : "Aucun point d'étape pour cette réunion."}</p>`;
   const qs = (st.questions || []).slice().sort((x, y) => (x.statut === "répondue") - (y.statut === "répondue"));
   return secH("🎯 En ce moment", st.en_cours ? `<p>${W(st.en_cours)}</p>` : "")
     + secH("🙋 Pour toi", ulH(st.pour_moi, x => W(x.texte) + tsH(x.t)), "me")
@@ -380,19 +490,32 @@ async function copyText(txt) {
 }
 
 async function refresh() {
-  try { (await api("/api/workers")).forEach(render); } catch (e) { }
+  try { const list = await api("/api/workers"); list.forEach(render); renderHome(list); } catch (e) { }
 }
 
+// Aperçus d'écran : celui de la réunion ouverte (souvent), les vignettes de l'accueil (moins souvent)
+async function shotInto(name, img, width) {
+  const blob = await api(`/api/workers/${name}/screenshot?w=${Math.max(320, Math.min(1600, Math.round(width * devicePixelRatio)))}`);
+  const old = img.src; img.src = URL.createObjectURL(blob); if (old.startsWith("blob:")) URL.revokeObjectURL(old);
+}
+let shotTick = 0;
 async function refreshShots() {
-  if (document.hidden || $("#tab-live").classList.contains("hidden")) return;
-  for (const [name, el] of Object.entries(cards)) {
-    if (!lastStatus[name]?.online) continue;
-    try {
-      const blob = await api(`/api/workers/${name}/screenshot?w=${Math.min(1280, Math.round(el.clientWidth * devicePixelRatio))}`);
-      const img = $(".shot", el); const old = img.src;
-      img.src = URL.createObjectURL(blob); if (old.startsWith("blob:")) URL.revokeObjectURL(old);
-    } catch (e) { }
-  }
+  if (document.hidden || refreshShots.busy) return;
+  refreshShots.busy = true; shotTick++;
+  try {
+    const v = view();
+    if (v === "meet" && lastStatus[cur]?.online && !cards[cur].classList.contains("vnc-on")) {
+      const img = $(".shot", cards[cur]);
+      await shotInto(cur, img, img.clientWidth || 800).catch(() => { });
+    } else if (v === "home" && (shotTick % 2 === 1 || !refreshShots.homeOnce)) {
+      refreshShots.homeOnce = true;
+      for (const [name, el] of Object.entries(tiles)) {
+        if (!isBusy(lastStatus[name])) continue;
+        const img = $("img", el);
+        await shotInto(name, img, img.clientWidth || 400).catch(() => { });
+      }
+    }
+  } finally { refreshShots.busy = false; }
 }
 
 // ------------------------------------------------------------------ périphériques audio (entrée / sortie)
@@ -552,7 +675,7 @@ async function startAudio(name) {
     const ans = await api(`/api/workers/${name}/offer`, { method: "POST",
       json: { sdp: pc.localDescription.sdp, type: pc.localDescription.type } });
     await pc.setRemoteDescription(ans);
-    btn.textContent = "🎧 Couper l'audio"; btn.classList.remove("primary");
+    btn.textContent = "🔇 Ne plus écouter"; btn.classList.remove("primary"); if (lastStatus[name]) renderTile(lastStatus[name]);
     ["b-mic", "vol"].forEach(c => $("." + c, el).classList.toggle("hidden", !stream && c === "b-mic"));
     $(".vol", el).classList.remove("hidden");
     if (stream) $(".lvl", el).classList.remove("hidden");
@@ -568,7 +691,8 @@ function stopAudio(name) {
   s.stream?.getTracks().forEach(t => t.stop());
   s.audio.srcObject = null; s.audio.remove();
   s.ctx?.close();
-  const btn = $(".b-audio", el); btn.textContent = "🎧 Rejoindre l'audio"; btn.classList.add("primary");
+  const btn = $(".b-audio", el); btn.textContent = "🎧 Écouter la réunion"; btn.classList.add("primary");
+  if (lastStatus[name]) renderTile(lastStatus[name]);
   ["b-mic", "b-ptt", "vol", "lvl"].forEach(c => $("." + c, el).classList.add("hidden"));
 }
 
@@ -595,7 +719,7 @@ function meter(name, stream) {
 async function loadSchedule() {
   const items = await api("/api/schedule");
   const ul = $("#schedule"); ul.innerHTML = "";
-  $("#schedCard").classList.toggle("hidden", !items.length);
+  $("#schedSec").classList.toggle("hidden", !items.length);
   for (const it of items) {
     const li = document.createElement("li");
     li.innerHTML = `<div class="t"><b></b><small></small></div><button>Supprimer</button>`;
@@ -632,11 +756,11 @@ async function loadRecordings() {
     $("#storage").innerHTML = disks.map(d => d.error ? `<span>${esc(d.worker)} : injoignable</span>` :
       `<span>${esc(d.worker)} <span class="bar"><i class="${d.used / d.total > .85 ? "hi" : ""}" style="width:${(100 * d.used / d.total).toFixed(0)}%"></i></span>
        ${fmtSize(d.free)} libres</span>`).join("");
-    renderRecordings();
+    renderRecordings(); renderRecent();
     clearTimeout(loadRecordings._t);   // compte rendu en cours de génération : on rafraîchit la liste
     if (items.some(r => r.report_job?.state === "running")) loadRecordings._t = setTimeout(() => {
-      if (!$("#tab-rec").classList.contains("hidden")) loadRecordings(); }, 10000);
-  } catch (e) { toast("Erreur : " + e.message); }
+      if (view() !== "meet") loadRecordings(); }, 10000);
+  } catch (e) { if (view() === "rec") toast("Erreur : " + e.message); }
 }
 
 function renderRecordings() {
@@ -660,46 +784,72 @@ function renderRecordings() {
       const h = document.createElement("h3"); h.className = "day"; h.textContent = label; root.appendChild(h);
       grid = document.createElement("div"); grid.className = "rgrid"; root.appendChild(grid); last = label;
     }
-    const url = `/api/recordings/${encodeURIComponent(r.worker)}/${encodeURIComponent(r.name)}`;
-    const el = document.createElement("div"); el.className = "ritem";
-    const video = r.kind !== "transcript";
-    el.innerHTML = `
-      <div class="thumb ${video ? "" : "tthumb"}">${video ? '<img loading="lazy" alt="">' : "📝"}
-        ${r.recording ? '<span class="live">● EN COURS</span>' : ""}
-        ${r.transcript && video ? `<span class="tr" title="Transcription${r.report ? " et compte rendu" : ""} disponible">📝${r.report ? "📋" : ""}</span>` : ""}
-        <span class="plat">${esc(platOf(r) === "web" ? (r.meta?.site || siteOf(r.meta?.url || "") || "web") : platOf(r))}</span>
-        ${r.duration != null ? `<span class="dur">${fmtSec(r.duration)}</span>` : ""}</div>
-      <div class="rbody">
-        <b class="rtitle"></b>
-        <small>${started.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })} · ${fmtSize(r.size)} · ${esc(r.worker)}</small>
-        <div class="ractions">
-          <button class="play">${video ? "▶ Lire" : "📝 Lire"}</button>
-          ${video ? `<a class="btn" href="${url}?download=1" download="${esc(r.name)}" title="Télécharger la vidéo">⬇</a>` : ""}
-          ${r.transcript ? `<a class="btn" href="${url}/transcript?fmt=md&download=1" title="Télécharger la transcription (Markdown)">📝⬇</a>` : ""}
-          ${r.report ? `<button class="cr" title="Compte rendu">📋 CR</button><a class="btn" href="${url}/report?fmt=docx&download=1" title="Télécharger le compte rendu (Word)">W⬇</a>`
-            : r.report_job?.state === "running" ? `<button class="cr run" title="${esc(r.report_job.step || "")}">⏳ CR</button>` : ""}
-          <button class="icon ren" title="Renommer">✏️</button>
-          <button class="icon del" title="Supprimer" ${r.recording ? "disabled" : ""}>🗑</button>
-        </div>
-      </div>`;
-    const title = r.meta?.title || r.name;
-    $(".rtitle", el).textContent = title; $(".rtitle", el).title = title;
-    const img = $("img", el);
-    if (img) { img.src = url + "/thumb" + (r.recording ? "?t=" + Date.now() : ""); img.onerror = () => img.remove(); }
-    const play = (tab) => openPlayer(url, title, r.name, { video, transcript: r.transcript, report: r.report || !!r.report_job, tab });
-    $(".thumb", el).onclick = () => play(); $(".play", el).onclick = () => play();
-    if ($(".cr", el)) $(".cr", el).onclick = () => play("cr");
-    $(".ren", el).onclick = async () => {
-      const t = prompt("Nouveau titre :", title);
-      if (!t || t === title) return;
-      try { await api(url, { method: "PATCH", json: { title: t } }); loadRecordings(); } catch (e) { toast(e.message); }
-    };
-    $(".del", el).onclick = async () => {
-      if (!confirm(`Supprimer définitivement « ${title} » ?`)) return;
-      try { await api(url, { method: "DELETE" }); toast("Supprimé"); loadRecordings(); } catch (e) { toast(e.message); }
-    };
-    grid.appendChild(el);
+    grid.appendChild(recItem(r, started));
   }
+}
+
+const recUrl = (r) => `/api/recordings/${encodeURIComponent(r.worker)}/${encodeURIComponent(r.name)}`;
+function playRec(r, tab) {
+  openPlayer(recUrl(r), r.meta?.title || r.name, r.name, { video: r.kind !== "transcript", transcript: r.transcript, report: r.report || !!r.report_job, tab });
+}
+function recItem(r, started, opts = {}) {
+  const url = `/api/recordings/${encodeURIComponent(r.worker)}/${encodeURIComponent(r.name)}`;
+  const el = document.createElement("div"); el.className = "ritem";
+  const video = r.kind !== "transcript";
+  el.innerHTML = `
+    <div class="thumb ${video ? "" : "tthumb"}">${video ? '<img loading="lazy" alt="">' : "📝"}
+      ${r.recording ? '<span class="live">● EN COURS</span>' : ""}
+      ${r.transcript && video ? `<span class="tr" title="Transcription${r.report ? " et compte rendu" : ""} disponible">📝${r.report ? "📋" : ""}</span>` : ""}
+      <span class="plat">${esc(platOf(r) === "web" ? (r.meta?.site || siteOf(r.meta?.url || "") || "web") : platOf(r))}</span>
+      ${r.duration != null ? `<span class="dur">${fmtSec(r.duration)}</span>` : ""}</div>
+    <div class="rbody">
+      <b class="rtitle"></b>
+      <small>${opts.short ? esc(dayLabel(started)) + " à " : ""}${started.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}${opts.short ? "" : ` · ${fmtSize(r.size)} · ${esc(r.worker)}`}</small>
+      <div class="ractions">
+        <button class="play">${video ? "▶ Lire" : "📝 Lire"}</button>
+        ${video ? `<a class="btn" href="${url}?download=1" download="${esc(r.name)}" title="Télécharger la vidéo">⬇</a>` : ""}
+        ${r.transcript ? `<a class="btn" href="${url}/transcript?fmt=md&download=1" title="Télécharger la transcription (Markdown)">📝⬇</a>` : ""}
+        ${r.report ? `<button class="cr" title="Compte rendu">📋 CR</button><a class="btn" href="${url}/report?fmt=docx&download=1" title="Télécharger le compte rendu (Word)">W⬇</a>`
+          : r.report_job?.state === "running" ? `<button class="cr run" title="${esc(r.report_job.step || "")}">⏳ CR</button>` : ""}
+        <button class="icon ren" title="Renommer">✏️</button>
+        <button class="icon del" title="Supprimer" ${r.recording ? "disabled" : ""}>🗑</button>
+      </div>
+    </div>`;
+  const title = r.meta?.title || r.name;
+  $(".rtitle", el).textContent = title; $(".rtitle", el).title = title;
+  const img = $("img", el);
+  if (img) { img.src = url + "/thumb" + (r.recording ? "?t=" + Date.now() : ""); img.onerror = () => img.remove(); }
+  const play = (tab) => openPlayer(url, title, r.name, { video, transcript: r.transcript, report: r.report || !!r.report_job, tab });
+  $(".thumb", el).onclick = () => play(); $(".play", el).onclick = () => play();
+  if ($(".cr", el)) $(".cr", el).onclick = () => play("cr");
+  $(".ren", el).onclick = async () => {
+    const t = prompt("Nouveau titre :", title);
+    if (!t || t === title) return;
+    try { await api(url, { method: "PATCH", json: { title: t } }); loadRecordings(); } catch (e) { toast(e.message); }
+  };
+  $(".del", el).onclick = async () => {
+    if (!confirm(`Supprimer définitivement « ${title} » ?`)) return;
+    try { await api(url, { method: "DELETE" }); toast("Supprimé"); loadRecordings(); } catch (e) { toast(e.message); }
+  };
+  if (opts.short) el.querySelectorAll(".ractions .btn, .ren, .del").forEach(x => x.remove());
+  return el;
+}
+// Accueil : les dernières réunions terminées
+function renderRecent() {
+  const items = recItems.filter(r => !r.recording).slice(0, 4), box = $("#recent");
+  $("#recentSec").classList.toggle("hidden", !items.length);
+  box.innerHTML = "";
+  items.forEach(r => box.appendChild(recItem(r, r.meta?.started_at ? new Date(r.meta.started_at) : new Date(r.mtime * 1000), { short: true })));
+}
+// Fin d'une réunion : ouvre l'enregistrement correspondant sur le compte rendu
+async function openFinal(name) {
+  await loadRecordings();
+  const t = trState(name), f = t.status?.file, rec = t.lastRec;
+  const mine = recItems.filter(x => x.worker === name);
+  const r = mine.find(x => f && x.name.startsWith(f) && x.kind !== "transcript") || mine.find(x => rec && x.name === rec)
+    || mine.find(x => f && x.name.startsWith(f));
+  if (!r) return toast("Enregistrement introuvable : voir « Enregistrements »", 4000);
+  playRec(r, r.transcript ? "cr" : undefined);
 }
 ["#r-search", "#r-platform", "#r-worker"].forEach(s => $(s).addEventListener("input", renderRecordings));
 $("#refreshRec").onclick = loadRecordings;
@@ -821,12 +971,12 @@ async function boot() {
   if (!$("#f-dur").value) $("#f-dur").value = cfg.defaultDuration || "";
   prefillName();
   const sel = $("#f-worker");
-  cfg.workers.forEach(w => { if (![...sel.options].some(o => o.value === w)) sel.add(new Option(w, w)); card(w); });
+  cfg.workers.forEach(w => { if (![...sel.options].some(o => o.value === w)) sel.add(new Option(w, w)); card(w); tile(w); });
   timers.forEach(clearInterval);
-  await refresh(); refreshShots(); loadSchedule();
-  showTab(location.hash.slice(1) || "live");
-  if (location.hash !== "#rec") loadRecordings();   // pour le compteur du menu
-  timers = [setInterval(refresh, 3000), setInterval(refreshShots, 2500), setInterval(loadSchedule, 30000),
-    setInterval(pollTranscripts, 2500)];
+  await refresh(); loadSchedule();
+  showTab(location.hash.slice(1) || "home");   // charge aussi les enregistrements (accueil, compteur du menu)
+  if (view() === "meet") loadRecordings();
+  timers = [setInterval(refresh, 3000), setInterval(refreshShots, 1500), setInterval(loadSchedule, 30000),
+    setInterval(pollTranscripts, 2500), setInterval(() => view() === "home" && loadRecordings(), 60000)];
 }
 boot();

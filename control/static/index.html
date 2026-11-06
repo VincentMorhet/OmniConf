@@ -5,16 +5,18 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="theme-color" content="#0f1419">
+<meta name="theme-color" content="#0b1020">
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ctext y=%22.9em%22 font-size=%2290%22%3E🎧%3C/text%3E%3C/svg%3E">
-<title>WebConf</title>
+<title>OmniConf</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <div id="login" class="hidden">
-  <form id="loginForm" class="card narrow">
-    <h1>WebConf</h1>
+  <form id="loginForm" class="login-card">
+    <div class="logo big">◉</div>
+    <h1>OmniConf</h1>
+    <p class="tagline">Votre assistant de réunion : il écoute, transcrit et rédige le compte rendu.</p>
     <input type="password" id="pw" placeholder="Mot de passe" autocomplete="current-password" required>
     <button class="primary">Se connecter</button>
     <p id="loginErr" class="err"></p>
@@ -22,60 +24,78 @@
 </div>
 
 <div id="app" class="hidden">
-  <header>
-    <h1>WebConf</h1>
+  <header class="top">
+    <a class="brand" href="#home"><span class="logo">◉</span><span>OmniConf</span></a>
     <nav class="tabs">
-      <button data-tab="live" class="tab active"><span class="ico">🎥</span><span>Réunions</span></button>
+      <button data-tab="home" class="tab active"><span class="ico">🏠</span><span>Accueil</span><span id="liveBadge" class="count live hidden"></span></button>
       <button data-tab="rec" class="tab"><span class="ico">📁</span><span>Enregistrements</span><span id="recCount" class="count hidden"></span></button>
     </nav>
     <button id="audioBtn" class="ghost" title="Réglages audio : micro et sortie">🎚</button>
     <button id="logout" class="ghost" title="Déconnexion">⎋</button>
   </header>
 
-  <main id="tab-live">
-    <section class="card">
-      <h2>Nouvelle réunion</h2>
-      <form id="startForm">
-        <input id="f-url" type="url" placeholder="Lien de la réunion (Teams, Zoom, Meet, Jitsi, Webex, BBB…)" required>
-        <div class="row">
-          <select id="f-platform">
-            <option value="">Auto</option><option value="teams">Teams</option>
-            <option value="zoom">Zoom</option><option value="web">Autre webconf (auto)</option>
-            <option value="open">Ouvrir seulement (manuel)</option>
-          </select>
-          <select id="f-worker"><option value="auto">Worker libre</option></select>
+  <!-- ============================================================ accueil -->
+  <main id="tab-home">
+    <section class="hero">
+      <h1 id="hello">Bonjour</h1>
+      <p id="today" class="sub"></p>
+      <form id="startForm" class="launch">
+        <div class="launch-bar">
+          <input id="f-url" type="url" placeholder="Collez le lien d'une réunion (Teams, Zoom, Meet, Jitsi…)" required>
+          <button class="primary" id="btnStart">Envoyer l'assistant</button>
         </div>
-        <div class="row">
-          <input id="f-name" placeholder="Nom affiché">
-          <input id="f-pass" placeholder="Code / mot de passe">
-        </div>
-        <input id="f-title" placeholder="Titre (nom du fichier)">
-        <div class="row">
-          <label class="chk"><input id="f-rec" type="checkbox" checked> Enregistrer</label>
-          <label class="chk" title="Transcription en direct (Whisper) mise en forme par Qwen, points d'étape toutes les 5 min et compte rendu en fin de réunion"><input id="f-tr" type="checkbox" checked> Transcrire + CR</label>
-          <input id="f-dur" type="number" min="1" placeholder="Durée max (min)" title="Durée max en minutes (défaut 180)">
-        </div>
-        <div class="row">
-          <button class="primary" id="btnStart">Lancer maintenant</button>
-        </div>
-        <details>
-          <summary>Planifier</summary>
-          <div class="row">
-            <input id="f-when" type="datetime-local">
-            <button type="button" id="btnSchedule">Planifier</button>
+        <details id="opts">
+          <summary>Options</summary>
+          <div class="opts-grid">
+            <label>Nom affiché<input id="f-name" placeholder="Nom affiché"></label>
+            <label>Code / mot de passe<input id="f-pass" placeholder="facultatif"></label>
+            <label>Titre<input id="f-title" placeholder="Titre de la réunion"></label>
+            <label>Plateforme
+              <select id="f-platform">
+                <option value="">Détection automatique</option><option value="teams">Teams</option>
+                <option value="zoom">Zoom</option><option value="web">Autre webconf (auto)</option>
+                <option value="open">Ouvrir seulement (manuel)</option>
+              </select></label>
+            <label>Assistant<select id="f-worker"><option value="auto">Le premier libre</option></select></label>
+            <label>Durée max (min)<input id="f-dur" type="number" min="1" title="Départ automatique au bout de cette durée"></label>
+            <label class="chk"><input id="f-rec" type="checkbox" checked> Enregistrer la vidéo</label>
+            <label class="chk" title="Transcription en direct, points d'étape toutes les 5 min et compte rendu en fin de réunion"><input id="f-tr" type="checkbox" checked> Transcrire et faire le compte rendu</label>
+            <label class="when">Plus tard<span class="row"><input id="f-when" type="datetime-local"><button type="button" id="btnSchedule">Planifier</button></span></label>
           </div>
         </details>
       </form>
     </section>
 
-    <section id="workers"></section>
+    <section>
+      <h2 class="sec">Réunions en cours <span id="liveCount" class="pill hidden"></span></h2>
+      <div id="liveGrid" class="tiles"></div>
+      <div id="liveEmpty" class="empty-state hidden">
+        <div class="es-ico">☕</div>
+        <b>Aucune réunion en cours</b>
+        <span>Collez un lien ci-dessus : un assistant rejoint la réunion, et elle apparaît ici.</span>
+      </div>
+    </section>
 
-    <section class="card" id="schedCard">
-      <h2>Planifiées</h2>
+    <section id="schedSec" class="hidden">
+      <h2 class="sec">Planifiées</h2>
       <ul id="schedule" class="list"></ul>
+    </section>
+
+    <section id="recentSec" class="hidden">
+      <h2 class="sec">Dernières réunions <a href="#rec" class="more">Tout voir →</a></h2>
+      <div id="recent" class="rgrid"></div>
+    </section>
+
+    <section>
+      <h2 class="sec small">Assistants <span class="hint">un assistant = une réunion à la fois</span></h2>
+      <div id="pool" class="pool"></div>
     </section>
   </main>
 
+  <!-- ============================================================ vue d'une réunion -->
+  <main id="tab-meet" class="hidden"><div id="workers"></div></main>
+
+  <!-- ============================================================ enregistrements -->
   <main id="tab-rec" class="hidden">
     <section class="card">
       <h2>Enregistrements</h2>
@@ -83,7 +103,7 @@
         <input id="r-search" type="search" placeholder="🔍 Rechercher (titre, date…)">
         <select id="r-platform"><option value="">Toutes plateformes</option><option value="teams">Teams</option>
           <option value="zoom">Zoom</option><option value="web">Autres webconfs</option></select>
-        <select id="r-worker"><option value="">Tous les workers</option></select>
+        <select id="r-worker"><option value="">Tous les assistants</option></select>
         <button id="refreshRec" title="Actualiser">↻</button>
       </div>
       <div id="storage" class="storage"></div>
@@ -92,46 +112,71 @@
   </main>
 </div>
 
+<template id="tplTile">
+  <div class="tile" tabindex="0" role="button">
+    <div class="tthumb"><img alt="">
+      <span class="tstate"></span>
+      <span class="plat"></span>
+      <span class="ttime"></span>
+    </div>
+    <div class="tbody">
+      <b class="ttitle"></b>
+      <small class="tmeta"></small>
+      <p class="tnow hidden"></p>
+    </div>
+  </div>
+</template>
+
 <template id="tplWorker">
-  <article class="card worker">
-    <div class="whead">
-      <h2 class="wname"></h2>
-      <span class="badge"></span>
+  <article class="worker meet hidden">
+    <div class="mhead">
+      <button class="ghost back" title="Retour à l'accueil">←</button>
+      <div class="mtitle"><h2 class="wtitle"></h2><div class="winfo"></div></div>
       <span class="rec hidden">● REC <span class="rectime"></span></span>
       <span class="trb hidden" title="Transcription en direct">📝</span>
+      <span class="badge"></span>
+      <span class="wname" title="Assistant"></span>
     </div>
-    <div class="winfo"></div>
-    <img class="shot" alt="" loading="lazy">
-    <div class="audio-ctl">
-      <button class="primary b-audio">🎧 Rejoindre l'audio</button>
-      <button class="b-mic hidden" title="Activer/couper mon micro">🎙️ Micro</button>
-      <button class="b-ptt hidden" title="Maintenir pour parler">✋ Parler</button>
-      <button class="b-devs" title="Choisir le micro et la sortie audio">🎚</button>
-      <input class="vol hidden" type="range" min="0" max="1" step="0.05" value="1" title="Volume">
-      <meter class="lvl hidden" min="0" max="1" value="0"></meter>
-    </div>
-    <div class="tr-panel hidden">
-      <div class="vtabs">
-        <button class="vt on" data-v="tr">📝 Transcription</button>
-        <button class="vt" data-v="an">🧠 Points d'étape <span class="an-new hidden">nouveau</span></button>
+    <div class="mgrid">
+      <div class="stage">
+        <div class="screen">
+          <img class="shot" alt="Écran de la réunion">
+          <iframe class="vnc hidden" title="Écran interactif" allow="clipboard-read; clipboard-write"></iframe>
+          <span class="screen-hint">🖐 Cliquer pour prendre la main</span>
+          <div class="ended hidden"><b>Réunion terminée</b><span class="ended-txt"></span><button class="primary b-final">📋 Voir le compte rendu final</button></div>
+        </div>
+        <div class="wnote"></div>
+        <div class="audio-ctl">
+          <button class="primary b-audio">🎧 Écouter la réunion</button>
+          <button class="b-mic hidden" title="Activer/couper mon micro">🎙️ Micro</button>
+          <button class="b-ptt hidden" title="Maintenir pour parler">✋ Parler</button>
+          <input class="vol hidden" type="range" min="0" max="1" step="0.05" value="1" title="Volume">
+          <meter class="lvl hidden" min="0" max="1" value="0"></meter>
+        </div>
+        <div class="actions">
+          <button class="b-screen" title="Prendre la main sur l'écran de l'assistant (ici)">🖐 Prendre la main</button>
+          <button class="b-full icon" title="Ouvrir l'écran dans un nouvel onglet">⛶</button>
+          <button class="b-rec">⏺ Enregistrer</button>
+          <button class="b-mute" title="Bascule le micro de l'assistant dans la réunion">🔇 Muet</button>
+          <button class="b-open" title="Ouvrir une page (ex : se connecter à son compte Teams ou Zoom)">🔑 Ouvrir une page</button>
+          <button class="danger b-leave">Quitter la réunion</button>
+        </div>
       </div>
-      <div class="tr-head">
-        <span class="tr-status"></span>
-        <button class="an-now hidden" title="Faire un point d'étape tout de suite">↻ Analyser</button>
-        <button class="tr-toggle"></button>
-        <button class="tr-copy icon" title="Copier le texte">📋</button>
-      </div>
-      <div class="tr-spk"></div>
-      <div class="tr-body"></div>
-      <div class="an-body hidden"></div>
-    </div>
-    <div class="actions">
-      <button class="b-mute" title="Bascule le micro du bot dans la réunion">Muet réunion</button>
-      <button class="b-rec">⏺ Enregistrer</button>
-      <button class="b-screen">🖥 Écran</button>
-      <button class="b-tr" title="Afficher la transcription en direct">📝 Transcription</button>
-      <button class="b-open" title="Ouvrir une page (ex: se connecter à son compte Teams/Zoom)">🔑 Ouvrir…</button>
-      <button class="danger b-leave">Quitter</button>
+      <aside class="side tr-panel">
+        <div class="vtabs">
+          <button class="vt on" data-v="an">🧠 Compte rendu en direct <span class="an-new hidden">nouveau</span></button>
+          <button class="vt" data-v="tr">📝 Transcription</button>
+        </div>
+        <div class="tr-head">
+          <span class="tr-status"></span>
+          <button class="an-now hidden" title="Mettre à jour le compte rendu tout de suite">↻ Mettre à jour</button>
+          <button class="tr-toggle"></button>
+          <button class="tr-copy icon" title="Copier le texte">📋</button>
+        </div>
+        <div class="tr-spk"></div>
+        <div class="tr-body hidden"></div>
+        <div class="an-body"></div>
+      </aside>
     </div>
   </article>
 </template>

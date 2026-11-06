@@ -1,0 +1,11 @@
+# Copier en terraform.tfvars (ignoré par git) et adapter.
+region      = "GRA11"
+flavor      = "b3-16"
+admin_cidrs = ["203.0.113.10/32"] # ton adresse publique (https://ifconfig.me)
+
+# Facultatif
+# domain         = "omniconf.exemple.fr"  # enregistrement A vers l'IP (sinon <ip>.sslip.io)
+# web_cidrs      = ["203.0.113.10/32"]    # IHM réservée à certaines adresses
+# worker_count   = 3
+# data_volume_gb = 200
+# ssh_public_key_file = "~/.ssh/id_ed25519.pub"
