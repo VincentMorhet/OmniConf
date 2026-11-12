@@ -4,8 +4,9 @@
 const inEl = (root, s) => root.matches(s) ? root : root.querySelector(s);
 const $ = (s, el = document) => el.querySelector(s) || (el._side && (inEl(el._side, s) || inEl(el._actl, s))) || null;
 const STATE_FR = { idle: "libre", joining: "connexion…", lobby: "salle d'attente", in_meeting: "en réunion",
-  leaving: "départ…", error: "erreur", offline: "hors ligne", manual: "navigation manuelle" };
+  leaving: "départ…", error: "erreur", offline: "hors ligne", manual: "navigation manuelle", taken: "occupé" };
 let cfg = { iceServers: [], workers: [] };
+let me = null;         // compte connecté {login, name, role, admin, bot_names, must_change}
 const cards = {};      // name -> element
 const sessions = {};   // name -> {pc, stream, audio, micLatched}
 let lastStatus = {};
@@ -30,7 +31,13 @@ async function api(path, opts = {}) {
 function showLogin() { $("#app").classList.add("hidden"); $("#login").classList.remove("hidden"); }
 $("#loginForm").onsubmit = async (e) => {
   e.preventDefault(); $("#loginErr").textContent = "";
-  try { await api("/api/login", { method: "POST", json: { password: $("#pw").value } }); boot(); }
+  try {
+    const r = await api("/api/login", { method: "POST", json: { login: $("#loginId").value.trim(), password: $("#pw").value } });
+    localStorage.lastLogin = $("#loginId").value.trim();
+    const pw0 = $("#pw").value; $("#pw").value = "";
+    await boot();
+    if (r.must_change) askPassword(true, pw0);
+  }
   catch (err) { $("#loginErr").textContent = err.message; }
 };
 // ------------------------------------------------------------------ thème blanc / noir
@@ -222,6 +229,7 @@ function render(st) {
   if (isBusy(prev) && !isBusy(st)) { t.ended = true; setTimeout(loadRecordings, 4000); if (sessions[st.name]) stopAudio(st.name); }   // fin de réunion
   if (isBusy(st)) t.ended = false;
   const b = $(".badge", el); b.className = "badge " + st.state; b.textContent = STATE_FR[st.state] || st.state;
+  const taken = st.state === "taken";   // utilisé par un autre compte : rien n'en est montré
   $(".rec", el).classList.toggle("hidden", !st.recording);
   if (st.recording) $(".rectime", el).textContent = fmtDur(st.recording_since);
   const plat = platLabel(st);
@@ -232,7 +240,8 @@ function render(st) {
     if (st.since) info.push("depuis " + new Date(st.since).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }));
     if (st.listeners) info.push(`🎧 ${st.listeners} à l'écoute`);
     if (st.auto_leave_at) info.push("départ auto à " + new Date(st.auto_leave_at).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }));
-  } else info.push(st.online ? "libre" : "hors ligne");
+    if (st.owner_name && !st.mine) info.push("👤 " + esc(st.owner_name));
+  } else info.push(!st.online ? "hors ligne" : taken ? "utilisé par un autre utilisateur" : "libre");
   $(".winfo", el).innerHTML = info.join(" · ");
   $(".winfo", el).title = st.url || "";
   let note = "";
@@ -247,11 +256,13 @@ function render(st) {
   const idle = st.online && !isBusy(st), endedBox = $(".ended", el);
   endedBox.classList.toggle("hidden", !(idle || !st.online));
   const final = idle && (t.ended || t.lastRec) && (tr.file || t.lastRec);
-  $(".ended b", el).textContent = !st.online ? "Assistant hors ligne" : t.ended ? "Réunion terminée" : "Assistant libre";
+  $(".ended b", el).textContent = !st.online ? "Assistant hors ligne" : taken ? "Assistant occupé" : t.ended ? "Réunion terminée" : "Assistant libre";
   $(".ended-txt", el).textContent = !st.online ? "Il ne répond pas : vérifier le conteneur ou la VM."
+    : taken ? "Il est utilisé par un autre utilisateur. Choisissez un autre assistant (ou « Automatique »)."
     : t.ended ? (tr.enabled && tr.file ? "Le compte rendu final est rédigé automatiquement (2 à 10 minutes)." : "L'enregistrement est dans « Enregistrements ».")
     : "Collez un lien sur l'accueil pour l'envoyer en réunion, ou « 🔑 Ouvrir une page » pour vous connecter à un compte.";
-  $(".b-final", el).classList.toggle("hidden", !final);
+  $(".b-final", el).classList.toggle("hidden", !final || taken);
+  el.querySelectorAll(".ended button:not(.b-final)").forEach(x => x.disabled = taken);
   $(".b-final", el).textContent = tr.file ? "📋 Voir le compte rendu final" : "▶ Voir l'enregistrement";
   el.classList.toggle("offline", !st.online);
   $(".trb", el).classList.toggle("hidden", !tr.active);
@@ -302,7 +313,7 @@ function renderTile(st) {
   c.title = isBusy(st) ? (st.title || st.url || "") : "Ouvrir l'écran de cet assistant";
 }
 function renderHome(list) {
-  const busy = list.filter(isBusy), free = list.filter(s => s.online && !isBusy(s)).length;
+  const busy = list.filter(isBusy), free = list.filter(s => s.online && !isBusy(s) && s.state !== "taken").length;
   $("#liveEmpty").classList.toggle("hidden", busy.length > 0);
   const lc = $("#liveCount"); lc.textContent = busy.length; lc.classList.toggle("hidden", !busy.length);
   const lb = $("#liveBadge"); lb.textContent = busy.length; lb.classList.toggle("hidden", !busy.length);
@@ -875,7 +886,8 @@ async function loadSchedule() {
     const li = document.createElement("li");
     li.innerHTML = `<div class="t"><b></b><small></small></div><button>Supprimer</button>`;
     $("b", li).textContent = it.title || it.url;
-    $("small", li).textContent = `${new Date(it.when).toLocaleString()} · ${it.status}${it.result ? " (" + it.result + ")" : ""}`;
+    $("small", li).textContent = `${new Date(it.when).toLocaleString()} · ${it.status}${it.result ? " (" + it.result + ")" : ""}`
+      + (me?.admin && it.owner_name && it.owner !== me.login ? ` · 👤 ${it.owner_name}` : "");
     $("button", li).onclick = async () => { await api(`/api/schedule/${it.id}`, { method: "DELETE" }); loadSchedule(); };
     ul.appendChild(li);
   }
@@ -908,7 +920,7 @@ async function loadTokens() {
     const live = d.tokens.filter(x => !x.revoked);
     box.innerHTML = live.length ? live.map(x => `<div class="tok"><b>${esc(x.name)}</b>
       <span class="badge ${x.scope === "write" ? "warn" : ""}">${x.scope === "write" ? "écriture (dépôt du CR final)" : "lecture"}</span>
-      <small>créé le ${new Date(x.created).toLocaleString("fr-FR")} · ${x.last_used ? "utilisé le " + new Date(x.last_used).toLocaleString("fr-FR") : "jamais utilisé"}</small>
+      <small>${me?.admin && x.user && x.user !== me.login ? "👤 " + esc(x.user_name || x.user) + " · " : ""}créé le ${new Date(x.created).toLocaleString("fr-FR")} · ${x.last_used ? "utilisé le " + new Date(x.last_used).toLocaleString("fr-FR") : "jamais utilisé"}</small>
       <button class="danger" data-id="${esc(x.id)}">Révoquer</button></div>`).join("") : "<small>Aucun jeton actif.</small>";
     box.querySelectorAll("button[data-id]").forEach(b => b.onclick = async () => {
       if (!confirm("Révoquer ce jeton ? Claude ne pourra plus s'en servir (il faudra en créer un autre).")) return;
@@ -1023,6 +1035,7 @@ function recItem(r, started, opts = {}) {
     <div class="rbody">
       <b class="rtitle"></b>
       <small>${opts.short ? esc(dayLabel(started)) + " à " : ""}${started.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}${opts.short ? "" : ` · ${fmtSize(r.size)} · ${esc(r.worker)}`}</small>
+      ${ownerLine(r)}
       <div class="ractions">
         <button class="play">${video ? "▶ Lire" : "📝 Lire"}</button>
         ${r.report ? `<button class="cr" title="Compte rendu">📋 Compte rendu</button>`
@@ -1035,8 +1048,9 @@ function recItem(r, started, opts = {}) {
         ${r.report ? `<a href="${url}/report?fmt=docx&download=1">📄 Compte rendu (Word)</a>` : ""}
         ${r.final_cr ? `<a href="${url}/final?fmt=md" target="_blank" rel="noopener">✅ Compte rendu final (Markdown)</a>
           <a href="${url}/final?fmt=pdf" target="_blank" rel="noopener">✅ Compte rendu final (PDF, s'il a été joint)</a>` : ""}
+        ${r.can_edit === false ? "" : `<button class="share">🔗 Partager…</button>
         <button class="ren">✏️ Renommer</button>
-        <button class="del" ${r.recording ? "disabled title=\"Enregistrement en cours\"" : ""}>🗑 Supprimer</button>
+        <button class="del" ${r.recording ? "disabled title=\"Enregistrement en cours\"" : ""}>🗑 Supprimer</button>`}
       </div>
     </div>`;
   const title = r.meta?.title || r.name;
@@ -1049,12 +1063,13 @@ function recItem(r, started, opts = {}) {
   menu.addEventListener("click", () => closeMenus());
   $(".thumb", el).onclick = () => play(); $(".play", el).onclick = () => play();
   if ($(".cr", el)) $(".cr", el).onclick = () => play("cr");
-  $(".ren", el).onclick = async () => {
+  if ($(".share", el)) $(".share", el).onclick = () => shareRecording(r, title);
+  if ($(".ren", el)) $(".ren", el).onclick = async () => {
     const t = prompt("Nouveau titre :", title);
     if (!t || t === title) return;
     try { await api(url, { method: "PATCH", json: { title: t } }); loadRecordings(); } catch (e) { toast(e.message); }
   };
-  $(".del", el).onclick = () => deleteRecording(url, title);
+  if ($(".del", el)) $(".del", el).onclick = () => deleteRecording(url, title);
   if (opts.short) el.querySelectorAll(".more, .rmenu").forEach(x => x.remove());
   return el;
 }
@@ -1225,11 +1240,146 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeMen
 
 // ------------------------------------------------------------------ démarrage
 let timers = [];
+
+// ------------------------------------------------------------------ comptes
+function applyAccount() {
+  $("#accountName").textContent = me.name || me.login;
+  $("#accountBtn").title = `Mon compte (${me.login}${me.admin ? ", administrateur" : ""})`;
+  $("#usersBox").classList.toggle("hidden", !me.admin);
+  $("#lexText").readOnly = !me.admin;
+  $("#lexSave").classList.toggle("hidden", !me.admin);
+}
+function ownerLine(r) {
+  if (r.mine || !r.owner_name) return r.owner ? "" : (me?.admin ? `<small class="owner">👤 sans propriétaire (d'avant les comptes)</small>` : "");
+  return `<small class="owner">${r.can_edit ? "👤 " : "🔗 partagée par "}${esc(r.owner_name)}</small>`;
+}
+function showSecret(title, text, value) {
+  $("#secTitle").textContent = title; $("#secText").textContent = text; $("#secValue").value = value;
+  $("#dlgSecret").showModal(); $("#secValue").select();
+}
+$("#secCopy").onclick = async () => { try { await navigator.clipboard.writeText($("#secValue").value); toast("Copié"); } catch (e) { $("#secValue").select(); } };
+$("#dlgSecret").addEventListener("close", () => { $("#secValue").value = ""; });
+
+// Mon compte : nom, noms de l'assistant, mot de passe
+$("#accountBtn").onclick = () => {
+  $("#acLogin").textContent = `Identifiant : ${me.login}${me.admin ? " · administrateur" : ""}`;
+  $("#acFull").value = me.name || "";
+  const b = me.bot_names || {};
+  $("#acBotTeams").value = b.teams || ""; $("#acBotZoom").value = b.zoom || ""; $("#acBotWeb").value = b.web || "";
+  $("#dlgAccount").showModal();
+};
+$("#acPw").onclick = () => { $("#dlgAccount").close(); askPassword(false); };
+$("#dlgAccount").addEventListener("close", async () => {
+  if ($("#dlgAccount").returnValue !== "save") return;
+  try {
+    me = await api("/api/me", { method: "PATCH", json: { name: $("#acFull").value.trim(),
+      bot_names: { teams: $("#acBotTeams").value.trim(), zoom: $("#acBotZoom").value.trim(), web: $("#acBotWeb").value.trim() } } });
+    cfg = await api("/api/config"); nameEdited = false; prefillName(); applyAccount(); toast("Compte enregistré");
+  } catch (e) { toast(e.message); }
+});
+
+// Changement de mot de passe (obligatoire après un mot de passe provisoire)
+let pwForced = false;
+function askPassword(forced, current = "") {
+  pwForced = forced;
+  $("#pwWhy").textContent = forced ? "Mot de passe provisoire : choisissez le vôtre pour continuer." : "";
+  $("#pwUser").value = me?.login || "";
+  $("#pwCur").value = current; $("#pwNew").value = ""; $("#pwNew2").value = ""; $("#pwErr").textContent = "";
+  $("#pwCancel").classList.toggle("hidden", forced);
+  $("#dlgPw").showModal();
+  (current ? $("#pwNew") : $("#pwCur")).focus();
+}
+$("#dlgPw").addEventListener("cancel", (e) => { if (pwForced) e.preventDefault(); });   // Échap : pas tant qu'il est provisoire
+$("#pwOk").onclick = async (e) => {
+  e.preventDefault();
+  const err = $("#pwErr"); err.textContent = "";
+  if ($("#pwNew").value.length < 10) return err.textContent = "10 caractères au moins.";
+  if ($("#pwNew").value !== $("#pwNew2").value) return err.textContent = "La confirmation ne correspond pas.";
+  try {
+    await api("/api/me/password", { method: "POST", json: { current: $("#pwCur").value, new: $("#pwNew").value } });
+    pwForced = false; me.must_change = false; $("#dlgPw").close(); toast("Mot de passe changé");
+  } catch (x) { err.textContent = x.message; }
+};
+
+// Partage d'une réunion (propriétaire ou administrateur)
+let shareTarget = null;
+async function shareRecording(r, title) {
+  let dir;
+  try { dir = await api("/api/users/directory"); } catch (e) { return toast(e.message); }
+  shareTarget = r;
+  $("#shTitle").textContent = title;
+  const owner = r.owner || "";
+  $("#shList").innerHTML = dir.filter(x => x.login !== owner).map(x => `<label><input type="checkbox" value="${esc(x.login)}"
+    ${(r.shared_with || []).includes(x.login) ? "checked" : ""}> ${esc(x.name)} <small>(${esc(x.login)})</small></label>`).join("")
+    || "<small>Aucun autre compte.</small>";
+  $("#shOwnerRow").classList.toggle("hidden", !me.admin);
+  if (me.admin) $("#shOwner").innerHTML = (owner ? "" : `<option value="">— aucun (administrateurs seulement) —</option>`) + dir.map(x =>
+    `<option value="${esc(x.login)}" ${x.login === owner ? "selected" : ""}>${esc(x.name)} (${esc(x.login)})</option>`).join("");
+  $("#dlgShare").showModal();
+}
+$("#dlgShare").addEventListener("close", async () => {
+  if ($("#dlgShare").returnValue !== "ok" || !shareTarget) return;
+  const r = shareTarget; shareTarget = null;
+  const body = { shared_with: [...$("#shList").querySelectorAll("input:checked")].map(x => x.value) };
+  if (me.admin && $("#shOwner").value && $("#shOwner").value !== (r.owner || "")) body.owner = $("#shOwner").value;
+  try { await api(recUrl(r) + "/access", { method: "PUT", json: body }); toast("Partage enregistré"); loadRecordings(); }
+  catch (e) { toast(e.message); }
+});
+
+// Utilisateurs (administrateurs)
+async function loadUsers() {
+  const box = $("#usersList");
+  try {
+    const list = await api("/api/users");
+    box.innerHTML = list.map(u => `<div class="user ${u.disabled ? "off" : ""}" data-login="${esc(u.login)}">
+      <div class="who"><b>${esc(u.name)}</b> <small>${esc(u.login)}${u.login === me.login ? " · vous" : ""}</small>
+        <small>${u.disabled ? "désactivé" : u.last_login ? "dernière connexion le " + new Date(u.last_login).toLocaleString("fr-FR") : "jamais connecté"}${u.must_change && !u.disabled ? " · mot de passe provisoire" : ""}</small></div>
+      <select class="role" ${u.login === me.login ? "disabled" : ""}><option value="user" ${u.role === "user" ? "selected" : ""}>Utilisateur</option>
+        <option value="admin" ${u.role === "admin" ? "selected" : ""}>Administrateur</option></select>
+      <button class="ghost reset" title="Nouveau mot de passe provisoire">🔑</button>
+      ${u.login === me.login ? "" : `<button class="ghost toggle">${u.disabled ? "Réactiver" : "Désactiver"}</button>
+      <button class="ghost danger remove" title="Supprimer le compte (ses réunions restent, visibles des administrateurs)">🗑</button>`}
+    </div>`).join("");
+    box.querySelectorAll(".user").forEach(row => {
+      const login = row.dataset.login, u = list.find(x => x.login === login);
+      $(".role", row).onchange = async (e) => {
+        try { await api(`/api/users/${login}`, { method: "PATCH", json: { role: e.target.value } }); toast("Rôle modifié"); }
+        catch (x) { toast(x.message); } loadUsers();
+      };
+      $(".reset", row).onclick = async () => {
+        if (!confirm(`Donner un nouveau mot de passe provisoire à ${u.name} ? Ses sessions ouvertes seront fermées.`)) return;
+        try { const d = await api(`/api/users/${login}/password`, { method: "POST" });
+          showSecret("Nouveau mot de passe provisoire", `Pour ${u.name} (identifiant ${login}).`, d.password); loadUsers();
+        } catch (x) { toast(x.message); }
+      };
+      if ($(".toggle", row)) $(".toggle", row).onclick = async () => {
+        try { await api(`/api/users/${login}`, { method: "PATCH", json: { disabled: !u.disabled } }); } catch (x) { toast(x.message); } loadUsers();
+      };
+      if ($(".remove", row)) $(".remove", row).onclick = async () => {
+        if (!confirm(`Supprimer le compte de ${u.name} ? Ses réunions restent, visibles des administrateurs.`)) return;
+        try { await api(`/api/users/${login}`, { method: "DELETE" }); } catch (x) { toast(x.message); } loadUsers();
+      };
+    });
+  } catch (e) { box.textContent = "Erreur : " + e.message; }
+}
+$("#usersBox").addEventListener("toggle", () => { if ($("#usersBox").open) loadUsers(); });
+$("#userAdd").onsubmit = async (e) => {
+  e.preventDefault();
+  try {
+    const d = await api("/api/users", { method: "POST", json: { login: $("#ua-login").value.trim().toLowerCase(),
+      name: $("#ua-name").value.trim(), role: $("#ua-role").value } });
+    showSecret("Compte créé", `${d.user.name} — identifiant ${d.user.login}. Mot de passe provisoire :`, d.password);
+    $("#ua-login").value = ""; $("#ua-name").value = ""; $("#ua-role").value = "user"; loadUsers();
+  } catch (x) { toast(x.message); }
+};
+
 async function boot() {
-  const me = await api("/api/me");
-  if (!me.logged_in) return showLogin();
+  const m = await api("/api/me");
+  if (!m.logged_in) { if (localStorage.lastLogin) $("#loginId").value = localStorage.lastLogin; return showLogin(); }
+  me = m.user;
   $("#login").classList.add("hidden"); $("#app").classList.remove("hidden");
   cfg = await api("/api/config");
+  applyAccount();
   if (!$("#f-dur").value) $("#f-dur").value = cfg.defaultDuration || "";
   prefillName();
   const sel = $("#f-worker");

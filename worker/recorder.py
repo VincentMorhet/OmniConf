@@ -165,11 +165,15 @@ class Recorder:
 
     def rename(self, name: str, title: str) -> bool:
         """Change le titre affiché (métadonnées), pas le nom du fichier."""
+        return self.update_meta(name, {"title": title})
+
+    def update_meta(self, name: str, fields: dict) -> bool:
+        """Met à jour les métadonnées (titre, propriétaire, partage) de la vidéo et de sa transcription."""
         t = self.transcript_path(name)
         if t:
             try:
                 doc = json.loads(t.read_text())
-                doc.setdefault("meta", {})["title"] = title
+                doc.setdefault("meta", {}).update(fields)
                 t.write_text(json.dumps(doc, ensure_ascii=False, indent=1))
             except ValueError:
                 pass
@@ -178,10 +182,10 @@ class Recorder:
             return bool(t)
         mf = Path(str(p) + ".json")
         meta = json.loads(mf.read_text()) if mf.exists() else {}
-        meta["title"] = title
+        meta.update(fields)
         mf.write_text(json.dumps(meta, ensure_ascii=False, indent=1))
         if self.active and p == self.file:
-            self.meta["title"] = title
+            self.meta.update(fields)
         return True
 
     async def thumbnail(self, name: str) -> Path | None:

@@ -24,12 +24,31 @@ version modifiable draw.io : [docs/architecture.drawio](docs/architecture.drawio
 ## Utilisation
 
 IHM : **https://192.168.0.230** (LAN, certificat interne : accepter l'avertissement).
-Mot de passe : `ADMIN_PASSWORD` dans `/etc/webconf/control.env` sur webconf-ctl.
+Connexion : identifiant et mot de passe personnels (voir « Comptes » ci-dessous). Le premier administrateur est
+créé au premier démarrage avec `ADMIN_PASSWORD` (dans `/etc/webconf/control.env` sur webconf-ctl), identifiant
+`ADMIN_LOGIN` (`admin` par défaut) et nom `ADMIN_NAME`.
 
-1. Coller le lien de la réunion. Le nom affiché se remplit selon la plateforme (« Assistant » par défaut,
-   par ex. « Prénom NOM - Société ») et la durée max vaut 180 min par défaut ; les deux restent modifiables.
-   Pour changer ces valeurs : `DEFAULT_NAMES` (JSON, clés `zoom`, `teams`, `web`) et `DEFAULT_DURATION_MIN`
-   dans `/etc/webconf/control.env`.
+**Comptes** (onglet Enregistrements → « 👥 Utilisateurs », réservé aux administrateurs) :
+- **Création** : chaque compte reçoit un mot de passe provisoire, affiché une seule fois, à changer à la
+  première connexion. Les administrateurs peuvent aussi :
+  - réinitialiser un mot de passe (les sessions de la personne sont alors fermées) ;
+  - changer le rôle ;
+  - désactiver ou supprimer un compte (ses réunions restent, visibles des administrateurs).
+- **Visibilité** : chacun voit les réunions qu'il a lancées, et celles qu'on a partagées avec lui (menu ⋯ → 🔗
+  Partager, en lecture seule). Un administrateur voit tout et peut changer le propriétaire d'une réunion. Les
+  réunions d'avant les comptes n'ont pas de propriétaire : seuls les administrateurs les voient.
+- **Assistants** : ils sont communs. Un assistant en réunion n'est accessible qu'à celui qui l'a lancé (et aux
+  administrateurs) ; les autres le voient « occupé », sans titre ni écran ni transcription.
+- **👤 Mon compte** : nom dans les comptes rendus (« Pour … »), nom de l'assistant par plateforme (par
+  défaut ce nom ; sinon `DEFAULT_NAMES`), mot de passe.
+- **Jetons MCP** : chaque jeton appartient à un compte et ne donne accès qu'à ses réunions. Les jetons
+  d'avant les comptes sont rattachés au premier administrateur.
+- **Lexique** : il est commun. Tout le monde le lit, seuls les administrateurs le modifient.
+- Fichier : `/var/lib/webconf/users.json` (mode 600, mots de passe hachés avec scrypt).
+
+1. Coller le lien de la réunion. Le nom affiché se remplit selon la plateforme : celui de « Mon compte », sinon
+   `DEFAULT_NAMES` (JSON, clés `zoom`, `teams`, `web`, dans `/etc/webconf/control.env`), par ex. « Prénom NOM -
+   Société ». La durée max vaut 180 min par défaut (`DEFAULT_DURATION_MIN`). Les deux restent modifiables.
    **Autres webconfs** (Google Meet, Jitsi, Webex, BigBlueButton, Whereby, Livestorm…) : la plateforme
    « Auto » choisit « Autre webconf », qui essaie tout seul : accepter les cookies, saisir le nom et le
    code (champ « Code / mot de passe »), cliquer « Rejoindre / Join / Ask to join », activer l'audio par
@@ -209,7 +228,9 @@ manipuler de mot de passe. Code : `control/mcp_server.py`.
 | `attach_cr` | `id`, `markdown`, `pdf_base64` | dépôt du compte rendu final à côté de la réunion (jeton d'**écriture** distinct) |
 
 * **Jetons** : propres à un client, révocables, de portée *lecture* (les 7 premiers outils) ou *écriture*
-  (`attach_cr` seulement). Seule leur empreinte est conservée (`/var/lib/webconf/mcp_tokens.json`).
+  (`attach_cr` seulement). Chaque jeton appartient à un compte : il ne voit que les réunions de ce compte
+  (toutes pour un administrateur), et `attach_cr` n'est permis que sur ses propres réunions. Seule leur
+  empreinte est conservée (`/var/lib/webconf/mcp_tokens.json`). En ligne de commande : `--user <identifiant>`.
   Création et révocation : IHM, onglet Enregistrements, « Accès de Claude (MCP) » (le jeton n'est affiché
   qu'une fois), ou `sudo bash -c 'set -a; . /etc/webconf/control.env; /opt/webconf/venv/bin/python
   /opt/webconf/control/mcp_server.py create --name claude --scope read --out /root/claude.tok'` (`list`, `revoke <id>`).

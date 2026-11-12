@@ -21,6 +21,7 @@
     <div class="logo big">◉</div>
     <h1>OmniConf</h1>
     <p class="tagline">Votre assistant de réunion : il écoute, transcrit et rédige le compte rendu.</p>
+    <input type="text" id="loginId" placeholder="Identifiant" autocomplete="username" autocapitalize="none" spellcheck="false">
     <input type="password" id="pw" placeholder="Mot de passe" autocomplete="current-password" required>
     <button class="primary">Se connecter</button>
     <p id="loginErr" class="err"></p>
@@ -36,6 +37,7 @@
     </nav>
     <button id="themeBtn" class="ghost" title="Changer de thème">☀️</button>
     <button id="audioBtn" class="ghost" title="Réglages audio : micro et sortie">🎚</button>
+    <button id="accountBtn" class="ghost account" title="Mon compte">👤 <span id="accountName"></span></button>
     <button id="logout" class="ghost" title="Déconnexion">⎋</button>
   </header>
 
@@ -154,6 +156,19 @@
           dans la variable d'environnement <code id="mcpNewVar">WEBCONF_TOKEN</code> (Paramètres › Variables d'environnement).</p>
         <div class="row"><input id="mcpNewTok" readonly spellcheck="false"><button id="mcpCopy">Copier</button><button id="mcpHide" class="ghost">Masquer</button></div>
       </div>
+    </details>
+    <details class="card hidden" id="usersBox">
+      <summary><h2>👥 Utilisateurs</h2></summary>
+      <p class="hint">Chacun voit les réunions qu'il a lancées, et celles qu'on partage avec lui ; un administrateur
+        voit tout et gère les comptes. Un compte créé reçoit un mot de passe provisoire, à changer à la première
+        connexion. Les réunions d'avant les comptes appartiennent aux administrateurs.</p>
+      <div id="usersList"></div>
+      <form id="userAdd" class="row">
+        <input id="ua-login" placeholder="Identifiant (ex. cdurand)" autocapitalize="none" spellcheck="false" required>
+        <input id="ua-name" placeholder="Prénom Nom" required>
+        <select id="ua-role"><option value="user">Utilisateur</option><option value="admin">Administrateur</option></select>
+        <button class="primary">+ Créer le compte</button>
+      </form>
     </details>
     <details class="card" id="lexBox">
       <summary><h2>📖 Lexique du projet</h2></summary>
@@ -289,6 +304,52 @@
 </div>
 <div id="toast"></div>
 <audio id="dummy" playsinline></audio>
+<!-- ============================================================ fenêtres -->
+<dialog id="dlgAccount" class="dlg">
+  <form method="dialog">
+    <h2>👤 Mon compte</h2>
+    <p class="hint" id="acLogin"></p>
+    <label>Nom (destinataire des comptes rendus)<input id="acFull" required></label>
+    <fieldset><legend>Nom de l'assistant dans les réunions (vide : votre nom)</legend>
+      <label>Teams<input id="acBotTeams" placeholder="ex. Prénom NOM - Société"></label>
+      <label>Zoom<input id="acBotZoom"></label>
+      <label>Autres<input id="acBotWeb"></label>
+    </fieldset>
+    <div class="row end"><button type="button" id="acPw" class="ghost">🔑 Changer le mot de passe</button>
+      <button value="cancel" class="ghost">Fermer</button><button id="acSave" value="save" class="primary">Enregistrer</button></div>
+  </form>
+</dialog>
+<dialog id="dlgPw" class="dlg">
+  <form method="dialog">
+    <h2>🔑 Mot de passe</h2>
+    <p class="hint" id="pwWhy"></p>
+    <input type="text" autocomplete="username" id="pwUser" hidden>
+    <label>Mot de passe actuel<input type="password" id="pwCur" autocomplete="current-password" required></label>
+    <label>Nouveau mot de passe (10 caractères au moins)<input type="password" id="pwNew" autocomplete="new-password" minlength="10" required></label>
+    <label>Confirmation<input type="password" id="pwNew2" autocomplete="new-password" minlength="10" required></label>
+    <p class="err" id="pwErr"></p>
+    <div class="row end"><button value="cancel" class="ghost" id="pwCancel" formnovalidate>Annuler</button><button id="pwOk" value="ok" class="primary">Changer</button></div>
+  </form>
+</dialog>
+<dialog id="dlgShare" class="dlg">
+  <form method="dialog">
+    <h2>🔗 Partager la réunion</h2>
+    <p class="hint" id="shTitle"></p>
+    <p class="hint">Les comptes cochés pourront lire la vidéo, la transcription et le compte rendu (sans les modifier).</p>
+    <div id="shList" class="checklist"></div>
+    <label id="shOwnerRow" class="hidden">Propriétaire (administrateurs)<select id="shOwner"></select></label>
+    <div class="row end"><button value="cancel" class="ghost">Annuler</button><button value="ok" class="primary">Enregistrer</button></div>
+  </form>
+</dialog>
+<dialog id="dlgSecret" class="dlg">
+  <form method="dialog">
+    <h2 id="secTitle">Mot de passe provisoire</h2>
+    <p id="secText" class="hint"></p>
+    <div class="row"><input id="secValue" readonly spellcheck="false"><button type="button" id="secCopy">Copier</button></div>
+    <p class="hint">Il ne sera plus affiché. La personne devra le changer à sa première connexion.</p>
+    <div class="row end"><button value="ok" class="primary">J'ai noté</button></div>
+  </form>
+</dialog>
 <script src="/static/app.js"></script>
 </body>
 </html>

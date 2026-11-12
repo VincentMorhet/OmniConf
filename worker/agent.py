@@ -45,7 +45,10 @@ bridge = AudioBridge(ICE)
 transcriber = Transcriber(os.environ.get("RECORD_DIR", "/srv/webconf/recordings"))
 
 state = {"state": "idle", "platform": None, "url": None, "title": None, "since": None, "error": None,
-         "auto_leave_at": None}
+         "auto_leave_at": None,
+         "owner": None,        # compte OmniConf qui utilise l'assistant (None : libre)
+         "last_owner": None,   # dernier utilisateur : la dernière transcription en mémoire lui appartient
+         "me_name": None}      # nom de cet utilisateur dans les comptes rendus
 join_task: asyncio.Task | None = None
 watch_task: asyncio.Task | None = None
 speaker_task: asyncio.Task | None = None
@@ -81,14 +84,26 @@ class JoinReq(BaseModel):
     duration_min: int | None = None  # quitte automatiquement après N minutes
     transcribe: bool = True          # transcription en direct (si la clé OVH est configurée)
     calendar: dict | None = None     # événement d'agenda (eid Google / id Exchange, organisateur, invités), facultatif
+    owner: str | None = None         # compte OmniConf qui lance la réunion (propriétaire des fichiers)
+    me_name: str | None = None       # son nom dans les comptes rendus
 
 
 class OpenReq(BaseModel):
     url: str
+    owner: str | None = None
+    me_name: str | None = None
 
 
 class RecReq(BaseModel):
     title: str | None = None
+    owner: str | None = None
+    me_name: str | None = None
+
+
+def _take(owner: str | None, me_name: str | None = None):
+    """L'assistant est désormais utilisé par ce compte (s'il ne l'est pas déjà par un autre)."""
+    if owner and not state.get("owner"):
+        state.update(owner=owner, last_owner=owner, me_name=me_name or state.get("me_name"))
 
 
 class Offer(BaseModel):
@@ -170,6 +185,8 @@ async def _after_join(req: JoinReq, platform: str, note: str | None = None, late
     `late` : entrée terminée à la main après un échec (le début de la réunion manque, signalé dans le CR)."""
     set_state("in_meeting", note=note, error=None)
     meta = {"platform": platform, "url": req.url, "worker": NAME, "site": _site(req.url, platform)}
+    if req.owner:
+        meta["owner"] = req.owner
     if late:
         meta["late_start"] = late
     if req.calendar:
@@ -224,6 +241,8 @@ async def _start_transcript(title: str, meta: dict):
 
 def _me_name() -> str:
     """Nom de l'utilisateur dans les comptes rendus : « Prénom NOM - Société » -> « Prénom NOM »."""
+    if state.get("me_name"):          # nom du compte OmniConf qui a lancé la réunion
+        return state["me_name"]
     if os.environ.get("TRANSCRIPT_ME_NAME"):
         return os.environ["TRANSCRIPT_ME_NAME"]
     n = re.sub(r"\s*(\(.*\)|[-–|].*)$", "", clean_name(bot_name or "")).strip()
@@ -367,7 +386,8 @@ async def join(req: JoinReq):
         leave_at = (dt.datetime.now().astimezone() + dt.timedelta(minutes=req.duration_min)).isoformat()
     last_join = None
     set_state("joining", platform=platform, url=req.url, title=req.title, error=None, note=None,
-              auto_leave_at=leave_at)
+              auto_leave_at=leave_at, owner=req.owner, last_owner=req.owner or state.get("last_owner"),
+              me_name=req.me_name)
     join_task = asyncio.create_task(_run_join(req, platform))
     if watch_task:
         watch_task.cancel()
@@ -391,7 +411,7 @@ async def _leave(click: bool = True):
         except Exception:
             pass
     await browser.blank()
-    set_state("idle", platform=None, url=None, title=None, auto_leave_at=None, error=None, note=None)
+    set_state("idle", platform=None, url=None, title=None, auto_leave_at=None, error=None, note=None, owner=None)
 
 
 @app.post("/meeting/leave", dependencies=[Depends(auth)])
@@ -418,6 +438,7 @@ async def open_url(req: OpenReq):
     if state["state"] in ("joining", "lobby", "in_meeting"):
         raise HTTPException(409, "réunion en cours")
     await browser.goto(req.url)
+    _take(req.owner, req.me_name)
     set_state("manual", platform=None, url=req.url)
     return await status()
 
@@ -426,14 +447,16 @@ async def open_url(req: OpenReq):
 async def reset():
     await browser.blank()
     if state["state"] in ("manual", "error"):
-        set_state("idle", platform=None, url=None, error=None)
+        set_state("idle", platform=None, url=None, error=None, owner=None)
     return await status()
 
 
 @app.post("/recording/start", dependencies=[Depends(auth)])
 async def rec_start(req: RecReq):
+    _take(req.owner, req.me_name)
     name = await recorder.start(req.title or state["title"] or state["platform"] or "enregistrement",
-                                {"platform": state["platform"], "url": state["url"], "worker": NAME})
+                                {"platform": state["platform"], "url": state["url"], "worker": NAME,
+                                 **({"owner": state["owner"]} if state.get("owner") else {})})
     return {"file": name}
 
 
@@ -444,14 +467,18 @@ async def rec_stop():
 
 class TransReq(BaseModel):
     title: str | None = None
+    owner: str | None = None
+    me_name: str | None = None
 
 
 @app.post("/transcript/start", dependencies=[Depends(auth)])
 async def transcript_start(req: TransReq):
     if not transcriber.enabled:
         raise HTTPException(400, "clé OVH AI Endpoints non configurée sur ce worker")
+    _take(req.owner, req.me_name)
     await _start_transcript(req.title or state["title"] or _site(state["url"] or "", state["platform"] or "web"),
-                            {"platform": state["platform"], "url": state["url"], "worker": NAME})
+                            {"platform": state["platform"], "url": state["url"], "worker": NAME,
+                             **({"owner": state["owner"]} if state.get("owner") else {})})
     return transcriber.status()
 
 
@@ -773,6 +800,22 @@ async def recording_thumb(name: str):
 
 class RenameReq(BaseModel):
     title: str
+
+
+class MetaReq(BaseModel):
+    owner: str | None = None
+    shared_with: list[str] | None = None
+
+
+@app.patch("/recordings/{name}/meta", dependencies=[Depends(auth)])
+async def recording_meta(name: str, req: MetaReq):
+    """Propriétaire et partage d'une réunion (décidés par le contrôle, qui vérifie les droits)."""
+    fields = {k: v for k, v in req.model_dump().items() if v is not None}
+    if "shared_with" in fields:
+        fields["shared_with"] = sorted({str(x).strip().lower() for x in fields["shared_with"] if str(x).strip()})[:50]
+    if not fields or not recorder.update_meta(name, fields):
+        raise HTTPException(404)
+    return {"ok": True, **fields}
 
 
 @app.patch("/recordings/{name}", dependencies=[Depends(auth)])

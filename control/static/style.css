@@ -471,3 +471,37 @@ body.focus header.top, body.focus nav.tabs { display: none !important; }
 #lexBox .row { flex-wrap: wrap; }
 #lexBox .row .hint { flex: 1 1 260px; }
 #lexBox .row button { flex: 0 0 auto; }
+/* ---------------------------------------------------------------- comptes */
+#accountBtn { display: inline-flex; align-items: center; gap: 6px; max-width: 220px; }
+#accountBtn span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 720px) { #accountBtn span { display: none; } }
+.login-card #loginId { margin-bottom: 8px; }
+dialog.dlg { background: var(--card); color: var(--fg); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: var(--shadow); padding: 18px; width: min(460px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; }
+dialog.dlg::backdrop { background: rgba(5, 8, 18, .6); }
+dialog.dlg h2 { font-size: 17px; margin: 0 0 10px; }
+dialog.dlg label { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; font-size: 13px; color: var(--mute); }
+dialog.dlg label input, dialog.dlg label select { color: var(--fg); }
+dialog.dlg fieldset { border: 1px solid var(--line); border-radius: 10px; margin: 10px 0; padding: 6px 10px; }
+dialog.dlg legend { font-size: 13px; color: var(--mute); padding: 0 4px; }
+dialog.dlg .hint { color: var(--mute); font-size: 13px; margin: 4px 0 8px; }
+dialog.dlg .row { flex-wrap: wrap; margin-top: 12px; }
+.row.end { justify-content: flex-end; }
+.row.end > * { flex: 0 0 auto; }
+.checklist { display: flex; flex-direction: column; gap: 2px; max-height: 260px; overflow: auto; }
+.checklist label { flex-direction: row !important; align-items: center; gap: 8px !important; margin: 2px 0 !important; color: var(--fg) !important; }
+.ritem small.owner { display: block; color: var(--mute); font-size: 12px; }
+#usersBox > summary, #usersBox > summary h2 { cursor: pointer; list-style: none; }
+#usersBox > summary h2 { display: inline; }
+#usersBox > summary::-webkit-details-marker { display: none; }
+#usersBox .hint { color: var(--mute); font-size: 13px; }
+#usersList .user { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+#usersList .user.off { opacity: .55; }
+#usersList .who { flex: 1 1 220px; min-width: 0; display: flex; flex-direction: column; }
+#usersList .who small { color: var(--mute); font-size: 12px; }
+#usersList .user select { flex: 0 0 auto; width: auto; }
+#usersList .user button { flex: 0 0 auto; }
+#userAdd { flex-wrap: wrap; margin-top: 10px; }
+#userAdd input { flex: 1 1 160px; }
+#userAdd select, #userAdd button { flex: 0 0 auto; }
+.wchip.s-taken { opacity: .5; }

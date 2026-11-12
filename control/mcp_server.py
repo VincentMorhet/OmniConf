@@ -15,6 +15,7 @@ Les liens audio et images renvoyés sont signés (HMAC), temporaires, et ne dema
 """
 import asyncio
 import base64
+import contextvars
 import datetime as dt
 import hashlib
 import hmac
@@ -28,11 +29,15 @@ import unicodedata
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import users as _users
+
 log = logging.getLogger("mcp")
 VERSION = "1.0.0"
 SUPPORTED = ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
 LEGACY_LATEST = "2025-11-25"
 TZ = ZoneInfo(os.environ.get("DISPLAY_TZ", "Europe/Paris"))
+# Compte OmniConf du jeton qui appelle l'outil : ne voit que ses réunions (administrateur : toutes)
+CALLER: contextvars.ContextVar = contextvars.ContextVar("caller", default=None)
 PAGE_CHARS = int(os.environ.get("MCP_PAGE_CHARS", "40000"))   # Claude Code : résultats > 50 000 caractères mis en fichier
 LINK_TTL = 900            # durée par défaut des liens temporaires (s)
 LINK_TTL_MAX = 4 * 3600
@@ -74,12 +79,13 @@ class TokenStore:
     def _hash(token: str) -> str:
         return hashlib.sha256(token.encode()).hexdigest()
 
-    def create(self, name: str, scope: str) -> tuple[str, dict]:
+    def create(self, name: str, scope: str, user: str | None = None) -> tuple[str, dict]:
         if scope not in ("read", "write"):
             raise ValueError("portée : read ou write")
         token = ("wcr_" if scope == "read" else "wcw_") + secrets.token_urlsafe(32)
         entry = {"id": secrets.token_hex(4), "name": (name or "claude").strip()[:60], "scope": scope,
-                 "hash": self._hash(token), "created": _now_iso(), "last_used": None, "revoked": None}
+                 "hash": self._hash(token), "created": _now_iso(), "last_used": None, "revoked": None,
+                 "user": user}
         items = self.load()
         items.append(entry)
         self.save(items)
@@ -445,8 +451,9 @@ def meeting_ids(url: str | None, platform: str) -> dict:
 
 # ============================================================================ serveur
 class MCP:
-    def __init__(self, *, http, workers: dict, token: str, data_dir: Path, secret: str, site: str | None):
+    def __init__(self, *, http, workers: dict, token: str, data_dir: Path, secret: str, site: str | None, users=None):
         self.http, self.workers, self.agent_token = http, workers, token
+        self.users = users        # comptes OmniConf (None : pas de filtrage, tout est visible)
         self.tokens = TokenStore(data_dir / "mcp_tokens.json")
         self.lexicon_file = data_dir / "lexicon.md"
         self.key = hmac.new(secret.encode(), b"omniconf-mcp-links", hashlib.sha256).digest()
@@ -479,7 +486,17 @@ class MCP:
             except Exception:
                 return []
         lists = await asyncio.gather(*(one(w) for w in self.workers))
-        return [x for l in lists for x in l]
+        u = CALLER.get()
+        return [x for l in lists for x in l if u is None or _users.can_see(u, x.get("meta"))]
+
+    async def _allowed(self, w: str, stem: str, edit: bool = False):
+        """Réunion accessible au compte du jeton (modification : propriétaire ou administrateur)."""
+        u = CALLER.get()
+        rec = next((x for x in await self._list_all() if x["worker"] == w and x["stem"] == stem), None)
+        if not rec:
+            raise ToolError(f"réunion inconnue : {w}:{stem}")
+        if edit and u is not None and not _users.can_edit(u, rec.get("meta")):
+            raise ToolError("seul le propriétaire de la réunion (ou un administrateur) peut y déposer un compte rendu")
 
     def _parse_id(self, mid: str) -> tuple[str, str]:
         if not isinstance(mid, str) or ":" not in mid:
@@ -559,7 +576,17 @@ class MCP:
                 "serverInfo": {"name": "omniconf-webconf", "title": "OmniConf — réunions enregistrées", "version": VERSION},
                 "instructions": INSTRUCTIONS}
 
+    def caller(self, entry: dict) -> dict | None:
+        """Compte du jeton ; jetons d'avant les comptes : premier administrateur."""
+        if not self.users:
+            return None
+        u = self.users.get(entry.get("user") or self.users.first_admin())
+        if not u or u.get("disabled"):
+            raise RPCError(-32001, "compte du jeton supprimé ou désactivé")
+        return u
+
     async def call(self, name: str, args: dict, entry: dict) -> dict:
+        CALLER.set(self.caller(entry))
         tool = next((t for t in self.tools(entry["scope"]) if t["name"] == name), None)
         if not tool:
             if any(t["name"] == name for t in TOOLS):
@@ -714,6 +741,7 @@ class MCP:
 
     async def t_get_draft_cr(self, id, cursor=None):
         w, stem = self._parse_id(id)
+        await self._allowed(w, stem)
         info = (await self._get(w, f"/recordings/{stem}.mp4/report?fmt=json", timeout=30)).json()
         rep, job = info.get("report"), info.get("job")
         if not rep:
@@ -800,6 +828,7 @@ class MCP:
 
     async def t_attach_cr(self, id, markdown, pdf_base64=None):
         w, stem = self._parse_id(id)
+        await self._allowed(w, stem, edit=True)
         if not (markdown or "").strip():
             raise ValueError("markdown vide")
         if len(markdown) > 2_000_000 or (pdf_base64 and len(pdf_base64) > 30_000_000):
@@ -964,11 +993,12 @@ TOOLS = [
 
 
 # ============================================================================ routes FastAPI
-def mount(app, *, http, workers, token, data_dir, secret, site, require_login):
-    from fastapi import HTTPException, Request
+def mount(app, *, http, workers, token, data_dir, secret, site, require_login, users=None, current_user=None):
+    from fastapi import Depends, HTTPException, Request
     from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-    srv = MCP(http=http, workers=workers, token=token, data_dir=data_dir, secret=secret, site=site)
+    srv = MCP(http=http, workers=workers, token=token, data_dir=data_dir, secret=secret, site=site, users=users)
+    CU = Depends(current_user) if current_user else None
     allowed_origins = {site.rstrip("/")} if site else set()
 
     @app.post("/mcp")
@@ -1059,21 +1089,33 @@ def mount(app, *, http, workers, token, data_dir, secret, site, require_login):
             raise HTTPException(404, "certificat non publié")
         return FileResponse(ca, media_type="application/x-x509-ca-cert", filename="omniconf-ca.crt")
 
+    def owner_of(e: dict) -> str | None:
+        return e.get("user") or (users.first_admin() if users else None)
+
+    def visible(u: dict | None, e: dict) -> bool:
+        return u is None or _users.is_admin(u) or owner_of(e) == u["login"]
+
     @app.get("/api/mcp/tokens", dependencies=[require_login])
-    async def tokens_list():
+    async def tokens_list(u: dict = CU):
+        names = users.names() if users else {}
         return {"url": (site or "") + "/mcp", "ca": "/ca.crt" if ca.exists() else None,
-                "ca_sha256": ca_fingerprint(), "tokens": srv.tokens.public()}
+                "ca_sha256": ca_fingerprint(),
+                "tokens": [{**e, "user": owner_of(e), "user_name": names.get(owner_of(e))}
+                           for e in srv.tokens.public() if visible(u, e)]}
 
     @app.post("/api/mcp/tokens", dependencies=[require_login])
-    async def tokens_create(body: NewToken):
+    async def tokens_create(body: NewToken, u: dict = CU):
         try:
-            tok, entry = srv.tokens.create(body.name, body.scope)
+            tok, entry = srv.tokens.create(body.name, body.scope, u["login"] if u else None)
         except ValueError as e:
             raise HTTPException(400, str(e))
         return {"token": tok, **{k: v for k, v in entry.items() if k != "hash"}}
 
     @app.delete("/api/mcp/tokens/{tid}", dependencies=[require_login])
-    async def tokens_revoke(tid: str):
+    async def tokens_revoke(tid: str, u: dict = CU):
+        e = next((x for x in srv.tokens.public() if x["id"] == tid), None)
+        if e and not visible(u, e):
+            raise HTTPException(403, "jeton d'un autre utilisateur")
         if not srv.tokens.revoke(tid):
             raise HTTPException(404, "jeton inconnu ou déjà révoqué")
         return {"ok": True}
@@ -1089,6 +1131,7 @@ if __name__ == "__main__":
     c = sub.add_parser("create", help="crée un jeton (affiché une seule fois)")
     c.add_argument("--name", default="claude")
     c.add_argument("--scope", choices=["read", "write"], default="read")
+    c.add_argument("--user", help="compte OmniConf du jeton (ses réunions seulement ; défaut : premier administrateur)")
     c.add_argument("--out", help="écrire le jeton dans ce fichier (mode 600) au lieu de l'afficher")
     sub.add_parser("list", help="liste les jetons")
     r = sub.add_parser("revoke", help="révoque un jeton")
@@ -1096,7 +1139,7 @@ if __name__ == "__main__":
     a = ap.parse_args()
     store = TokenStore(Path(os.environ.get("DATA_DIR", "/var/lib/webconf")) / "mcp_tokens.json")
     if a.cmd == "create":
-        tok, e = store.create(a.name, a.scope)
+        tok, e = store.create(a.name, a.scope, a.user)
         if a.out:
             Path(a.out).write_text(tok + "\n")
             os.chmod(a.out, 0o600)

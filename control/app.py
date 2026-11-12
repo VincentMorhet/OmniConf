@@ -7,6 +7,7 @@ import hmac
 import json
 import logging
 import os
+import time
 import uuid
 from pathlib import Path
 
@@ -18,10 +19,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
 
+from users import Users, bot_name, can_edit, can_see, is_admin
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger("control")
 
-PASSWORD = os.environ["ADMIN_PASSWORD"]
+PASSWORD = os.environ.get("ADMIN_PASSWORD")   # mot de passe du premier administrateur (création des comptes)
 TOKEN = os.environ["AGENT_TOKEN"]
 # WORKERS="w1=http://192.168.0.231:8001,w2=http://192.168.0.232:8001"
 WORKERS = dict(p.split("=", 1) for p in os.environ["WORKERS"].split(",") if p)
@@ -60,7 +63,10 @@ def detect_platform(url: str) -> str:
 DATA = Path(os.environ.get("DATA_DIR", "/var/lib/webconf"))
 DATA.mkdir(parents=True, exist_ok=True)
 SCHEDULE_FILE = DATA / "schedule.json"
-LEXICON_FILE = DATA / "lexicon.md"   # lexique de l'installation (noms, corrections, sigles, registre), poussé aux workers
+LEXICON_FILE = DATA / "lexicon.md"
+USERS = Users(DATA / "users.json", admin_password=PASSWORD, admin_login=os.environ.get("ADMIN_LOGIN"),
+              admin_name=os.environ.get("ADMIN_NAME"),
+              bot_names=json.loads(os.environ["DEFAULT_NAMES"]) if os.environ.get("DEFAULT_NAMES") else None)   # lexique de l'installation (noms, corrections, sigles, registre), poussé aux workers
 HERE = Path(__file__).parent
 NOVNC_DIR = Path(os.environ.get("NOVNC_DIR", "/usr/share/novnc"))
 
@@ -71,22 +77,46 @@ http = httpx.AsyncClient(headers={"X-Agent-Token": TOKEN}, timeout=httpx.Timeout
 
 
 # ----------------------------------------------------------------------------- auth
-def require_login(request: Request):
-    if not request.session.get("ok"):
+def session_user(session) -> dict | None:
+    """Compte de la session (None si absent, désactivé, ou mot de passe changé depuis la connexion)."""
+    u = USERS.get(session.get("user"))
+    if not u or u.get("disabled") or session.get("pwv") != u.get("pw_changed"):
+        return None
+    return u
+
+
+def current_user(request: Request) -> dict:
+    u = session_user(request.session)
+    if not u:
         raise HTTPException(401, "non connecté")
+    return u
+
+
+def require_login(request: Request):
+    current_user(request)
+
+
+def require_admin(u: dict = Depends(current_user)) -> dict:
+    if not is_admin(u):
+        raise HTTPException(403, "réservé aux administrateurs")
+    return u
 
 
 class Login(BaseModel):
+    login: str = ""          # vide : premier administrateur (ancienne connexion par mot de passe seul)
     password: str
 
 
 @app.post("/api/login")
 async def login(body: Login, request: Request):
-    if not hmac.compare_digest(body.password.encode(), PASSWORD.encode()):
+    u = USERS.authenticate(body.login.strip().lower() or USERS.first_admin() or "", body.password)
+    if not u:
         await asyncio.sleep(1.5)
-        raise HTTPException(401, "mot de passe incorrect")
-    request.session["ok"] = True
-    return {"ok": True}
+        raise HTTPException(401, "identifiant ou mot de passe incorrect")
+    request.session.clear()
+    request.session.update(user=u["login"], pwv=u.get("pw_changed"))
+    log.info("connexion de %s", u["login"])
+    return {"ok": True, "must_change": bool(u.get("must_change"))}
 
 
 @app.post("/api/logout")
@@ -95,12 +125,122 @@ async def logout(request: Request):
     return {"ok": True}
 
 
+def me_public(u: dict) -> dict:
+    return {**USERS.public(u), "admin": is_admin(u)}
+
+
 @app.get("/api/me")
 async def me(request: Request):
-    return {"logged_in": bool(request.session.get("ok"))}
+    u = session_user(request.session)
+    return {"logged_in": bool(u), "user": me_public(u) if u else None}
+
+
+class MyAccount(BaseModel):
+    name: str | None = None
+    bot_names: dict | None = None
+
+
+@app.patch("/api/me")
+async def me_update(body: MyAccount, u: dict = Depends(current_user)):
+    try:
+        return me_public(USERS.update(u["login"], **{k: v for k, v in body.model_dump().items() if v is not None}))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+class PasswordChange(BaseModel):
+    current: str
+    new: str
+
+
+@app.post("/api/me/password")
+async def me_password(body: PasswordChange, request: Request, u: dict = Depends(current_user)):
+    if not USERS.authenticate(u["login"], body.current):
+        await asyncio.sleep(1.5)
+        raise HTTPException(400, "mot de passe actuel incorrect")
+    if body.new == body.current:
+        raise HTTPException(400, "le nouveau mot de passe doit être différent")
+    try:
+        USERS.set_password(u["login"], body.new)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    request.session["pwv"] = USERS.get(u["login"]).get("pw_changed")   # cette session reste ouverte, les autres non
+    return {"ok": True}
+
+
+# ----------------------------------------------------------------------------- gestion des comptes (administrateurs)
+class NewUser(BaseModel):
+    login: str
+    name: str
+    role: str = "user"
+    bot_names: dict | None = None
+
+
+class UserUpdate(BaseModel):
+    name: str | None = None
+    role: str | None = None
+    bot_names: dict | None = None
+    disabled: bool | None = None
+
+
+@app.get("/api/users")
+async def users_list(u: dict = Depends(require_admin)):
+    return [USERS.public(x) for x in USERS.all()]
+
+
+@app.get("/api/users/directory")
+async def users_directory(u: dict = Depends(current_user)):
+    """Comptes actifs (identifiant et nom), pour partager une réunion."""
+    return [{"login": x["login"], "name": x["name"]} for x in USERS.all() if not x.get("disabled")]
+
+
+@app.post("/api/users")
+async def users_create(body: NewUser, u: dict = Depends(require_admin)):
+    try:
+        user, pw = USERS.create(body.login, body.name, body.role, body.bot_names)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    log.info("compte %s créé par %s", user["login"], u["login"])
+    return {"user": user, "password": pw}
+
+
+@app.patch("/api/users/{login}")
+async def users_update(login: str, body: UserUpdate, u: dict = Depends(require_admin)):
+    try:
+        return USERS.update(login, **{k: v for k, v in body.model_dump().items() if v is not None})
+    except KeyError:
+        raise HTTPException(404, "compte inconnu")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/users/{login}/password")
+async def users_reset_password(login: str, u: dict = Depends(require_admin)):
+    """Nouveau mot de passe provisoire (à changer à la prochaine connexion) ; ses sessions sont fermées."""
+    try:
+        pw = USERS.set_password(login)
+    except KeyError:
+        raise HTTPException(404, "compte inconnu")
+    log.info("mot de passe de %s réinitialisé par %s", login, u["login"])
+    return {"password": pw}
+
+
+@app.delete("/api/users/{login}")
+async def users_delete(login: str, u: dict = Depends(require_admin)):
+    if login == u["login"]:
+        raise HTTPException(400, "impossible de supprimer son propre compte")
+    try:
+        USERS.delete(login)
+    except KeyError:
+        raise HTTPException(404, "compte inconnu")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    log.info("compte %s supprimé par %s (ses réunions restent, visibles des administrateurs)", login, u["login"])
+    return {"ok": True}
 
 
 AUTH = [Depends(require_login)]
+CU = Depends(current_user)
 
 
 # ----------------------------------------------------------------------------- workers
@@ -132,15 +272,50 @@ async def worker_status(name: str) -> dict:
         return {"name": name, "online": False, "state": "offline"}
 
 
-@app.get("/api/config", dependencies=AUTH)
-async def config():
-    return {"iceServers": ICE, "workers": list(WORKERS), "defaultNames": DEFAULT_NAMES,
-            "defaultDuration": DEFAULT_DURATION}
+# ----------------------------------------------------------------------------- droits sur les assistants
+def can_use_worker(u: dict, st: dict) -> bool:
+    """Assistant libre, ou utilisé par ce compte (les administrateurs ont accès à tout)."""
+    return is_admin(u) or not st.get("owner") or st.get("owner") == u["login"]
 
 
-@app.get("/api/workers", dependencies=AUTH)
-async def workers():
-    return await asyncio.gather(*(worker_status(n) for n in WORKERS))
+def can_read_live(u: dict, st: dict) -> bool:
+    """Transcription, analyse et diapositives en mémoire : celles de la dernière réunion de ce compte."""
+    if is_admin(u) or st.get("owner") == u["login"]:
+        return True
+    return not st.get("owner") and st.get("last_owner") in (None, u["login"])
+
+
+async def worker_for(name: str, u: dict, live: bool = False) -> dict:
+    st = await worker_status(wurl(name) and name)
+    if not (can_read_live(u, st) if live else can_use_worker(u, st)):
+        raise HTTPException(403, "assistant utilisé par un autre utilisateur")
+    return st
+
+
+def public_status(u: dict, st: dict) -> dict:
+    """État d'un assistant tel que ce compte peut le voir."""
+    if not can_use_worker(u, st):
+        return {"name": st["name"], "online": st.get("online"), "state": "taken", "other": True,
+                "since": st.get("since")}
+    out = {**st, "mine": bool(st.get("owner")) and st.get("owner") == u["login"]}
+    if is_admin(u) and st.get("owner"):
+        out["owner_name"] = USERS.names().get(st["owner"], st["owner"])
+    if not can_read_live(u, st):    # dernière transcription d'un autre compte : rien n'en est montré
+        out["transcript"] = {"active": False}
+        out.update(title=None, url=None, recording_file=None)
+    return out
+
+
+@app.get("/api/config")
+async def config(u: dict = CU):
+    return {"iceServers": ICE, "workers": list(WORKERS), "defaultDuration": DEFAULT_DURATION,
+            "defaultNames": {p: bot_name(u, p, DEFAULT_NAMES) for p in ("zoom", "teams", "web")},
+            "user": me_public(u)}
+
+
+@app.get("/api/workers")
+async def workers(u: dict = CU):
+    return [public_status(u, st) for st in await asyncio.gather(*(worker_status(n) for n in WORKERS))]
 
 
 class StartMeeting(BaseModel):
@@ -156,69 +331,93 @@ class StartMeeting(BaseModel):
     calendar: dict | None = None  # événement d'agenda (eid Google / id Exchange, organisateur, invités), facultatif
 
 
-async def start_meeting(m: StartMeeting) -> dict:
+async def start_meeting(m: StartMeeting, u: dict) -> dict:
     target = m.worker if m.worker and m.worker != "auto" else None
-    if not target:
-        for st in await asyncio.gather(*(worker_status(n) for n in WORKERS)):
-            if st.get("online") and st["state"] in ("idle", "manual", "error"):
+    if target:
+        await worker_for(target, u)
+    else:
+        sts = await asyncio.gather(*(worker_status(n) for n in WORKERS))
+        # d'abord un assistant libre, sinon un des siens resté ouvert (navigation, erreur)
+        for st in sorted(sts, key=lambda x: x.get("state") != "idle"):
+            if st.get("online") and st["state"] in ("idle", "manual", "error") and can_use_worker(u, st):
                 target = st["name"]
                 break
     if not target:
-        raise HTTPException(409, "aucun worker libre")
+        raise HTTPException(409, "aucun assistant libre")
     m.url = unwrap_url(m.url)
     body = m.model_dump(exclude={"worker"})
     platform = m.platform or detect_platform(m.url)
     body["platform"] = platform
-    body["display_name"] = m.display_name or DEFAULT_NAMES.get(platform) or DEFAULT_NAMES.get("web")
+    body["display_name"] = m.display_name or bot_name(u, platform, DEFAULT_NAMES)
+    body["owner"], body["me_name"] = u["login"], u.get("name")
     body["duration_min"] = m.duration_min or DEFAULT_DURATION
     r = await wcall(target, "POST", "/meeting/join", json=body)
     return {**r.json(), "name": target}
 
 
-@app.post("/api/meetings", dependencies=AUTH)
-async def api_start(m: StartMeeting):
-    return await start_meeting(m)
+@app.post("/api/meetings")
+async def api_start(m: StartMeeting, u: dict = CU):
+    return await start_meeting(m, u)
 
 
-@app.post("/api/workers/{name}/{action}", dependencies=AUTH)
-async def worker_action(name: str, action: str, request: Request):
+@app.post("/api/workers/{name}/{action}")
+async def worker_action(name: str, action: str, request: Request, u: dict = CU):
     paths = {"leave": "/meeting/leave", "mute": "/meeting/mute", "rec-start": "/recording/start",
              "rec-stop": "/recording/stop", "open": "/browser/open", "reset": "/browser/reset",
              "offer": "/webrtc/offer", "tr-start": "/transcript/start", "tr-stop": "/transcript/stop",
              "speakers": "/transcript/speakers", "analyze": "/transcript/analyze"}
     if action not in paths:
         raise HTTPException(404)
+    await worker_for(name, u, live=action in ("speakers", "analyze"))
     body = await request.body()
+    if action in ("open", "rec-start", "tr-start"):   # l'assistant devient celui de ce compte
+        try:
+            d = json.loads(body or b"{}")
+        except ValueError:
+            raise HTTPException(400, "JSON invalide")
+        body = json.dumps({**d, "owner": u["login"], "me_name": u.get("name")}).encode()
     r = await wcall(name, "POST", paths[action], content=body or b"{}",
                     headers={"Content-Type": "application/json"}, timeout=60)
     return JSONResponse(r.json())
 
 
-@app.get("/api/workers/{name}/transcript", dependencies=AUTH)
-async def live_transcript(name: str, after: int = 0):
+@app.get("/api/workers/{name}/transcript")
+async def live_transcript(name: str, after: int = 0, u: dict = CU):
+    await worker_for(name, u, live=True)
     r = await wcall(name, "GET", f"/transcript?after={after}", timeout=5)
     return JSONResponse(r.json(), headers={"Cache-Control": "no-store"})
 
 
-@app.get("/api/workers/{name}/slides", dependencies=AUTH)
-async def live_slides(name: str, after: int = 0):
+@app.get("/api/workers/{name}/slides")
+async def live_slides(name: str, after: int = 0, u: dict = CU):
+    await worker_for(name, u, live=True)
     r = await wcall(name, "GET", f"/transcript/slides?after={after}", timeout=5)
     return JSONResponse(r.json(), headers={"Cache-Control": "no-store"})
 
 
-@app.get("/api/slides/{name}/{stem}/{n}", dependencies=AUTH)
-async def slide_image(name: str, stem: str, n: int):
+@app.get("/api/slides/{name}/{stem}/{n}")
+async def slide_image(name: str, stem: str, n: int, u: dict = CU):
+    rec = next((x for x in await worker_recordings(name) if _stem(x["name"]) == stem), None)
+    if rec:                                 # diapositive d'une réunion enregistrée : il faut y avoir droit
+        if not can_see(u, rec.get("meta")):
+            raise HTTPException(403, "réunion d'un autre utilisateur")
+    else:                                   # réunion en cours, pas encore listée : celle de ce compte
+        st = await worker_for(name, u, live=True)
+        if _stem(((st.get("transcript") or {}).get("file") or "")) != stem and not is_admin(u):
+            raise HTTPException(403, "diapositive inconnue")
     r = await wcall(name, "GET", f"/slides/{stem}/{n}", timeout=10)
     return Response(r.content, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
 
 
-@app.post("/api/recordings/{name}/{file}/slides", dependencies=AUTH)
-async def recording_slides(name: str, file: str):
+@app.post("/api/recordings/{name}/{file}/slides")
+async def recording_slides(name: str, file: str, u: dict = CU):
+    await rec_meta(name, file, u, edit=True)
     return (await wcall(name, "POST", f"/recordings/{file}/slides")).json()
 
 
-@app.get("/api/workers/{name}/analysis", dependencies=AUTH)
-async def live_analysis(name: str):
+@app.get("/api/workers/{name}/analysis")
+async def live_analysis(name: str, u: dict = CU):
+    await worker_for(name, u, live=True)
     r = await wcall(name, "GET", "/transcript/analysis", timeout=5)
     return JSONResponse(r.json(), headers={"Cache-Control": "no-store"})
 
@@ -228,32 +427,107 @@ class SpeakerName(BaseModel):
     name: str | None = None
 
 
-@app.patch("/api/recordings/{name}/{file}/speakers", dependencies=AUTH)
-async def recording_speaker_rename(name: str, file: str, body: SpeakerName):
+@app.patch("/api/recordings/{name}/{file}/speakers")
+async def recording_speaker_rename(name: str, file: str, body: SpeakerName, u: dict = CU):
+    await rec_meta(name, file, u, edit=True)
     return (await wcall(name, "PATCH", f"/recordings/{file}/speakers", json=body.model_dump())).json()
 
 
-@app.get("/api/workers/{name}/screenshot", dependencies=AUTH)
-async def screenshot(name: str, w: int = 640):
+@app.get("/api/workers/{name}/screenshot")
+async def screenshot(name: str, w: int = 640, u: dict = CU):
+    await worker_for(name, u)
     r = await wcall(name, "GET", f"/screenshot?w={w}")
     return Response(r.content, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
 # ----------------------------------------------------------------------------- enregistrements
-@app.get("/api/recordings", dependencies=AUTH)
-async def recordings():
-    async def one(n):
-        try:
-            return [{**x, "worker": n} for x in (await http.get(wurl(n) + "/recordings", timeout=5)).json()]
-        except Exception:
-            return []
-    lists = await asyncio.gather(*(one(n) for n in WORKERS))
-    return sorted((x for l in lists for x in l), key=lambda x: -x["mtime"])
+_rec_cache: dict[str, tuple[float, list]] = {}
 
 
-@app.get("/api/recordings/{name}/{file}", dependencies=AUTH)
-async def recording_get(name: str, file: str, request: Request, download: int = 0):
+async def worker_recordings(n: str, fresh: bool = False) -> list[dict]:
+    """Enregistrements d'un assistant (gardés 10 s : chaque lecture de fichier vérifie les droits)."""
+    hit = _rec_cache.get(n)
+    if hit and not fresh and time.monotonic() - hit[0] < 10:
+        return hit[1]
+    try:
+        items = [{**x, "worker": n} for x in (await http.get(wurl(n) + "/recordings", timeout=5)).json()]
+    except Exception:
+        return hit[1] if hit else []
+    _rec_cache[n] = (time.monotonic(), items)
+    return items
+
+
+def _stem(file: str) -> str:
+    return file.removesuffix(".mp4").removesuffix(".transcript.json")
+
+
+async def rec_meta(name: str, file: str, u: dict, edit: bool = False, must_exist: bool = True) -> dict | None:
+    """Métadonnées d'une réunion si ce compte y a droit (lecture, ou modification si edit), sinon 403/404."""
+    wurl(name)
+    stem = _stem(file)
+    for fresh in (False, True):
+        rec = next((x for x in await worker_recordings(name, fresh) if _stem(x["name"]) == stem), None)
+        if rec:
+            break
+    if not rec:
+        if must_exist:
+            raise HTTPException(404, "réunion inconnue")
+        return None
+    meta = rec.get("meta") or {}
+    if not (can_edit(u, meta) if edit else can_see(u, meta)):
+        if must_exist or edit:
+            raise HTTPException(403, "réunion d'un autre utilisateur")
+        return None
+    return meta
+
+
+@app.get("/api/recordings")
+async def recordings(u: dict = CU):
+    lists = await asyncio.gather(*(worker_recordings(n, fresh=True) for n in WORKERS))
+    names = USERS.names()
+    out = []
+    for x in (x for l in lists for x in l):
+        meta = x.get("meta") or {}
+        if not can_see(u, meta):
+            continue
+        owner = meta.get("owner")
+        out.append({**x, "owner": owner, "owner_name": names.get(owner, owner) if owner else None,
+                    "mine": owner == u["login"], "can_edit": can_edit(u, meta),
+                    "shared_with": meta.get("shared_with") or []})
+    return sorted(out, key=lambda x: -x["mtime"])
+
+
+class Access(BaseModel):
+    shared_with: list[str] | None = None
+    owner: str | None = None      # administrateurs seulement
+
+
+@app.put("/api/recordings/{name}/{file}/access")
+async def recording_access(name: str, file: str, body: Access, u: dict = CU):
+    """Partager une réunion avec d'autres comptes (lecture seule), ou en changer le propriétaire (administrateur)."""
+    meta = await rec_meta(name, file, u, edit=True)
+    known = {x["login"] for x in USERS.all()}
+    fields = {}
+    if body.shared_with is not None:
+        bad = [x for x in body.shared_with if x not in known]
+        if bad:
+            raise HTTPException(400, "compte(s) inconnu(s) : " + ", ".join(bad))
+        fields["shared_with"] = [x for x in body.shared_with if x != (body.owner or meta.get("owner"))]
+    if body.owner is not None:
+        if not is_admin(u):
+            raise HTTPException(403, "seul un administrateur change le propriétaire")
+        if body.owner not in known:
+            raise HTTPException(400, "compte inconnu")
+        fields["owner"] = body.owner
+    r = await wcall(name, "PATCH", f"/recordings/{file}/meta", json=fields)
+    _rec_cache.pop(name, None)
+    return r.json()
+
+
+@app.get("/api/recordings/{name}/{file}")
+async def recording_get(name: str, file: str, request: Request, download: int = 0, u: dict = CU):
     """Relais en streaming avec support Range (lecture vidéo sur iPhone/iPad)."""
+    await rec_meta(name, file, u)
     headers = {"X-Agent-Token": TOKEN}
     if "range" in request.headers:
         headers["Range"] = request.headers["range"]
@@ -275,8 +549,9 @@ async def recording_get(name: str, file: str, request: Request, download: int = 
     return StreamingResponse(body(), status_code=r.status_code, headers=out_h, media_type="video/mp4")
 
 
-@app.get("/api/recordings/{name}/{file}/transcript", dependencies=AUTH)
-async def recording_transcript(name: str, file: str, fmt: str = "json", download: int = 0):
+@app.get("/api/recordings/{name}/{file}/transcript")
+async def recording_transcript(name: str, file: str, fmt: str = "json", download: int = 0, u: dict = CU):
+    await rec_meta(name, file, u)
     r = await wcall(name, "GET", f"/recordings/{file}/transcript?fmt={'md' if fmt == 'md' else 'json'}")
     if fmt != "md":
         return JSONResponse(r.json())
@@ -289,8 +564,9 @@ REPORT_TYPES = {"md": ("text/markdown; charset=utf-8", "md"),
                 "docx": ("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "docx")}
 
 
-@app.get("/api/recordings/{name}/{file}/report", dependencies=AUTH)
-async def recording_report(name: str, file: str, fmt: str = "json", download: int = 0):
+@app.get("/api/recordings/{name}/{file}/report")
+async def recording_report(name: str, file: str, fmt: str = "json", download: int = 0, u: dict = CU):
+    await rec_meta(name, file, u)
     r = await wcall(name, "GET", f"/recordings/{file}/report?fmt={fmt if fmt in REPORT_TYPES else 'json'}", timeout=60)
     if fmt not in REPORT_TYPES:
         return JSONResponse(r.json(), headers={"Cache-Control": "no-store"})
@@ -300,18 +576,22 @@ async def recording_report(name: str, file: str, fmt: str = "json", download: in
         "Content-Disposition": f'{"attachment" if download else "inline"}; filename="{stem} - compte rendu.{ext}"'})
 
 
-@app.post("/api/recordings/{name}/{file}/report", dependencies=AUTH)
-async def recording_report_build(name: str, file: str):
+@app.post("/api/recordings/{name}/{file}/report")
+async def recording_report_build(name: str, file: str, u: dict = CU):
+    await rec_meta(name, file, u, edit=True)
     return (await wcall(name, "POST", f"/recordings/{file}/report")).json()
 
 
-@app.delete("/api/recordings/{name}/{file}", dependencies=AUTH)
-async def recording_delete(name: str, file: str):
+@app.delete("/api/recordings/{name}/{file}")
+async def recording_delete(name: str, file: str, u: dict = CU):
+    await rec_meta(name, file, u, edit=True)
+    _rec_cache.pop(name, None)
     return (await wcall(name, "DELETE", f"/recordings/{file}")).json()
 
 
-@app.get("/api/recordings/{name}/{file}/thumb", dependencies=AUTH)
-async def recording_thumb(name: str, file: str):
+@app.get("/api/recordings/{name}/{file}/thumb")
+async def recording_thumb(name: str, file: str, u: dict = CU):
+    await rec_meta(name, file, u)
     r = await wcall(name, "GET", f"/recordings/{file}/thumb")
     return Response(r.content, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=300"})
 
@@ -320,14 +600,17 @@ class Rename(BaseModel):
     title: str
 
 
-@app.patch("/api/recordings/{name}/{file}", dependencies=AUTH)
-async def recording_rename(name: str, file: str, body: Rename):
+@app.patch("/api/recordings/{name}/{file}")
+async def recording_rename(name: str, file: str, body: Rename, u: dict = CU):
+    await rec_meta(name, file, u, edit=True)
+    _rec_cache.pop(name, None)
     return (await wcall(name, "PATCH", f"/recordings/{file}", json=body.model_dump())).json()
 
 
-@app.get("/api/recordings/{name}/{file}/final", dependencies=AUTH)
-async def recording_final(name: str, file: str, fmt: str = "md", download: int = 0):
+@app.get("/api/recordings/{name}/{file}/final")
+async def recording_final(name: str, file: str, fmt: str = "md", download: int = 0, u: dict = CU):
     """Compte rendu final déposé par Claude (outil MCP attach_cr)."""
+    await rec_meta(name, file, u)
     if fmt not in ("md", "pdf", "json"):
         raise HTTPException(400)
     r = await wcall(name, "GET", f"/recordings/{file}/final?fmt={fmt}")
@@ -367,25 +650,35 @@ class ScheduleItem(StartMeeting):
     when: dt.datetime  # ISO avec fuseau
 
 
-@app.get("/api/schedule", dependencies=AUTH)
-async def schedule_list():
-    return sorted(load_schedule(), key=lambda x: x["when"])
+def _sched_owner(x: dict) -> str | None:
+    return x.get("owner") or USERS.first_admin()   # planifications d'avant les comptes : au premier administrateur
 
 
-@app.post("/api/schedule", dependencies=AUTH)
-async def schedule_add(item: ScheduleItem):
+@app.get("/api/schedule")
+async def schedule_list(u: dict = CU):
+    names = USERS.names()
+    return sorted(({**x, "owner_name": names.get(_sched_owner(x))} for x in load_schedule()
+                   if is_admin(u) or _sched_owner(x) == u["login"]), key=lambda x: x["when"])
+
+
+@app.post("/api/schedule")
+async def schedule_add(item: ScheduleItem, u: dict = CU):
     if item.when.tzinfo is None:
         raise HTTPException(400, "date sans fuseau horaire")
     items = load_schedule()
-    entry = {**json.loads(item.model_dump_json()), "id": uuid.uuid4().hex[:10], "status": "pending"}
+    entry = {**json.loads(item.model_dump_json()), "id": uuid.uuid4().hex[:10], "status": "pending", "owner": u["login"]}
     items.append(entry)
     save_schedule(items)
     return entry
 
 
-@app.delete("/api/schedule/{sid}", dependencies=AUTH)
-async def schedule_del(sid: str):
-    save_schedule([x for x in load_schedule() if x["id"] != sid])
+@app.delete("/api/schedule/{sid}")
+async def schedule_del(sid: str, u: dict = CU):
+    items = load_schedule()
+    it = next((x for x in items if x["id"] == sid), None)
+    if it and not (is_admin(u) or _sched_owner(it) == u["login"]):
+        raise HTTPException(403, "planification d'un autre utilisateur")
+    save_schedule([x for x in items if x["id"] != sid])
     return {"ok": True}
 
 
@@ -402,8 +695,12 @@ async def scheduler():
             if now - dt.datetime.fromisoformat(it["when"]) > dt.timedelta(minutes=30):
                 it["status"], it["result"] = "missed", "trop tard (> 30 min)"
                 continue
+            owner = USERS.get(_sched_owner(it))
+            if not owner or owner.get("disabled"):
+                it["status"], it["result"] = "missed", "compte supprimé ou désactivé"
+                continue
             try:
-                res = await start_meeting(StartMeeting(**{k: it[k] for k in StartMeeting.model_fields if it.get(k) is not None}))
+                res = await start_meeting(StartMeeting(**{k: it[k] for k in StartMeeting.model_fields if it.get(k) is not None}), owner)
                 it["status"], it["result"] = "started", res["name"]
                 log.info("réunion planifiée lancée sur %s", res["name"])
             except HTTPException as e:
@@ -468,6 +765,7 @@ class LexiconBody(BaseModel):
 
 @app.get("/api/lexicon", dependencies=AUTH)
 async def lexicon_get():
+    """Lexique (lecture pour tous les comptes ; modification par les administrateurs)."""
     text = lexicon_text()
     st = await asyncio.gather(*(worker_status(n) for n in WORKERS))
     mt = LEXICON_FILE.stat().st_mtime if text is not None else None
@@ -476,8 +774,8 @@ async def lexicon_get():
             "workers": {x["name"]: x.get("lexicon") if x.get("online") else "injoignable" for x in st}}
 
 
-@app.put("/api/lexicon", dependencies=AUTH)
-async def lexicon_put(body: LexiconBody):
+@app.put("/api/lexicon")
+async def lexicon_put(body: LexiconBody, u: dict = Depends(require_admin)):
     if len(body.text) > 200_000:
         raise HTTPException(413, "lexique trop long (200 000 caractères au plus)")
     if LEXICON_FILE.exists():   # version précédente gardée (retour arrière à la main)
@@ -498,7 +796,8 @@ async def startup():
 # ----------------------------------------------------------------------------- écran distant (noVNC)
 @app.websocket("/vnc/{name}/websockify")
 async def vnc_proxy(ws: WebSocket, name: str):
-    if not ws.session.get("ok") or name not in WORKERS:
+    u = session_user(ws.session)
+    if not u or name not in WORKERS or not can_use_worker(u, await worker_status(name)):
         await ws.close(code=4401)
         return
     host = httpx.URL(WORKERS[name]).host
@@ -552,7 +851,8 @@ async def novnc_static(path: str, request: Request):
 import mcp_server  # noqa: E402
 
 mcp = mcp_server.mount(app, http=http, workers=WORKERS, token=TOKEN, data_dir=DATA, secret=os.environ["SECRET_KEY"],
-                       site=os.environ.get("SITE_ADDRESS"), require_login=Depends(require_login))
+                       site=os.environ.get("SITE_ADDRESS"), require_login=Depends(require_login),
+                       users=USERS, current_user=current_user)
 
 
 # ----------------------------------------------------------------------------- IHM
