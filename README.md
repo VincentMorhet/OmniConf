@@ -121,6 +121,46 @@ Mot de passe : `ADMIN_PASSWORD` dans `/etc/webconf/control.env` sur webconf-ctl.
    Réglables dans `worker.env` : `RECORD_FPS`, `RECORD_CRF`, `RECORD_AUDIO_BITRATE`, `SCREEN_SIZE`.
    À côté de chaque MP4 : un `.json` (métadonnées) et un `.jpg` (miniature). Le MP4 est fragmenté : il
    reste lisible même après un crash.
+8. **Entrée ratée, terminée à la main** : si l'assistant n'arrive pas à rejoindre seul (la plateforme a
+   changé sa page), il reste sur la page, en erreur, avec une capture de la page et la liste de ses boutons
+   dans `recordings/debug/` (10 derniers échecs). Termine l'entrée via « Écran » : dès que l'assistant
+   se voit dans la réunion, il lance l'enregistrement et la transcription demandés au départ.
+9. **Transcription après coup** (enregistrement sans transcription) : `worker/offline.py` reprend la
+   chaîne du direct sur la vidéo. Il fait le découpage de la parole, Whisper avec ses hallucinations
+   retranscrites, les empreintes vocales, la mise en forme et les diapositives.
+   - L'orateur actif est repéré dans l'image, au cadre coloré de sa vignette Teams, et son nom est lu
+     par le modèle d'image. Les voix sont donc nommées comme en direct.
+   - Les participants sont relevés sur les vignettes toutes les minutes.
+   - Les noms tronqués ou mal lus sont regroupés.
+   - Ensuite, ↻ Régénérer produit le compte rendu.
+
+   ```bash
+   docker exec -u bot webconf-w1 /opt/webconf/venv/bin/python /opt/webconf/worker/offline.py <nom>.mp4
+   ```
+
+   La transcription d'une réunion de 83 min a pris environ 30 min, surtout pour la mise en forme et les
+   pages partagées.
+10. **📖 Lexique du projet** (onglet Enregistrements) : un texte Markdown, saisi une fois et envoyé à tous
+   les assistants (ils le retrouvent dans les 2 minutes après un redémarrage).
+   - Sections reconnues :
+     - `## 1. PERSONNES` : « - Prénom Nom : rôle [variantes entendues] », ou « - Équipe : Nom (rôle) ; Nom… » ;
+     - `## 2. CORRECTIONS` : « entendu, autre forme → correct ; … » ;
+     - `## 3. SIGLES ET TERMES` et `## 4. REGISTRE DES SUJETS` : texte libre.
+   - Usages :
+     - **Whisper** : les participants vus à l'écran et les formes correctes des mots souvent mal entendus
+       (prompt d'environ 200 jetons) ;
+     - **mise en forme** : la table des corrections, appliquée selon le contexte (le texte brut de
+       Whisper reste tel quel) ;
+     - **noms des intervenants** : casse (« CAMILLE DURAND » → « Camille Durand »), variantes et noms tronqués
+       par la plateforme (« Camille Dur… ») complétés ;
+     - **compte rendu** : personnes, sigles et registre donnés aux modèles. Un nom absent du lexique et des
+       intervenants est signalé dans « Points à vérifier ».
+   - Claude le lit par MCP (`get_lexicon`). La version précédente est gardée dans
+     `/var/lib/webconf/lexicon.prev.md`.
+   - Le compte rendu signale aussi :
+     - plusieurs voix sous un même nom (« Nom (2) ») : salle partagée possible, attributions incertaines ;
+     - une **couverture partielle** : entrée terminée à la main, créneau d'agenda dépassé, ou début ou fin
+       manquants selon les modèles.
 
 ### Réglages de la transcription (`/etc/webconf/worker.env`, puis `systemctl restart webconf-agent`)
 
@@ -165,9 +205,10 @@ manipuler de mot de passe. Code : `control/mcp_server.py`.
 | `get_draft_cr` | `id` | premier compte rendu en Markdown, modèles utilisés (rédaction, arbitrage, contrôle) et date de génération |
 | `get_slides` | `id`, `images` | diapositives : horodatage, titre, texte lu, description ; liens temporaires vers les captures (ou les images elles-mêmes) |
 | `get_audio_url` | `id`, `start`, `end`, `format` | lien temporaire (signé, sans jeton) vers l'audio en MP3/WAV mono 16 kHz, en entier ou un passage |
+| `get_lexicon` | — | lexique du projet (Markdown) : personnes, corrections de transcription, sigles, registre des sujets ; version et date |
 | `attach_cr` | `id`, `markdown`, `pdf_base64` | dépôt du compte rendu final à côté de la réunion (jeton d'**écriture** distinct) |
 
-* **Jetons** : propres à un client, révocables, de portée *lecture* (les 6 premiers outils) ou *écriture*
+* **Jetons** : propres à un client, révocables, de portée *lecture* (les 7 premiers outils) ou *écriture*
   (`attach_cr` seulement). Seule leur empreinte est conservée (`/var/lib/webconf/mcp_tokens.json`).
   Création et révocation : IHM, onglet Enregistrements, « Accès de Claude (MCP) » (le jeton n'est affiché
   qu'une fois), ou `sudo bash -c 'set -a; . /etc/webconf/control.env; /opt/webconf/venv/bin/python

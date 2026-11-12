@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 import analyst
+import lexicon
 from audio_bridge import AudioBridge
 from meetings import (PLATFORMS, SPEAKER_DEBUG_JS, Browser, active_speakers, clean_name, detect_platform, unwrap_url,
                       visible_participants)
@@ -48,6 +49,7 @@ state = {"state": "idle", "platform": None, "url": None, "title": None, "since":
 join_task: asyncio.Task | None = None
 watch_task: asyncio.Task | None = None
 speaker_task: asyncio.Task | None = None
+last_join: tuple | None = None   # (JoinReq, plateforme) d'une entrée échouée : reprise si on la termine à la main
 bot_name: str = BOT_NAME
 REPORT_AUTO = os.environ.get("REPORT_AUTO", "1") == "1"
 reports: dict[str, dict] = {}   # stem -> {state: running|done|error|skipped, step, started, error}
@@ -105,10 +107,32 @@ async def status():
             "recording_file": recorder.file.name if recorder.active else None,
             "recording_since": recorder.started_at.isoformat() if recorder.active else None,
             "listeners": bridge.listeners, "transcript": transcriber.status(),
-            "vnc_port": VNC_PORT}
+            "vnc_port": VNC_PORT, "lexicon": lexicon.load().version or None}
+
+
+class LexiconBody(BaseModel):
+    text: str
+
+
+@app.get("/lexicon", dependencies=[Depends(auth)])
+async def lexicon_get():
+    lex = lexicon.load()
+    return {"version": lex.version or None, "text": lex.text, "people": len(lex.people),
+            "corrections": len(lex.corrections)}
+
+
+@app.put("/lexicon", dependencies=[Depends(auth)])
+async def lexicon_put(body: LexiconBody):
+    """Lexique poussé par le contrôle (modifié dans l'IHM) : pris en compte dès la phrase suivante."""
+    if len(body.text) > 200_000:
+        raise HTTPException(413, "lexique trop long")
+    lex = lexicon.save(body.text)
+    log.info("lexique %s : %d personnes, %d corrections", lex.version, len(lex.people), len(lex.corrections))
+    return {"version": lex.version or None, "people": len(lex.people), "corrections": len(lex.corrections)}
 
 
 async def _run_join(req: JoinReq, platform: str):
+    global last_join
     try:
         async with browser.lock:
             page = await browser.page()
@@ -129,20 +153,55 @@ async def _run_join(req: JoinReq, platform: str):
             note = "entrée automatique non confirmée : vérifiez via « Écran » (enregistrement lancé)"
         elif impl is None:
             note = "page ouverte : rejoignez à la main via « Écran » (enregistrement lancé)"
-        set_state("in_meeting", note=note)
-        meta = {"platform": platform, "url": req.url, "worker": NAME, "site": _site(req.url, platform)}
-        if req.calendar:
-            meta["calendar"] = req.calendar
-        if req.record and not recorder.active:
-            await recorder.start(req.title or _site(req.url, platform), meta)
-        if req.transcribe and transcriber.enabled:
-            await _start_transcript(req.title or _site(req.url, platform), meta)
+        await _after_join(req, platform, note)
     except asyncio.CancelledError:
         raise
     except Exception as e:
         log.exception("join failed")
-        # on garde la page ouverte : l'utilisateur peut terminer à la main via noVNC
+        await _join_debug(str(e))
+        # on garde la page ouverte : l'utilisateur peut terminer à la main via noVNC ; le chien de garde
+        # lance alors l'enregistrement et la transcription demandés (voir _watchdog)
+        last_join = (req, platform)
         set_state("error", error=str(e)[:300])
+
+
+async def _after_join(req: JoinReq, platform: str, note: str | None = None, late: dict | None = None):
+    """Dans la réunion : enregistrement et transcription demandés au départ.
+    `late` : entrée terminée à la main après un échec (le début de la réunion manque, signalé dans le CR)."""
+    set_state("in_meeting", note=note, error=None)
+    meta = {"platform": platform, "url": req.url, "worker": NAME, "site": _site(req.url, platform)}
+    if late:
+        meta["late_start"] = late
+    if req.calendar:
+        meta["calendar"] = req.calendar
+    if req.record and not recorder.active:
+        await recorder.start(req.title or _site(req.url, platform), meta)
+    if req.transcribe and transcriber.enabled:
+        await _start_transcript(req.title or _site(req.url, platform), meta)
+
+
+async def _join_debug(error: str):
+    """Entrée échouée : capture d'écran et boutons visibles, pour comprendre (plateformes qui changent)."""
+    try:
+        page = await browser.page()
+        stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        d = recorder.dir / "debug"
+        d.mkdir(exist_ok=True)
+        await page.screenshot(path=str(d / f"{stamp}_join-error.png"))
+        btns = []
+        for fr in page.frames:
+            try:
+                btns += await fr.evaluate("""() => [...document.querySelectorAll('button,[role=button],input')]
+                    .filter(b => b.offsetParent).slice(0, 80)
+                    .map(b => [(b.getAttribute('data-tid') || b.id || ''), (b.innerText || b.value || b.getAttribute('aria-label') || '').trim().slice(0, 60), b.disabled || false])""")
+            except Exception:
+                pass
+        (d / f"{stamp}_join-error.json").write_text(json.dumps(
+            {"error": error, "url": page.url, "buttons": btns}, ensure_ascii=False, indent=1))
+        for old in sorted(d.glob("*_join-error.*"))[:-20]:   # on garde les 10 derniers échecs
+            old.unlink(missing_ok=True)
+    except Exception as e:
+        log.warning("capture de l'échec d'entrée : %s", e)
 
 
 async def _start_transcript(title: str, meta: dict):
@@ -168,7 +227,9 @@ def _me_name() -> str:
     if os.environ.get("TRANSCRIPT_ME_NAME"):
         return os.environ["TRANSCRIPT_ME_NAME"]
     n = re.sub(r"\s*(\(.*\)|[-–|].*)$", "", clean_name(bot_name or "")).strip()
-    return (n.title() if n.isupper() else n) or "Moi"
+    # « Camille DURAND » -> « Camille Durand » : mots en capitales remis en casse de nom propre
+    return " ".join("-".join(x.capitalize() for x in w.split("-")) if w.isupper() and len(w) > 1 else w
+                    for w in n.split()) or "Moi"
 
 
 # ----------------------------------------------------------------------------- compte rendu final
@@ -251,7 +312,8 @@ def _site(url: str, platform: str) -> str:
 
 
 async def _watchdog():
-    """Détecte la fin de réunion (bouton Quitter disparu) et la durée max."""
+    """Détecte la fin de réunion (bouton Quitter disparu), la durée max, et l'entrée terminée à la main."""
+    global last_join
     missing = 0
     seen = False  # pour « Autre » : on ne conclut à la fin que si la barre de réunion a été reconnue
     while True:
@@ -261,6 +323,21 @@ async def _watchdog():
             await _leave()
             return
         impl = PLATFORMS.get(state["platform"] or "")
+        if state["state"] == "error" and impl is not None and last_join and not browser.lock.locked():
+            # entrée automatique échouée puis terminée à la main via « Écran » : on reprend comme si
+            # l'assistant était entré seul (enregistrement + transcription demandés)
+            try:
+                ok = await impl.in_meeting(await browser.page())
+            except Exception:
+                ok = False
+            if ok:
+                log.info("entrée terminée à la main : enregistrement et transcription lancés")
+                req, platform = last_join
+                last_join = None
+                await _after_join(req, platform, note="entrée terminée à la main : enregistrement et transcription lancés",
+                                  late={"why": "entrée automatique échouée, terminée à la main",
+                                        "at": dt.datetime.now().astimezone().isoformat()})
+            continue
         if state["state"] != "in_meeting" or impl is None or browser.lock.locked():
             continue
         try:
@@ -280,7 +357,7 @@ async def _watchdog():
 
 @app.post("/meeting/join", dependencies=[Depends(auth)])
 async def join(req: JoinReq):
-    global join_task, watch_task
+    global join_task, watch_task, last_join
     if state["state"] in ("joining", "lobby", "in_meeting"):
         raise HTTPException(409, f"worker occupé ({state['state']})")
     req.url = unwrap_url(req.url)   # lien safelinks / redirection Google : on rejoint le vrai lien
@@ -288,6 +365,7 @@ async def join(req: JoinReq):
     leave_at = None
     if req.duration_min:
         leave_at = (dt.datetime.now().astimezone() + dt.timedelta(minutes=req.duration_min)).isoformat()
+    last_join = None
     set_state("joining", platform=platform, url=req.url, title=req.title, error=None, note=None,
               auto_leave_at=leave_at)
     join_task = asyncio.create_task(_run_join(req, platform))
@@ -298,7 +376,8 @@ async def join(req: JoinReq):
 
 
 async def _leave(click: bool = True):
-    global join_task
+    global join_task, last_join
+    last_join = None
     if join_task and not join_task.done():
         join_task.cancel()
     set_state("leaving")

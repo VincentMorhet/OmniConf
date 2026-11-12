@@ -68,14 +68,20 @@ async def _find(page: Page, selectors: list[str], timeout: float = 0.0):
 
 
 async def _click(page: Page, selectors: list[str], timeout: float = 0.0) -> bool:
-    loc = await _find(page, selectors, timeout)
-    if loc:
-        try:
-            await loc.click(timeout=3000)
-            return True
-        except Exception as e:
-            log.debug("click failed %s", e)
-    return False
+    """Clique sur le premier élément visible ; réessaie jusqu'à `timeout` si le clic échoue (élément
+    recouvert par une fenêtre, encore désactivé…)."""
+    deadline = time.monotonic() + timeout
+    while True:
+        loc = await _find(page, selectors, max(0.0, deadline - time.monotonic()))
+        if loc:
+            try:
+                await loc.click(timeout=3000)
+                return True
+            except Exception as e:
+                log.debug("click failed %s", e)
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(0.5)
 
 
 def _btn(*names: str) -> list[str]:
@@ -164,26 +170,41 @@ class Teams:
     LEAVE = ["button[data-tid='hangup-main-btn']", "#hangup-button", "button[data-tid='call-hangup']",
              *_btn("^Leave", "^Quitter", "Hang up", "Raccrocher")]
     LOBBY = ["text=/let you in soon|will let you in|vous laisser entrer|vous admettre/i"]
+    # Teams « light meetings » (nov. 2026) : sans caméra, une fenêtre « Are you sure you don't want audio or
+    # video? » recouvre la pré-connexion et bloque « Join now ». La fermer garde l'audio de l'ordinateur
+    # (micro VirtualMic + haut-parleur), vérifié sur la page réelle.
+    NO_MEDIA = _btn("Continue without audio or video", "Continuer sans audio ni vidéo", "Continuer sans audio ou vidéo")
+    JOIN = ["button[data-tid='prejoin-join-button']", "#prejoin-join-button",
+            *_btn("^Join now", "^Rejoindre maintenant", "^Join$", "^Rejoindre$")]
 
     @staticmethod
     async def join(page: Page, url: str, name: str, set_state):
         await page.goto(url, wait_until="domcontentloaded", timeout=45000)
-        # Page "Comment voulez-vous rejoindre ?" -> rester dans le navigateur
-        await _click(page, _btn("Continue on this browser", "Join on the web", "Use the web app",
-                                "Continuer sur ce navigateur", "Participer sur le web"), timeout=20)
+        names = ["input[data-tid='prejoin-display-name-input']", "input[placeholder*='name' i]",
+                 "input[placeholder*='nom' i]"]
+        # Page "Comment voulez-vous rejoindre ?" -> rester dans le navigateur ; Teams l'affiche de moins en
+        # moins (pré-connexion directe) : on n'attend pas si la pré-connexion est déjà là
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            if await _click(page, _btn("Continue on this browser", "Join on the web", "Use the web app",
+                                       "Continuer sur ce navigateur", "Participer sur le web")) or await _find(page, names):
+                break
+            await asyncio.sleep(0.5)
         # Écran de pré-connexion
-        name_input = await _find(page, ["input[data-tid='prejoin-display-name-input']",
-                                        "input[placeholder*='name' i]", "input[placeholder*='nom' i]"], timeout=40)
+        name_input = await _find(page, names, timeout=40)
+        await _click(page, Teams.NO_MEDIA, timeout=3)
         if name_input:
             await name_input.fill(name)
         # Couper la caméra si elle est active (pas de caméra sur la VM de toute façon)
-        cam = await _find(page, ["[data-tid='toggle-video'][aria-checked='true']",
-                                 "input[title*='camera' i][aria-checked='true']"])
-        if cam:
-            await cam.click()
-        if not await _click(page, ["button[data-tid='prejoin-join-button']", "#prejoin-join-button",
-                                   *_btn("^Join now", "^Rejoindre maintenant", "^Join$", "^Rejoindre$")], timeout=30):
-            raise RuntimeError("bouton 'Join now' introuvable")
+        await _click(page, ["[data-tid='toggle-video'][aria-checked='true']",
+                            "input[title*='camera' i][aria-checked='true']"])
+        deadline = time.monotonic() + 30
+        while True:
+            await _click(page, Teams.NO_MEDIA)          # la fenêtre peut s'afficher avec un peu de retard
+            if await _click(page, Teams.JOIN, timeout=2):
+                break
+            if time.monotonic() >= deadline:
+                raise RuntimeError("bouton 'Join now' introuvable ou inaccessible")
         # Attente salle d'attente / réunion
         deadline = time.monotonic() + 3600
         while time.monotonic() < deadline:

@@ -52,6 +52,7 @@ class Diarizer:
         else:
             self.error = "modèle d'empreinte vocale absent (voix non distinguées)"
         self.bot_names = {n.strip().lower() for n in bot_names if n}
+        self.canon = lambda n: n   # nom affiché -> nom de référence (lexique), réglé par le transcripteur
         self.reset()
 
     def reset(self):
@@ -236,7 +237,13 @@ class Diarizer:
 
     def _label_auto(self, sid):
         v = self.spk.get(sid)
-        return (v["name"] or self._voted(v)) if v else None
+        return (v["name"] or self._canon(self._voted(v))) if v else None
+
+    def _canon(self, n):
+        try:
+            return self.canon(n) if n else n
+        except Exception:  # pragma: no cover
+            return n
 
     def rename(self, sid: str, name: str | None) -> bool:
         sid = self.resolve(sid)
@@ -250,7 +257,7 @@ class Diarizer:
         out, seen = {}, Counter()
         order = sorted(self.spk.items(), key=lambda kv: kv[1]["num"])
         for idx, (k, v) in enumerate(order, 1):
-            auto = self._voted(v) or f"Intervenant {idx}"
+            auto = self._canon(self._voted(v)) or f"Intervenant {idx}"
             label = v["name"] or auto
             src = "manual" if v["name"] else "ui" if self._voted(v) else "voice"
             seen[label] += 1

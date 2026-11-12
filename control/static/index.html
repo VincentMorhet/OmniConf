@@ -155,6 +155,20 @@
         <div class="row"><input id="mcpNewTok" readonly spellcheck="false"><button id="mcpCopy">Copier</button><button id="mcpHide" class="ghost">Masquer</button></div>
       </div>
     </details>
+    <details class="card" id="lexBox">
+      <summary><h2>📖 Lexique du projet</h2></summary>
+      <p class="hint">Noms des personnes, mots mal reconnus (« entendu → correct »), sigles et registre des sujets.
+        La transcription s'en sert (Whisper, mise en forme, noms des intervenants), ainsi que le compte rendu.
+        Il est envoyé à tous les assistants dès l'enregistrement, et Claude le lit par MCP (get_lexicon).
+        Sections : <code>## 1. PERSONNES</code> (« - Prénom Nom : rôle [variantes entendues] »),
+        <code>## 2. CORRECTIONS</code> (« entendu, autre → correct ; … »), <code>## 3. SIGLES ET TERMES</code>,
+        <code>## 4. REGISTRE DES SUJETS</code>.</p>
+      <textarea id="lexText" rows="18" spellcheck="false" placeholder="## 1. PERSONNES&#10;- Prénom Nom : rôle [variante entendue]&#10;&#10;## 2. CORRECTIONS DE TRANSCRIPTION&#10;mot entendu, autre forme → Forme correcte ; …"></textarea>
+      <div class="row">
+        <span id="lexInfo" class="hint"></span>
+        <button id="lexSave" class="primary">Enregistrer et envoyer aux assistants</button>
+      </div>
+    </details>
   </main>
 </div>
 

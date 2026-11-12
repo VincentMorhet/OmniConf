@@ -33,6 +33,8 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
+import lexicon
+
 log = logging.getLogger("analyst")
 
 API = os.environ.get("OVH_AI_BASE_URL", "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1")
@@ -182,11 +184,56 @@ def parse_t(s) -> float | None:
 
 
 def me_label(doc: dict) -> str:
-    return (doc.get("meta") or {}).get("me_name") or ME_NAME or "Moi"
+    n = (doc.get("meta") or {}).get("me_name") or ME_NAME
+    return (lexicon.load().canonical(n) or n) if n else "Moi"
+
+
+DUP = re.compile(r"^(?P<base>.+?) \((?P<n>\d+)\)$")
+ORG = re.compile(r"^(?P<name>.+?)\s*(?:[(\[](?P<org>[^()\[\]]{2,60})[)\]]|\s[-–|]\s(?P<org2>.{2,60}))\s*$")
+
+
+SHARED_MIN_WORDS = int(os.environ.get("REPORT_SHARED_MIN_WORDS", "120"))
+
+
+def speakers_info(doc: dict) -> dict[str, dict]:
+    """id -> {name, display, org, voice (1 = voix principale, 2… = autre voix sous le même nom), source, shared}.
+    Les noms affichés par la plateforme passent par le lexique (casse, noms tronqués, variantes).
+    « Nom (2) » = une autre voix captée sous le même nom : fusionnée avec Nom si elle parle peu (même
+    personne, découpage de la voix), sinon affichée « Nom (voix 2) » (salle partagée possible)."""
+    lex = lexicon.load()
+    out = {}
+    for k, v in (doc.get("speakers") or {}).items():
+        if k == "ME":
+            continue
+        label, src = v.get("label") or k, v.get("source")
+        voice = 1
+        m = DUP.match(label)
+        if m and src != "manual":
+            label, voice = m.group("base"), int(m.group("n"))
+        org = None
+        if src != "manual":
+            mo = ORG.match(label)
+            if mo and not re.fullmatch(r"\d+", mo.group("org") or mo.group("org2") or ""):
+                label, org = mo.group("name").strip(), (mo.group("org") or mo.group("org2")).strip()
+            if src == "ui":
+                label = lex.canonical(label) or label
+        out[k] = {"name": label, "org": org, "voice": voice, "source": src}
+    words: dict[str, int] = {}
+    for p in paragraphs(doc):
+        words[p.get("spk")] = words.get(p.get("spk"), 0) + len(str(p.get("text") or "").split())
+    extra: dict[str, int] = {}
+    for k, v in out.items():
+        if v["voice"] > 1:
+            extra[v["name"]] = extra.get(v["name"], 0) + words.get(k, 0)
+    for k, v in out.items():
+        v["words"] = words.get(k, 0)
+        v["shared"] = extra.get(v["name"], 0) >= SHARED_MIN_WORDS
+        v["display"] = f"{v['name']} (voix {v['voice']})" if v["shared"] and v["voice"] > 1 else v["name"]
+    return out
 
 
 def labels(doc: dict) -> dict[str, str]:
-    out = {k: v.get("label") or k for k, v in (doc.get("speakers") or {}).items()}
+    out = {k: v["display"] for k, v in speakers_info(doc).items()}
     out["ME"] = me_label(doc)
     return out
 
@@ -206,13 +253,18 @@ def paragraphs(doc: dict) -> list[dict]:
 def speaker_table(doc: dict) -> str:
     lines = []
     used = {p.get("spk") for p in paragraphs(doc)}
-    for k, v in (doc.get("speakers") or {}).items():
-        if k == "ME" or k not in used:
+    info = speakers_info(doc)
+    for k, v in info.items():
+        if k not in used:
             continue
-        src = v.get("source")
+        src = v["source"]
         how = {"ui": "nom affiché par la plateforme de visio", "manual": "nom confirmé par l'utilisateur",
                "voice": "nom inconnu, identifié uniquement par sa voix"}.get(src, "")
-        lines.append(f"- {{{k}}} = {v.get('label') or k}" + (f" ({how})" if how else ""))
+        if v["voice"] > 1:
+            how = (f"autre voix sur la connexion de {v['name']} : même personne ou autre personne de la salle ; "
+                   f"attribution incertaine, nomme la personne si la transcription l'établit")
+        lines.append(f"- {{{k}}} = {v['display']}" + (f", organisation affichée : {v['org']}" if v["org"] else "")
+                     + (f" ({how})" if how else ""))
     lines.append(f"- {{ME}} = {me_label(doc)} : l'utilisateur pour qui tu travailles (il assiste à la réunion)")
     return "\n".join(lines)
 
@@ -272,14 +324,45 @@ def calendar_hint(doc: dict) -> str:
             f"{d:%H:%M}. Calendrier des jours suivants : " + " ; ".join(days) + ".")
 
 
+def coverage_hints(doc: dict) -> list[str]:
+    """Ce que le service sait de la couverture de l'enregistrement (début manquant…)."""
+    meta, out = doc.get("meta") or {}, []
+    late = meta.get("late_start") or {}
+    if late:
+        out.append("L'assistant n'a pas pu entrer seul dans la réunion : l'enregistrement n'a commencé qu'après "
+                   "une entrée terminée à la main" + (f" ({late['why']})" if late.get("why") else "")
+                   + ". Le début de la réunion manque probablement.")
+    if meta.get("offline"):
+        out.append("Transcription faite après coup, à partir de la vidéo enregistrée.")
+    cal = meta.get("calendar") or {}
+    try:
+        start, cs = local(meta["started_at"]), local(cal["start"])
+        if (start - cs).total_seconds() > 300:
+            out.append(f"Créneau prévu à {cs:%H:%M} ; enregistrement commencé à {start:%H:%M} : le début manque peut-être.")
+    except (KeyError, ValueError, TypeError):
+        pass
+    try:
+        end, ce = local(meta["ended_at"]), local(cal["end"])
+        if (ce - end).total_seconds() > 300:
+            out.append(f"Fin prévue à {ce:%H:%M} ; enregistrement arrêté à {end:%H:%M}.")
+    except (KeyError, ValueError, TypeError):
+        pass
+    return out
+
+
 def context_block(doc: dict) -> str:
     meta = doc.get("meta") or {}
+    lex = lexicon.load().llm_block()
+    cov = coverage_hints(doc)
     parts = [f"Titre saisi : {meta.get('title')}" if meta.get("title") else "",
              f"Plateforme : {meta.get('site') or meta.get('platform')}" if (meta.get("site") or meta.get("platform")) else "",
              calendar_hint(doc), "Intervenants :\n" + speaker_table(doc),
              ("Les lignes « [ÉCRAN PARTAGÉ] » décrivent ce qui était affiché à l'écran à ce moment (diapositive, "
               "document) : utilise-les pour comprendre et compléter ce qui est dit (titres, chiffres, schémas), "
-              "sans les attribuer à un intervenant." if doc.get("slides") else "")]
+              "sans les attribuer à un intervenant." if doc.get("slides") else ""),
+             ("Couverture de l'enregistrement (connue du service) :\n" + "\n".join(f"- {c}" for c in cov)) if cov else "",
+             ("Lexique du projet (référence pour l'orthographe des noms, des sigles et des sujets ; ne cite que ce "
+              "qui a été dit, le lexique ne sert qu'à comprendre et à bien écrire) :\n" + lex) if lex else ""]
     return "\n".join(p for p in parts if p)
 
 
@@ -309,7 +392,9 @@ COMMON_RULES = """Règles impératives :
 # ============================================================================ contrôle des dates
 _WD = "|".join(WEEKDAYS)
 _MO = "janvier|f[ée]vrier|mars|avril|mai|juin|juillet|ao[uû]t|septembre|octobre|novembre|d[ée]cembre"
-_REL = re.compile(rf"\b({_WD})\b([^()\n]{{0,40}}?)\(\s*(?:le\s+)?(?:(?:{_WD})\s+)?(\d{{1,2}})(?:er)?\s+({_MO})(?:\s+\d{{4}})?\s*\)", re.I)
+# l'écart entre le jour et la parenthèse ne doit pas contenir un autre jour : dans « d'ici vendredi, alors que X
+# sera absent mardi (13 novembre) », c'est « mardi » qui porte la date (sinon « vendredi » la validait)
+_REL = re.compile(rf"\b({_WD})\b((?:(?!\b(?:{_WD})\b)[^()\n]){{0,40}}?)\(\s*(?:le\s+)?(?:(?:{_WD})\s+)?(\d{{1,2}})(?:er)?\s+({_MO})(?:\s+\d{{4}})?\s*\)", re.I)
 _EXPL_PAREN = re.compile(rf"\b(\d{{1,2}})(?:er)?\s+({_MO})(\s+\d{{4}})?\s*\(\s*(?:{_WD})?\s*(?:\d{{1,2}}(?:er)?\s+(?:{_MO}))?\s*\)", re.I)
 _EXPL = re.compile(rf"\b({_WD})\s+(\d{{1,2}})(?:er)?\s+({_MO})(?:\s+(\d{{4}}))?", re.I)
 
@@ -437,8 +522,28 @@ REPORT_SCHEMA = """{
  "dates": [{"date": "date ou échéance citée", "objet": "ce qui est prévu", "t": "mm:ss"}],
  "pour_moi": [{"texte": "ce que {ME} doit faire, ce qu'il a promis, ce qu'on attend de lui", "t": "mm:ss"}],
  "prochaine_reunion": "date, heure et modalités si annoncées, sinon null",
- "a_verifier": [{"texte": "passage ambigu ou inaudible, chiffre ou nom incertain, contradiction non résolue", "t": "mm:ss"}]
+ "a_verifier": [{"texte": "passage ambigu ou inaudible, chiffre ou nom incertain, contradiction non résolue", "t": "mm:ss"}],
+ "couverture": {"debut_manquant": false, "fin_manquante": false,
+                "commentaire": "indices, ex. « commence au milieu d'un échange sur X, sans accueil ni ordre du jour »"}
 }"""
+
+REPORT_RULES = """- Couverture : dis si l'enregistrement commence en cours de réunion (pas d'accueil ni d'ordre du jour,
+  sujet déjà engagé, renvois à ce qui « vient d'être dit ») ou s'arrête avant la fin (coupure en pleine
+  phrase, ni conclusion ni salutations). Tiens compte de ce que le service sait de la couverture.
+- Noms : orthographe du lexique et de la liste des intervenants. Une personne citée qui n'y figure pas :
+  garde le nom entendu et ajoute-la dans « a_verifier ». Un sigle ou un numéro de sujet (« le 120 ») se
+  comprend avec le lexique ; si l'écran ou les propos contredisent l'état du registre, signale-le dans
+  « a_verifier ».
+- Les lignes de l'écran partagé peuvent contenir des erreurs de lecture : un numéro de ticket ou une valeur
+  qui diffère entre l'écran et l'oral (unité, chiffre) va dans « a_verifier ».
+- Rétractations : quand un intervenant revient sur ce qu'il a dit (« j'ai fait une erreur », « je me suis
+  trompé », « pardon, c'est… », « non, en fait… »), seule la version corrigée figure dans le compte rendu,
+  partout (synthèse, sujets, chiffres, dates) ; mentionne la correction et son horodatage. L'affirmation
+  retirée ne doit jamais rester présentée comme un fait.
+- Attribution : l'étiquetage des voix peut se tromper. Quand l'écran affiche le porteur d'un sujet
+  (« Référent », « Titulaire », « Porteur », « Pilote : X ») et que les propos qui le commentent sont
+  attribués à quelqu'un d'autre, préfère le porteur affiché si le contenu le confirme, et signale
+  l'incertitude dans « a_verifier »."""
 
 DRAFT_SYSTEM = """Tu rédiges le compte rendu officiel d'une réunion professionnelle à partir de sa
 transcription intégrale. Ce compte rendu fera foi : il doit être exact, complet et directement exploitable.
@@ -446,6 +551,7 @@ transcription intégrale. Ce compte rendu fera foi : il doit être exact, comple
 - Exhaustivité : chaque décision, action, chiffre, date, question ouverte et risque mentionné doit
   figurer dans la rubrique adéquate, même s'il n'a été évoqué qu'en passant.
 - « sujets » suit l'ordre chronologique de la réunion et couvre toute sa durée.
+""" + REPORT_RULES + """
 Réponds UNIQUEMENT par un JSON de cette forme (listes vides [] si rien) :
 """ + REPORT_SCHEMA
 
@@ -462,6 +568,7 @@ transcription intégrale et plusieurs projets rédigés indépendamment par des 
 4. Ajoute ce qu'aucun projet n'a relevé mais qui est important.
 5. Prends la meilleure formulation : la plus précise et la plus claire. Garde le détail des « sujets ».
 """ + COMMON_RULES + """
+""" + REPORT_RULES + """
 Réponds UNIQUEMENT par ce JSON :
 {"compte_rendu": <objet au format ci-dessous>,
  "arbitrages": [{"point": "élément discuté", "versions": "ce que disaient les projets (A : …, B : …)",
@@ -475,6 +582,7 @@ rendu (JSON). Vérifie CHAQUE élément contre la transcription :
   échéances, des horodatages ;
 - décision présentée comme actée alors qu'elle ne l'est pas, ou l'inverse ;
 - contresens, attribution à la mauvaise personne ;
+- noms de personnes absents de la liste des intervenants et du lexique : à ajouter dans « a_verifier » ;
 - OUBLIS : relis la transcription ligne par ligne et repère toute action (même secondaire : fournir un
   document, vérifier auprès de quelqu'un, prévenir une équipe), tout engagement, chiffre, date, question
   ou risque qui manque au compte rendu.
@@ -643,7 +751,8 @@ async def build_report(llm: LLM, doc: dict, progress=lambda step: None) -> dict:
 
     warn = []
     final = fix_dates(final, doc, warn)
-    final["a_verifier"] = final.get("a_verifier", []) + warn
+    final["a_verifier"] = final.get("a_verifier", []) + warn + shared_voices(doc)
+    final["couverture"] = coverage(final.get("couverture"), doc)
     # horodatages hors de la réunion : on les retire plutôt que d'afficher un lien faux
     last_t = max((p["t"] for p in paragraphs(doc)), default=0) + 60
     for k in LIST_KEYS:
@@ -654,6 +763,42 @@ async def build_report(llm: LLM, doc: dict, progress=lambda step: None) -> dict:
             "secs": round(time.time() - t_start), "cr": final, "arbitrages": arbitrages,
             "corrections": corrections, "steps": steps, "stats": stats(doc),
             "drafts": {model_name(s): cr for s, cr in drafts}}
+
+
+def shared_voices(doc: dict) -> list[dict]:
+    """Plusieurs voix distinctes sous un même nom de plateforme : salle partagée possible (avertissement)."""
+    info = speakers_info(doc)
+    first = {}
+    for p in paragraphs(doc):
+        first.setdefault(p.get("spk"), p.get("t"))
+    by_name: dict[str, list[str]] = {}
+    for k, v in info.items():
+        if v["words"]:
+            by_name.setdefault(v["name"], []).append(k)
+    out = []
+    for name, ids in by_name.items():
+        extra = [k for k in ids if info[k]["voice"] > 1]
+        if len(ids) > 1 and extra and info[ids[0]]["shared"]:
+            t = min((first[k] for k in extra if first.get(k) is not None), default=None)
+            out.append({"texte": f"{len(ids)} voix distinctes ont été captées sur la connexion de {name} (« {name} (voix 2) »…) : "
+                                 f"soit la même personne, soit plusieurs personnes dans la même salle. Les propos attribués "
+                                 f"à {name} peuvent venir d'une autre personne présente.",
+                        "t": fmt_t(t) if t is not None else None})
+    return out
+
+
+def coverage(cov, doc: dict) -> dict:
+    """Couverture de l'enregistrement : avis des modèles + ce que le service sait (entrée tardive…)."""
+    cov = cov if isinstance(cov, dict) else {}
+    out = {"debut_manquant": bool(cov.get("debut_manquant")), "fin_manquante": bool(cov.get("fin_manquante")),
+           "commentaire": str(cov.get("commentaire") or "").strip() or None}
+    meta = doc.get("meta") or {}
+    if meta.get("late_start"):
+        out["debut_manquant"] = True
+    known = [h for h in coverage_hints(doc) if not h.startswith("Transcription faite après coup")]
+    if known:
+        out["service"] = known
+    return out
 
 
 # ============================================================================ rendu Markdown / Word
@@ -688,9 +833,15 @@ def report_sections(report: dict, doc: dict) -> list[tuple]:
         info.append(f"Visioconférence {({'teams': 'Teams', 'zoom': 'Zoom'}).get(plat, plat)}")
     if info:
         out.append(("meta", " · ".join(info)))
+    cov = cr.get("couverture") or {}
+    if cov.get("debut_manquant") or cov.get("fin_manquante"):
+        what = " et ".join(x for x, k in (("début manquant", "debut_manquant"), ("fin manquante", "fin_manquante")) if cov.get(k))
+        why = "; ".join(x for x in [*(cov.get("service") or []), cov.get("commentaire")] if x)
+        out.append(("pb", ("Couverture partielle : ", N(what + (f". {why}" if why else "")))))
     st = report.get("stats") or []
     if st:
-        out.append(("p", "Participants : " + ", ".join(lab.get(s["spk"], s["spk"]) for s in st)))
+        base = {k: v["name"] for k, v in speakers_info(doc).items()}   # « Nom (voix 2) » -> Nom
+        out.append(("p", "Participants : " + ", ".join(dict.fromkeys(base.get(s["spk"]) or lab.get(s["spk"], s["spk"]) for s in st))))
     if cr.get("objet"):
         out += [("h2", "Objet"), ("p", N(cr["objet"]))]
     if cr.get("synthese"):
@@ -740,8 +891,13 @@ def report_sections(report: dict, doc: dict) -> list[tuple]:
                 ("note", "Passages ambigus ou incertains dans la transcription automatique : à confirmer avant diffusion."),
                 ("ul", [N(x.get("texte")) + _ts(x) for x in cr["a_verifier"]])]
     if st:
+        agg: dict[str, list] = {}       # voix multiples sous un même nom : additionnées
+        for s in st:
+            a = agg.setdefault(lab.get(s["spk"], s["spk"]), [0, 0, 0])
+            a[0] += s["secs"]; a[1] += s["share"]; a[2] += s["turns"]
         out += [("h2", "Temps de parole"), ("table", ["Intervenant", "Durée", "Part", "Interventions"],
-                                            [[lab.get(s["spk"], s["spk"]), fmt_t(s["secs"]), f"{s['share']} %", str(s["turns"])] for s in st])]
+                                            [[n, fmt_t(a[0]), f"{a[1]} %", str(a[2])]
+                                             for n, a in sorted(agg.items(), key=lambda kv: -kv[1][0])])]
     # traçabilité
     out.append(("h2", "Méthode et contrôle"))
     steps = report.get("steps") or []

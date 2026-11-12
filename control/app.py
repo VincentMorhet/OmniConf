@@ -2,6 +2,7 @@
 l'écran distant (noVNC) et les enregistrements. Planifie les réunions."""
 import asyncio
 import datetime as dt
+import hashlib
 import hmac
 import json
 import logging
@@ -59,6 +60,7 @@ def detect_platform(url: str) -> str:
 DATA = Path(os.environ.get("DATA_DIR", "/var/lib/webconf"))
 DATA.mkdir(parents=True, exist_ok=True)
 SCHEDULE_FILE = DATA / "schedule.json"
+LEXICON_FILE = DATA / "lexicon.md"   # lexique de l'installation (noms, corrections, sigles, registre), poussé aux workers
 HERE = Path(__file__).parent
 NOVNC_DIR = Path(os.environ.get("NOVNC_DIR", "/usr/share/novnc"))
 
@@ -411,9 +413,86 @@ async def scheduler():
             save_schedule(items)
 
 
+# ----------------------------------------------------------------------------- lexique
+def lexicon_version(text: str) -> str | None:
+    """Même empreinte que worker/lexicon.py."""
+    return hashlib.sha1(text.encode()).hexdigest()[:12] if text.strip() else None
+
+
+def lexicon_text() -> str | None:
+    """None : lexique jamais saisi (on ne touche pas aux workers)."""
+    try:
+        return LEXICON_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+async def lexicon_push(names=None, force: bool = False) -> dict:
+    """Envoie le lexique aux workers qui n'ont pas la bonne version. {worker: version ou erreur}."""
+    text = lexicon_text()
+    if text is None:
+        return {}
+    want = lexicon_version(text)
+    out = {}
+
+    async def one(n):
+        st = await worker_status(n)
+        if not st.get("online"):
+            out[n] = "injoignable"
+            return
+        if st.get("lexicon") == want and not force:
+            out[n] = want
+            return
+        try:
+            r = await http.put(wurl(n) + "/lexicon", json={"text": text}, timeout=10)
+            out[n] = r.json().get("version") if r.status_code < 400 else f"erreur {r.status_code}"
+        except Exception as e:
+            out[n] = f"erreur : {str(e)[:80]}"
+    await asyncio.gather(*(one(n) for n in (names or WORKERS)))
+    return out
+
+
+async def lexicon_sync():
+    """Workers redémarrés ou recréés : ils retrouvent le lexique au plus tard 2 minutes après."""
+    while True:
+        try:
+            await lexicon_push()
+        except Exception as e:  # pragma: no cover
+            log.warning("lexique : %s", e)
+        await asyncio.sleep(120)
+
+
+class LexiconBody(BaseModel):
+    text: str
+
+
+@app.get("/api/lexicon", dependencies=AUTH)
+async def lexicon_get():
+    text = lexicon_text()
+    st = await asyncio.gather(*(worker_status(n) for n in WORKERS))
+    mt = LEXICON_FILE.stat().st_mtime if text is not None else None
+    return {"text": text or "", "version": lexicon_version(text or ""),
+            "updated_at": dt.datetime.fromtimestamp(mt).astimezone().isoformat() if mt else None,
+            "workers": {x["name"]: x.get("lexicon") if x.get("online") else "injoignable" for x in st}}
+
+
+@app.put("/api/lexicon", dependencies=AUTH)
+async def lexicon_put(body: LexiconBody):
+    if len(body.text) > 200_000:
+        raise HTTPException(413, "lexique trop long (200 000 caractères au plus)")
+    if LEXICON_FILE.exists():   # version précédente gardée (retour arrière à la main)
+        LEXICON_FILE.replace(LEXICON_FILE.with_suffix(".prev.md"))
+    tmp = LEXICON_FILE.with_suffix(".tmp")
+    tmp.write_text(body.text, encoding="utf-8")
+    tmp.replace(LEXICON_FILE)
+    log.info("lexique enregistré (%s, %d caractères)", lexicon_version(body.text), len(body.text))
+    return {"version": lexicon_version(body.text), "workers": await lexicon_push()}
+
+
 @app.on_event("startup")
 async def startup():
     asyncio.create_task(scheduler())
+    asyncio.create_task(lexicon_sync())
 
 
 # ----------------------------------------------------------------------------- écran distant (noVNC)

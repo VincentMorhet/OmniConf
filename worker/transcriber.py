@@ -25,6 +25,7 @@ import httpx
 import numpy as np
 
 import analyst
+import lexicon
 import slides as slides_mod
 from speakers import Diarizer
 
@@ -132,6 +133,7 @@ class Transcriber:
         self.asr_sem = asyncio.Semaphore(3)
         self.fmt_lock = asyncio.Lock()
         self.diar = Diarizer()
+        self.diar.canon = lambda n: lexicon.load().canonical(n)
         self.dlock = threading.Lock()  # l'empreinte vocale est calculée hors de la boucle asyncio
         self.llm = analyst.LLM()
         self.an_task: asyncio.Task | None = None
@@ -187,7 +189,8 @@ class Transcriber:
         self.active = True
         self.base, self.t0 = base, t0
         self.meta = {**meta, "started_at": dt.datetime.fromtimestamp(t0).astimezone().isoformat(),
-                     "asr": ASR_MODEL, "llm": LLM_MODEL, "lang": LANG, "me_name": me_name or None}
+                     "asr": ASR_MODEL, "llm": LLM_MODEL, "lang": LANG, "me_name": me_name or None,
+                     "lexicon": lexicon.load().version or None}
         for source, speaker in (("meeting_out.monitor", "meet"), ("user_in.monitor", "ME")):
             self.tasks.append(asyncio.create_task(self._capture(source, speaker)))
         self.tasks.append(asyncio.create_task(self._format_loop()))
@@ -301,7 +304,7 @@ class Transcriber:
                     r = await self.http.post(
                         f"{API}/audio/transcriptions",
                         data={"model": ASR_MODEL, "language": LANG, "response_format": "verbose_json",
-                              "temperature": "0", "prompt": "Réunion professionnelle." + (f" {GLOSSARY}." if GLOSSARY else "")},
+                              "temperature": "0", "prompt": self.whisper_prompt()},
                         files={"file": ("seg.wav", _wav(pcm), "audio/wav")})
                     r.raise_for_status()
                     return r.json()
@@ -309,6 +312,25 @@ class Transcriber:
                     if attempt == 2:
                         raise
                     await asyncio.sleep(1 + attempt * 2)
+
+    def whisper_prompt(self) -> str:
+        """« Réunion professionnelle. » + participants vus à l'écran + termes du lexique (≈ 200 jetons au plus)."""
+        names = sorted(self.participants, key=lambda n: -self.participants[n].get("seen", 0))[:15]
+        terms = lexicon.load().whisper_prompt(names, extra=GLOSSARY)
+        return "Réunion professionnelle." + (f" {terms}." if terms else "")
+
+    def format_glossary(self) -> str:
+        """Indications pour la mise en forme : glossaire, corrections du lexique, noms des participants."""
+        lex = lexicon.load()
+        parts = [f"Glossaire : {GLOSSARY}." if GLOSSARY else ""]
+        if lex.corrections:
+            parts.append("Mots souvent mal reconnus (entendu → correct ; ne remplace que si le contexte "
+                         "s'y prête) :\n" + lex.corrections_text())
+        names = sorted({lex.canonical(n) or n for n in self.participants})[:40]
+        if names:
+            parts.append("Participants (orthographe des noms) : " + ", ".join(names) + ".")
+        txt = "\n".join(p for p in parts if p)
+        return f" et ces indications :\n{txt}\n" if txt else ""
 
     @staticmethod
     def _segments(d: dict, dur: float, offset: float = 0.0) -> list[dict]:
@@ -521,7 +543,7 @@ class Transcriber:
             try:
                 r = await self.http.post(f"{API}/chat/completions", json={
                     "model": LLM_MODEL, "temperature": 0.2, "max_tokens": 4000, "reasoning_effort": "none",
-                    "messages": [{"role": "system", "content": SYSTEM_PROMPT.format(lang=LANG, glossary=f" et ce glossaire : {GLOSSARY}" if GLOSSARY else "")},
+                    "messages": [{"role": "system", "content": SYSTEM_PROMPT.format(lang=LANG, glossary=self.format_glossary())},
                                  {"role": "user", "content": user}]})
                 r.raise_for_status()
                 content = r.json()["choices"][0]["message"]["content"] or ""

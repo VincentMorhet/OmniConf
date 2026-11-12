@@ -936,6 +936,34 @@ $("#mcpCopy").onclick = async () => {
 $("#mcpHide").onclick = () => { $("#mcpNewTok").value = ""; $("#mcpNew").classList.add("hidden"); };
 $("#mcpBox").addEventListener("toggle", () => { if ($("#mcpBox").open) loadTokens(); });
 
+// ------------------------------------------------------------------ lexique du projet
+let lexLoaded = "";
+function lexInfo(d) {
+  const ws = Object.entries(d.workers || {});
+  const ok = ws.filter(([, v]) => v === d.version).length;
+  const when = d.updated_at ? new Date(d.updated_at).toLocaleString("fr-FR", { dateStyle: "short", timeStyle: "short" }) : "";
+  $("#lexInfo").textContent = d.version
+    ? `Version ${d.version}${when ? " du " + when : ""} · à jour sur ${ok}/${ws.length} assistant(s)`
+      + (ok < ws.length ? " (" + ws.filter(([, v]) => v !== d.version).map(([n, v]) => n + " : " + (v || "aucun")).join(", ") + ")" : "")
+    : "Aucun lexique pour l'instant.";
+}
+async function loadLexicon() {
+  try { const d = await api("/api/lexicon"); lexLoaded = d.text; $("#lexText").value = d.text; lexInfo(d); }
+  catch (e) { toast(e.message); }
+}
+$("#lexBox").addEventListener("toggle", () => { if ($("#lexBox").open) loadLexicon(); });
+$("#lexSave").onclick = async () => {
+  const text = $("#lexText").value;
+  if (text === lexLoaded && !confirm("Lexique inchangé : le renvoyer quand même aux assistants ?")) return;
+  $("#lexSave").disabled = true;
+  try {
+    const d = await api("/api/lexicon", { method: "PUT", json: { text } });
+    lexLoaded = text; toast("Lexique enregistré");
+    lexInfo({ ...d, updated_at: new Date().toISOString() });
+  } catch (e) { toast(e.message); }
+  finally { $("#lexSave").disabled = false; }
+};
+
 async function loadRecordings() {
   try {
     const [items, disks] = await Promise.all([api("/api/recordings"), api("/api/storage")]);

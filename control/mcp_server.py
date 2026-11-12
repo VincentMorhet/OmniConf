@@ -44,7 +44,8 @@ INSTRUCTIONS = (
     "list_meetings pour trouver une réunion (id « w1:20261110-160042_teams »), get_meeting pour ses métadonnées "
     "(participants, intervenants, avertissements), get_transcript pour la transcription (segments horodatés, paginée), "
     "get_draft_cr pour le premier compte rendu produit par le service, get_slides pour l'écran partagé, "
-    "get_audio_url pour réécouter ou retranscrire un passage douteux. Heures en Europe/Paris ; dans une réunion, "
+    "get_audio_url pour réécouter ou retranscrire un passage douteux, get_lexicon pour le lexique du projet (noms, "
+    "sigles, corrections de transcription, registre des sujets). Heures en Europe/Paris ; dans une réunion, "
     "les horodatages HH:MM:SS partent du début de l'enregistrement.")
 
 
@@ -447,6 +448,7 @@ class MCP:
     def __init__(self, *, http, workers: dict, token: str, data_dir: Path, secret: str, site: str | None):
         self.http, self.workers, self.agent_token = http, workers, token
         self.tokens = TokenStore(data_dir / "mcp_tokens.json")
+        self.lexicon_file = data_dir / "lexicon.md"
         self.key = hmac.new(secret.encode(), b"omniconf-mcp-links", hashlib.sha256).digest()
         self.site = (site or "").rstrip("/")
 
@@ -785,6 +787,17 @@ class MCP:
                 "format": format, "audio": "mono 16 kHz, son de la réunion + micro de l'IHM",
                 "note": "lien temporaire, sans jeton ; à télécharger (curl) puis transcrire au besoin"}
 
+    async def t_get_lexicon(self):
+        try:
+            text = self.lexicon_file.read_text(encoding="utf-8")
+            mt = self.lexicon_file.stat().st_mtime
+        except OSError:
+            return {"version": None, "text": "", "note": "aucun lexique saisi dans OmniConf"}
+        return {"version": hashlib.sha1(text.encode()).hexdigest()[:12] if text.strip() else None,
+                "updated_at": dt.datetime.fromtimestamp(mt, TZ).isoformat(timespec="seconds"), "text": text,
+                "note": "Lexique utilisé par le service (transcription, noms, compte rendu). Il se modifie dans "
+                        "l'IHM (menu ⋯ → Lexique) : proposer les ajouts à l'utilisateur, au même format."}
+
     async def t_attach_cr(self, id, markdown, pdf_base64=None):
         w, stem = self._parse_id(id)
         if not (markdown or "").strip():
@@ -933,6 +946,12 @@ TOOLS = [
          "id": _ID, "start": {"type": "string", "description": _T}, "end": {"type": "string", "description": _T},
          "format": {"type": "string", "enum": ["mp3", "wav"], "default": "mp3"},
          "ttl_minutes": {"type": "number", "minimum": 1, "maximum": 240, "default": 15}}, "required": ["id"]}},
+    {"name": "get_lexicon", "title": "Lexique du projet", "_scope": "read", "annotations": _RO,
+     "description": "Lexique utilisé par le service, au format Markdown : personnes (orthographe, rôle, variantes "
+                    "entendues), corrections de transcription (entendu → correct), sigles et termes, registre des "
+                    "sujets suivis. Version (empreinte) et date de mise à jour : la même version sert à la "
+                    "transcription et aux premiers comptes rendus.",
+     "inputSchema": {"type": "object", "properties": {}}},
     {"name": "attach_cr", "title": "Déposer le compte rendu final", "_scope": "write",
      "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
      "description": "Dépose le compte rendu FINAL à côté de la réunion (Markdown, et PDF en base64 facultatif). "
