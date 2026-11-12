@@ -48,4 +48,8 @@ cp /opt/webconf/control/system/webconf-control.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now webconf-control
 systemctl restart webconf-control caddy
+# Certificat racine de Caddy (tls internal), publié sur /ca.crt pour les postes clients (Claude Code / serveur MCP)
+CA=/var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt
+for i in $(seq 1 20); do [ -f $CA ] && break; sleep 1; done
+[ -f $CA ] && install -m 644 -o webconf -g webconf $CA "${DATA_DIR:-/var/lib/webconf}/caddy-root.crt" || true
 echo "IHM : $SITE_ADDRESS"

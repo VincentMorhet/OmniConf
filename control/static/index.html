@@ -137,6 +137,24 @@
       <div id="storage" class="storage"></div>
       <div id="recordings"></div>
     </section>
+    <details class="card" id="mcpBox">
+      <summary><h2>🔑 Accès de Claude (MCP)</h2></summary>
+      <p class="hint">Claude peut lister les réunions et lire transcriptions, comptes rendus, diapositives et audio,
+        en lecture seule, avec un jeton qui lui est propre (révocable ici). Adresse du serveur : <code id="mcpUrl"></code></p>
+      <p class="hint hidden" id="mcpCa">Le poste doit faire confiance au certificat de l'IHM :
+        <a href="/ca.crt" download="omniconf-ca.crt">télécharger le certificat racine</a> puis, sous Windows,
+        <code>certutil -user -addstore Root omniconf-ca.crt</code>. Empreinte SHA-256 à vérifier : <code id="mcpCaFp"></code></p>
+      <div id="mcpTokens"></div>
+      <div class="row">
+        <button id="mcpCreate">+ Jeton de lecture</button>
+        <button id="mcpCreateW" class="ghost" title="Permet seulement de déposer le compte rendu final à côté d'une réunion">+ Jeton d'écriture (CR final)</button>
+      </div>
+      <div id="mcpNew" class="hidden mcp-new">
+        <p><b>Jeton créé : copiez-le maintenant, il ne sera plus jamais affiché.</b> Sur le poste Windows, enregistrez-le
+          dans la variable d'environnement <code id="mcpNewVar">WEBCONF_TOKEN</code> (Paramètres › Variables d'environnement).</p>
+        <div class="row"><input id="mcpNewTok" readonly spellcheck="false"><button id="mcpCopy">Copier</button><button id="mcpHide" class="ghost">Masquer</button></div>
+      </div>
+    </details>
   </main>
 </div>
 

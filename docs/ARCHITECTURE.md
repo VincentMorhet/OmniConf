@@ -221,7 +221,23 @@ flowchart LR
     S --> RJ[".report.json<br/>compte rendu + traces<br/>(3 brouillons, arbitrages, corrections)"]
     RJ -. "à la demande" .-> DOCX["compte rendu.docx"]
     RJ -. "à la demande" .-> CRMD["compte rendu.md"]
+    S --> SL[".slide-NNN.jpg<br/>captures de l'écran partagé"]
+    S --> FIN[".cr-final.md / .pdf<br/>compte rendu final<br/>(déposé par Claude, MCP)"]
 ```
+
+## 6 bis. Accès de Claude (serveur MCP)
+
+```mermaid
+flowchart LR
+    CC["Claude Code<br/>(poste Windows)"] -- "POST /mcp<br/>Bearer jeton (lecture)" --> CTL["IHM (contrôle)<br/>mcp_server.py"]
+    CTL -- "X-Agent-Token" --> W["workers<br/>/recordings, /transcript…"]
+    CC -- "lien signé temporaire<br/>(audio, captures)" --> CTL
+```
+
+Le serveur est sans état (réponses JSON, versions du protocole 2024-11-05 à 2026-07-28). Il transforme les
+fichiers de la réunion (transcription, compte rendu, diapositives) en données prêtes à rédiger : locuteur résolu
+par phrase (nom affiché par la plateforme > voix reconnue > « Intervenant N »), participants et organisations,
+segments suspects, séquences hors réunion, indicateur de captation du micro de l'utilisateur.
 
 ---
 

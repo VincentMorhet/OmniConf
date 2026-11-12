@@ -14,12 +14,13 @@ import time
 from urllib.parse import urlparse
 
 from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 import analyst
 from audio_bridge import AudioBridge
-from meetings import PLATFORMS, SPEAKER_DEBUG_JS, Browser, active_speakers, clean_name, detect_platform, unwrap_url
+from meetings import (PLATFORMS, SPEAKER_DEBUG_JS, Browser, active_speakers, clean_name, detect_platform, unwrap_url,
+                      visible_participants)
 from recorder import Recorder, _slug
 import slides as slides_mod
 from transcriber import API as AI_API, Transcriber, rename_in_doc, save_doc, to_markdown
@@ -77,6 +78,7 @@ class JoinReq(BaseModel):
     title: str | None = None
     duration_min: int | None = None  # quitte automatiquement après N minutes
     transcribe: bool = True          # transcription en direct (si la clé OVH est configurée)
+    calendar: dict | None = None     # événement d'agenda (eid Google / id Exchange, organisateur, invités), facultatif
 
 
 class OpenReq(BaseModel):
@@ -129,6 +131,8 @@ async def _run_join(req: JoinReq, platform: str):
             note = "page ouverte : rejoignez à la main via « Écran » (enregistrement lancé)"
         set_state("in_meeting", note=note)
         meta = {"platform": platform, "url": req.url, "worker": NAME, "site": _site(req.url, platform)}
+        if req.calendar:
+            meta["calendar"] = req.calendar
         if req.record and not recorder.active:
             await recorder.start(req.title or _site(req.url, platform), meta)
         if req.transcribe and transcriber.enabled:
@@ -206,12 +210,15 @@ def _start_speaker_loop():
 
 async def _speaker_loop():
     """Relève ~4 fois/s l'orateur actif affiché par la plateforme (pour nommer les voix)."""
-    last_dbg, shots = time.time(), []
+    last_dbg, shots, last_roster = time.time(), [], 0.0
     while transcriber.active:
         try:
             if state["state"] == "in_meeting" and browser.ctx:
                 page = await browser.page()
                 transcriber.ui_sample(await active_speakers(page))
+                if time.time() - last_roster > 10:   # participants visibles (vignettes, liste)
+                    last_roster = time.time()
+                    transcriber.participants_sample(await visible_participants(page))
                 # Des participants parlent mais aucun nom n'est relevé (interface de la plateforme
                 # changée ?) : instantanés des éléments « parole » de la page, gardés à côté de la
                 # réunion (<stem>.speakerdebug.json) pour adapter SPEAKER_JS
@@ -537,6 +544,89 @@ async def recording_slides(name: str):
     return slides_jobs[stem]
 
 
+# ----------------------------------------------------------------------------- audio d'un passage
+@app.get("/recordings/{name}/audio", dependencies=[Depends(auth)])
+async def recording_audio(name: str, start: float = 0.0, end: float | None = None, fmt: str = "mp3"):
+    """Audio de la réunion (son de la réunion + micro de l'IHM), en mono 16 kHz : tout ou un passage.
+    `start`/`end` sont en secondes depuis le début de la vidéo."""
+    p = recorder.path(recorder.stem(name) + ".mp4")
+    if not p:
+        raise HTTPException(404, "pas de vidéo")
+    if fmt not in ("mp3", "wav"):
+        raise HTTPException(400, "format : mp3 ou wav")
+    cmd = ["ffmpeg", "-loglevel", "error", "-nostdin"]
+    if start > 0:
+        cmd += ["-ss", f"{start:.2f}"]
+    cmd += ["-i", str(p)]
+    if end is not None and end > start:
+        cmd += ["-t", f"{end - start:.2f}"]
+    cmd += ["-vn", "-ac", "1", "-ar", "16000"]
+    cmd += ["-c:a", "libmp3lame", "-b:a", "48k", "-f", "mp3"] if fmt == "mp3" else ["-c:a", "pcm_s16le", "-f", "wav"]
+    proc = await asyncio.create_subprocess_exec(*cmd, "pipe:1", stdout=asyncio.subprocess.PIPE,
+                                                stderr=asyncio.subprocess.DEVNULL)
+
+    async def body():
+        try:
+            while chunk := await proc.stdout.read(65536):
+                yield chunk
+        finally:
+            if proc.returncode is None:
+                proc.kill()
+            await proc.wait()
+    return StreamingResponse(body(), media_type="audio/mpeg" if fmt == "mp3" else "audio/wav")
+
+
+# ----------------------------------------------------------------------------- compte rendu final (déposé par Claude)
+class FinalCR(BaseModel):
+    markdown: str
+    pdf_b64: str | None = None
+    author: str | None = None
+
+
+def _final_paths(name: str):
+    stem = recorder.stem(name)
+    return recorder.dir / f"{stem}.cr-final.md", recorder.dir / f"{stem}.cr-final.pdf", recorder.dir / f"{stem}.cr-final.json"
+
+
+@app.put("/recordings/{name}/final", dependencies=[Depends(auth)])
+async def recording_final_put(name: str, req: FinalCR):
+    stem = recorder.stem(name)
+    if not (recorder.dir / (stem + ".mp4")).exists() and not (recorder.dir / (stem + ".transcript.json")).exists():
+        raise HTTPException(404, "réunion inconnue")
+    md, pdf, info = _final_paths(name)
+    data = None
+    if req.pdf_b64:   # vérifié avant d'écrire quoi que ce soit
+        import base64
+        import binascii
+        try:
+            data = base64.b64decode(req.pdf_b64, validate=True)
+        except (binascii.Error, ValueError):
+            raise HTTPException(400, "PDF : base64 invalide")
+        if not data.startswith(b"%PDF"):
+            raise HTTPException(400, "le fichier joint n'est pas un PDF")
+    md.write_text(req.markdown)
+    if data:
+        pdf.write_bytes(data)
+    else:
+        pdf.unlink(missing_ok=True)
+    meta = {"at": dt.datetime.now().astimezone().isoformat(), "author": req.author, "md_chars": len(req.markdown),
+            "pdf_bytes": pdf.stat().st_size if pdf.exists() else None}
+    info.write_text(json.dumps(meta, ensure_ascii=False, indent=1))
+    return meta
+
+
+@app.get("/recordings/{name}/final", dependencies=[Depends(auth)])
+async def recording_final_get(name: str, fmt: str = "json"):
+    md, pdf, info = _final_paths(name)
+    if fmt == "md" and md.exists():
+        return Response(md.read_text(), media_type="text/markdown; charset=utf-8")
+    if fmt == "pdf" and pdf.exists():
+        return FileResponse(pdf, media_type="application/pdf")
+    if fmt == "json" and info.exists():
+        return json.loads(info.read_text())
+    raise HTTPException(404, "pas de compte rendu final")
+
+
 @app.get("/transcript", dependencies=[Depends(auth)])
 async def transcript_live(after: int = 0):
     """Transcription en direct : paragraphes mis en forme après `after` + lignes brutes en attente."""
@@ -554,12 +644,33 @@ async def recording_transcript(name: str, fmt: str = "json"):
     return doc
 
 
+_cr_titles: dict[str, tuple[float, str | None]] = {}
+
+
+def _cr_title(p) -> str | None:
+    """Titre du compte rendu (pour des listes plus parlantes que « teams » ou « zoom ») ; mis en cache."""
+    try:
+        mt = p.stat().st_mtime
+    except FileNotFoundError:
+        return None
+    c = _cr_titles.get(p.name)
+    if not c or c[0] != mt:
+        try:
+            c = (mt, (json.loads(p.read_text()).get("cr") or {}).get("titre"))
+        except (ValueError, OSError):
+            c = (mt, None)
+        _cr_titles[p.name] = c
+    return c[1]
+
+
 @app.get("/recordings", dependencies=[Depends(auth)])
 async def recordings():
     items = recorder.list()
     for x in items:
         stem = recorder.stem(x["name"])
         x["report"] = (recorder.dir / (stem + ".report.json")).exists()
+        x["cr_title"] = _cr_title(recorder.dir / (stem + ".report.json")) if x["report"] else None
+        x["final_cr"] = (recorder.dir / (stem + ".cr-final.json")).exists()
         x["report_job"] = reports.get(stem)
         x["slides_job"] = slides_jobs.get(stem)
     return items

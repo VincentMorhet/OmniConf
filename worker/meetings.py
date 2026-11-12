@@ -389,16 +389,37 @@ class Generic:
 
 # --------------------------------------------------------------------------- orateur actif
 # Renvoie les noms affichés comme « en train de parler ». Exécuté ~4 fois/s dans chaque frame.
-SPEAKER_JS = r"""() => {
-  const out = new Set();
-  const clean = (t) => (t || "").split("\n")[0].replace(/,?\s*(is )?(speaking|talking|en train de parler|parle)\b.*$/i, "").trim();
-  const add = (t) => { t = clean(t); if (t && t.length < 80) out.add(t); };
+# Fonctions communes aux scripts ci-dessous (insérées en tête de chacun)
+_JS_COMMON = r"""
+  const STATUS = /^(mute[d]?|unmute[d]?|micro.*|mic.*|vid[ée]o.*|cam[ée]ra.*|more|plus|…|\.\.\.|\d+|pin|épingler|spotlight|raise hand|.*hand raised|main lev[ée]e.*|you|vous|me|moi|host|h[ôo]te|guest|invit[ée]e?)$/i;
+  const clean = (t) => (t || "").split("\n").map(s => s.trim()).find(s => s && s.length < 80 && !STATUS.test(s)) || "";
+  const label = (t) => clean((t || "").replace(/,?\s*(is )?(speaking|talking|en train de parler|parle)\b.*$/i, "").split(",")[0]);
+  const NAME_SEL = '[data-tid*="display-name" i], [class*="displayname" i], [class*="display-name" i], [class*="displayName"], ' +
+    '[class*="avatar-footer" i], [class*="participant-name" i], [class*="name-label" i], [data-self-name], [data-participant-name]';
   const nameIn = (el) => {
     if (!el) return null;
-    const n = el.querySelector('[data-tid*="display-name" i], [class*="displayname" i], [class*="display-name" i], ' +
-      '[class*="avatar-footer" i], [class*="participant-name" i], [class*="name-label" i], [data-self-name], [data-participant-name]');
-    return (n && (n.getAttribute("data-participant-name") || n.innerText)) || el.getAttribute("aria-label") || null;
+    const n = el.querySelector(NAME_SEL);
+    return (n && (n.getAttribute("data-participant-name") || clean(n.innerText))) || label(el.getAttribute("aria-label")) || null;
   };
+  // Nom d'une vignette à partir d'un élément intérieur (contour de voix…) : on remonte les ancêtres sans
+  // dépasser la vignette (un ancêtre qui contient plusieurs vignettes donnerait le nom d'un autre)
+  const tileName = (el, marker) => {
+    let a = el;
+    for (let i = 0; i < 9 && a && a !== document.body; i++, a = a.parentElement) {
+      if (i && marker && a.querySelectorAll(marker).length > 1) return null;
+      const n = a.querySelector && a.querySelector(NAME_SEL);
+      const v = (n && (n.getAttribute("data-participant-name") || clean(n.innerText))) || label(a.getAttribute && a.getAttribute("aria-label"));
+      if (v) return v;
+      if (i >= 1) { const txt = clean(a.innerText); if (txt) return txt; }
+    }
+    return null;
+  };
+  const visible = (el) => el.offsetWidth > 0 || el.offsetHeight > 0;
+"""
+
+SPEAKER_JS = r"""() => {
+  const out = new Set();""" + _JS_COMMON + r"""
+  const add = (t) => { t = label(t); if (t && t.length < 80) out.add(t); };
   // Jitsi : état interne de l'application (fiable)
   try {
     if (window.APP && APP.store) {
@@ -415,32 +436,74 @@ SPEAKER_JS = r"""() => {
       const n = el.querySelector('.video-avatar__avatar-footer, [class*="avatar-footer"], [class*="avatar-name"]');
       if (n) add(n.innerText);
   });
+  // Zoom, partage d'écran en cours (bandeau des vignettes) : indicateur de niveau audio dans une vignette
+  document.querySelectorAll('.audio-level-indicator, [class*="audio-level-indicator"]').forEach(el => {
+    if (!visible(el) || !el.closest('[class*="video-frame"]')) return;
+    add(tileName(el, '[class*="video-frame"]'));
+  });
   // Teams : contour du niveau de voix visible autour de la vignette
   document.querySelectorAll('[data-tid="voice-level-stream-outline"]').forEach(o => {
     const st = getComputedStyle(o);
     const on = (o.className || "").toString().match(/speaking|active|vdi-frame-occlusion/i) || (st.opacity !== "0" && st.visibility !== "hidden" && st.borderStyle !== "none" && st.display !== "none" && o.offsetWidth > 0 && parseFloat(st.borderWidth) > 0);
     if (!on) return;
-    const tile = o.closest('[data-tid*="participant" i], [data-cid*="participant" i], [data-stream-type], [role="menuitem"], [aria-label]');
-    add(nameIn(tile));
+    add(tileName(o, '[data-tid="voice-level-stream-outline"]'));
   });
   // Générique (Teams, Meet, Webex, BBB…) : attributs « en train de parler »
   document.querySelectorAll('[data-is-speaking="true"], [data-speaking="true"], [data-audio-active="true"], ' +
     '[class*="is-speaking" i], [class*="isSpeaking"], [class*="active-speaker" i], [class*="activeSpeaker"], ' +
     '[class*="dominant-speaker" i], [aria-label*="speaking" i], [aria-label*="en train de parler" i]').forEach(el => {
-      if (el.offsetWidth === 0 && el.offsetHeight === 0) return;
+      if (!visible(el)) return;
       const t = el.getAttribute("aria-label");
       add(t && /speaking|parler/i.test(t) ? t : nameIn(el.closest('[data-participant-id], [data-tid*="participant" i], [class*="tile" i], [class*="participant" i]') || el));
   });
   return [...out];
 }"""
 
-# Diagnostic : éléments candidats pour adapter les sélecteurs à une nouvelle version d'interface
+# Participants visibles (vignettes, liste des participants si elle est ouverte) : relevé toutes les ~10 s
+PARTICIPANTS_JS = r"""() => {
+  const out = new Set();""" + _JS_COMMON + r"""
+  const add = (t) => { t = label(t); if (t && t.length < 80) out.add(t); };
+  // Zoom : pied de vignette, bandeau, galerie, liste des participants
+  document.querySelectorAll('.video-avatar__avatar-footer, .participants-item__display-name').forEach(el => { if (visible(el)) add(el.innerText); });
+  document.querySelectorAll('.speaker-bar-container__video-frame, .gallery-video-container__video-frame, .speaker-active-container__video-frame').forEach(el => {
+    if (visible(el) && !el.querySelector('.video-avatar__avatar-footer')) add(el.innerText);
+  });
+  // Teams : une vignette par contour de voix ; liste « Personnes » si elle est ouverte
+  document.querySelectorAll('[data-tid="voice-level-stream-outline"]').forEach(o => add(tileName(o, '[data-tid="voice-level-stream-outline"]')));
+  document.querySelectorAll('[data-tid^="participantsInCall"] [data-tid*="name" i], [data-cid="roster-participant"] [class*="name" i]').forEach(el => { if (visible(el)) add(el.innerText); });
+  // Générique (Meet, Jitsi…) : attributs explicites
+  document.querySelectorAll('[data-participant-name], [data-self-name], [data-tid*="display-name" i]').forEach(el => {
+    if (visible(el)) add(el.getAttribute("data-participant-name") || el.getAttribute("data-self-name") || el.innerText);
+  });
+  try {  // Jitsi
+    if (window.APP && APP.store) {
+      const p = APP.store.getState()["features/base/participants"];
+      const r = p && p.remote;
+      (r ? (r.values ? [...r.values()] : Object.values(r)) : []).forEach(x => x && x.name && add(x.name));
+      const me = p && p.local; if (me && me.name) add(me.name);
+    }
+  } catch (e) {}
+  return [...out];
+}"""
+
+# Diagnostic : éléments candidats pour adapter les sélecteurs à une nouvelle version d'interface,
+# avec leurs ancêtres (pour retrouver où la plateforme affiche le nom de la vignette) et leur style
 SPEAKER_DEBUG_JS = r"""() => [...document.querySelectorAll("*")].filter(el => {
   const a = [...el.attributes].map(x => x.name + "=" + x.value).join(" ");
   return /speak|talk|dominant|voice-level|audio-level|parle/i.test(a);
-}).slice(0, 60).map(el => ({tag: el.tagName, cls: (el.className || "").toString().slice(0, 120),
-  tid: el.getAttribute("data-tid") || el.getAttribute("data-testid"), aria: el.getAttribute("aria-label"),
-  visible: el.offsetWidth > 0, text: (el.innerText || "").slice(0, 60)}))"""
+}).slice(0, 40).map(el => {
+  const st = getComputedStyle(el);
+  const up = [];
+  for (let a = el.parentElement, i = 0; a && a !== document.body && i < 8; a = a.parentElement, i++)
+    up.push({tag: a.tagName, cls: (a.className || "").toString().slice(0, 80), tid: a.getAttribute("data-tid") || a.getAttribute("data-testid"),
+             cid: a.getAttribute("data-cid"), role: a.getAttribute("role"), aria: (a.getAttribute("aria-label") || "").slice(0, 100),
+             text: (a.innerText || "").slice(0, 80)});
+  return {tag: el.tagName, cls: (el.className || "").toString().slice(0, 160),
+    tid: el.getAttribute("data-tid") || el.getAttribute("data-testid"), aria: el.getAttribute("aria-label"),
+    visible: el.offsetWidth > 0, text: (el.innerText || "").slice(0, 60),
+    style: {border: st.borderStyle + " " + st.borderWidth + " " + st.borderColor, opacity: st.opacity, shadow: (st.boxShadow || "").slice(0, 60)},
+    up};
+})"""
 
 NAME_SUFFIX = re.compile(r"\s*\((guest|invité|invitée|unverified|non vérifié|external|externe|host|hôte|co-host|"
                          r"co-hôte|me|moi|you|vous|organizer|organisateur)\)\s*$", re.I)
@@ -451,6 +514,33 @@ def clean_name(n: str) -> str:
     while NAME_SUFFIX.search(n):
         n = NAME_SUFFIX.sub("", n).strip()
     return n
+
+
+ORG_PAREN = re.compile(r"^(?P<name>.+?)\s*[(\[](?P<org>[^()\[\]]{2,60})[)\]]\s*$")
+ORG_DASH = re.compile(r"^(?P<name>[^-–|]{3,60}?)\s+[-–|]\s+(?P<org>.{2,60})$")
+
+
+def split_org(n: str) -> tuple[str, str | None]:
+    """« Prénom NOM (Société / Ville) » ou « Prénom NOM - Société » -> (nom, organisation)."""
+    n = clean_name(n)
+    for rx in (ORG_PAREN, ORG_DASH):
+        m = rx.match(n)
+        if m:
+            return m.group("name").strip(), m.group("org").strip()
+    return n, None
+
+
+async def visible_participants(page: Page) -> list[str]:
+    names = set()
+    for frame in page.frames:
+        try:
+            for n in await frame.evaluate(PARTICIPANTS_JS) or []:
+                n = clean_name(n)
+                if n:
+                    names.add(n)
+        except Exception:
+            pass
+    return sorted(names)
 
 
 async def active_speakers(page: Page) -> list[str]:

@@ -34,6 +34,16 @@ $SSH 'command -v docker >/dev/null || {
   sudo -E apt-get install -y -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin >/dev/null; }
   sudo docker version --format "Docker {{.Server.Version}}"'
 
+# Sécurité : compose.yml est réécrit avec les seuls NAMES et « --remove-orphans » supprime les autres conteneurs.
+# Un conteneur existant absent de NAMES (ex. NAMES="w3 w4" alors que w1/w2 enregistrent une réunion) : on s'arrête.
+EXISTING=$($SSH "sudo docker ps -a --format '{{.Names}}' 2>/dev/null | sed -n 's/^webconf-//p'" || true)
+for e in $EXISTING; do
+  case " ${NAMES[*]} " in *" $e "*) ;; *)
+    [ "${ALLOW_REMOVE:-0}" = 1 ] || { echo "ARRÊT : le conteneur webconf-$e existe sur $HOST mais n'est pas dans NAMES (${NAMES[*]})."
+      echo "  Il serait SUPPRIMÉ. Donner la liste complète (ex. NAMES=\"$(echo $EXISTING | tr '\n' ' ')\"), ou ALLOW_REMOVE=1 pour le retirer."; exit 1; };;
+  esac
+done
+
 echo "=== $HOST : image webconf-worker"
 tar -C worker --exclude=__pycache__ -czf - . | $SSH 'sudo rm -rf /opt/webconf/src/worker && sudo mkdir -p /opt/webconf/src/worker && sudo tar -C /opt/webconf/src/worker -xzf -'
 $SSH 'cd /opt/webconf/src/worker && sudo docker build -q --network host -t webconf-worker:latest . && sudo docker image prune -f >/dev/null'
@@ -66,7 +76,7 @@ for n in "${NAMES[@]}"; do
     f=/etc/webconf/containers/$n.env; sudo touch \$f; sudo chmod 600 \$f
     add() { sudo grep -q \"^\$1=\" \$f || echo \"\$1=\$2\" | sudo tee -a \$f >/dev/null; }
     add WORKER_NAME $n; add AGENT_TOKEN '$T'; add AGENT_PORT $api; add VNC_PORT $vnc; add RFB_PORT $rfb
-    add DISPLAY $disp; add SCREEN_SIZE ${SCREEN:-1920x1200}; [ -z '$SCREEN' ] || sudo sed -i 's/^SCREEN_SIZE=.*/SCREEN_SIZE=$SCREEN/' \$f; add BOT_DISPLAY_NAME Assistant; add ICE_SERVERS '[]'
+    add DISPLAY $disp; add TZ Europe/Paris; add SCREEN_SIZE ${SCREEN:-1920x1200}; [ -z '$SCREEN' ] || sudo sed -i 's/^SCREEN_SIZE=.*/SCREEN_SIZE=$SCREEN/' \$f; add BOT_DISPLAY_NAME Assistant; add ICE_SERVERS '[]'
     [ -z '$OVH' ] || { sudo sed -i '/^OVH_AI_ENDPOINTS_ACCESS_TOKEN=/d' \$f; add OVH_AI_ENDPOINTS_ACCESS_TOKEN '$OVH'; }"
   # Port réel (un worker garde ses ports d'un déploiement à l'autre, même si l'ordre de NAMES change)
   api=$($SSH "sudo sed -n 's/^AGENT_PORT=//p' /etc/webconf/containers/$n.env")

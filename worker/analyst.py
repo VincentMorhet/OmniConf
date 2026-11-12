@@ -29,6 +29,7 @@ import logging
 import os
 import re
 import time
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -44,6 +45,14 @@ REPORT_MODELS = [m.strip() for m in os.environ.get(
 REPORT_JUDGE = os.environ.get("REPORT_JUDGE", "Qwen3.8-27B:medium")
 REPORT_AUDITOR = os.environ.get("REPORT_AUDITOR", "Qwen3.5-397B-A17B:low")
 ME_NAME = os.environ.get("TRANSCRIPT_ME_NAME", "")
+# Fuseau des dates affichées (les assistants tournent en UTC : sans conversion, une réunion de 17 h
+# apparaissait à 16 h dans le compte rendu)
+TZ = ZoneInfo(os.environ.get("DISPLAY_TZ", "Europe/Paris"))
+
+
+def local(s) -> dt.datetime:
+    d = s if isinstance(s, dt.datetime) else dt.datetime.fromisoformat(s)
+    return d.astimezone(TZ) if d.tzinfo else d
 STALL = float(os.environ.get("LLM_STALL_SECS", "90"))  # sans aucun octet reçu pendant ce délai : relance
 JUDGE_SECS = float(os.environ.get("REPORT_JUDGE_SECS", "480"))        # arbitrage, réflexion « medium »
 JUDGE_RETRY_SECS = float(os.environ.get("REPORT_JUDGE_RETRY_SECS", "300"))  # nouvel essai, réflexion « low »
@@ -245,7 +254,7 @@ def stats(doc: dict) -> list[dict]:
 
 def meeting_date(doc: dict) -> dt.datetime | None:
     try:
-        return dt.datetime.fromisoformat((doc.get("meta") or {})["started_at"])
+        return local((doc.get("meta") or {})["started_at"])
     except (KeyError, ValueError, TypeError):
         return None
 
@@ -746,7 +755,7 @@ def report_sections(report: dict, doc: dict) -> list[tuple]:
     elif len(drafted) > 1:  # arbitrage impossible (délai dépassé) : signalé au lecteur
         m += " ; confrontation non aboutie (délai dépassé) : le projet le plus complet a été retenu"
     m += f" ; contrôle qualité : {audit}" if audit else ""
-    m += f". Généré le {dt.datetime.fromisoformat(report['generated_at']):%d/%m/%Y à %H:%M}. " \
+    m += f". Généré le {local(report['generated_at']):%d/%m/%Y à %H:%M}. " \
          "Les références [mm:ss] renvoient à l'enregistrement et à la transcription."
     out.append(("note", m))
     if report.get("arbitrages"):

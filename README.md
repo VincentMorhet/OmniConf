@@ -151,6 +151,56 @@ Mot de passe : `ADMIN_PASSWORD` dans `/etc/webconf/control.env` sur webconf-ctl.
 Autre fournisseur compatible OpenAI pour un des modèles : `modele:effort@https://api.exemple/v1#VARIABLE_CLE`
 (la clé est lue dans `VARIABLE_CLE` de `worker.env`), par ex. pour ajouter Mistral ou Claude comme rédacteur.
 
+## Accès de Claude : serveur MCP en lecture seule
+
+L'IHM expose un serveur MCP (Model Context Protocol, transport HTTP) sur `https://<IHM>/mcp` : Claude Code
+peut lister les réunions et en lire le contenu de façon autonome, sans passer par l'interface web ni
+manipuler de mot de passe. Code : `control/mcp_server.py`.
+
+| Outil | Paramètres | Retour |
+|---|---|---|
+| `list_meetings` | `since`, `until`, `status`, `query`, `page`, `per_page` | id (`w1:20261110-160042_teams`), titre et titre du compte rendu, début/fin (heure de Paris), durée, plateforme, statut (`recording_in_progress`, `recorded`, `transcribed`, `draft_cr`, `final_cr`) |
+| `get_meeting` | `id` | métadonnées : identifiants de la réunion (lien sans mot de passe, ids Teams/Zoom), agenda s'il est connu, participants vus (nom, organisation, arrivée/départ approximatifs), intervenants (temps de parole, source du nom), micro de l'utilisateur capté ou non, réunion effective, statistiques, avertissements |
+| `get_transcript` | `id`, `format` (`segments`, `paragraphs`, `text`), `start`, `end`, `cursor` | segments `{start, end, speaker, speaker_source, text, confidence, suspect, off_meeting}` ; pages de ~40 000 caractères |
+| `get_draft_cr` | `id` | premier compte rendu en Markdown, modèles utilisés (rédaction, arbitrage, contrôle) et date de génération |
+| `get_slides` | `id`, `images` | diapositives : horodatage, titre, texte lu, description ; liens temporaires vers les captures (ou les images elles-mêmes) |
+| `get_audio_url` | `id`, `start`, `end`, `format` | lien temporaire (signé, sans jeton) vers l'audio en MP3/WAV mono 16 kHz, en entier ou un passage |
+| `attach_cr` | `id`, `markdown`, `pdf_base64` | dépôt du compte rendu final à côté de la réunion (jeton d'**écriture** distinct) |
+
+* **Jetons** : propres à un client, révocables, de portée *lecture* (les 6 premiers outils) ou *écriture*
+  (`attach_cr` seulement). Seule leur empreinte est conservée (`/var/lib/webconf/mcp_tokens.json`).
+  Création et révocation : IHM, onglet Enregistrements, « Accès de Claude (MCP) » (le jeton n'est affiché
+  qu'une fois), ou `sudo bash -c 'set -a; . /etc/webconf/control.env; /opt/webconf/venv/bin/python
+  /opt/webconf/control/mcp_server.py create --name claude --scope read --out /root/claude.tok'` (`list`, `revoke <id>`).
+* **Données** : `speaker_source` vaut `teams`/`zoom` quand le nom vient de la plateforme pendant la phrase,
+  `diarisation` quand il vient de la voix (nom reconnu sur d'autres phrases de la même voix, ou « Intervenant N »),
+  `manuel` (renommé dans l'IHM) ou `micro_ihm` (l'utilisateur, via le micro de l'IHM). `confidence` = probabilité
+  moyenne de Whisper (réunions transcrites après cette version). `suspect` = hallucination probable (boucle
+  de répétition, « Sous-titrage… », « Merci » en série) : la phrase a déjà été retranscrite en tronçons plus courts,
+  à vérifier à l'écoute. `off_meeting` = avant le premier ou après le dernier bloc de parole à plusieurs voix
+  (séparé par plus de 3 min de silence).
+* **Journal** : chaque appel est tracé (`journalctl -u webconf-control | grep " mcp "`).
+
+Sur le poste Windows (PowerShell), une fois :
+
+```powershell
+# 1. Certificat de l'IHM (autorité locale de Caddy) : lien « télécharger le certificat racine » du panneau
+#    « Accès de Claude », vérifier l'empreinte affichée, puis (sans droits administrateur) :
+certutil -user -addstore Root "$env:USERPROFILE\Downloads\omniconf-ca.crt"
+#    (à défaut : setx NODE_EXTRA_CA_CERTS "C:\chemin\omniconf-ca.crt")
+# 2. Jeton créé dans l'IHM, gardé dans une variable d'environnement (puis rouvrir le terminal)
+setx WEBCONF_TOKEN "wcr_..."
+# 3. Déclaration dans Claude Code : guillemets SIMPLES pour que ${WEBCONF_TOKEN} reste tel quel
+#    (Claude Code le remplace au lancement ; entre guillemets doubles, PowerShell le viderait)
+claude mcp add-json webconf '{"type":"http","url":"https://192.168.0.230/mcp","headers":{"Authorization":"Bearer ${WEBCONF_TOKEN}"}}' --scope user
+claude mcp list        # webconf: ... ✔ Connected
+```
+
+Pour ne pas confirmer chaque appel : `"permissions": {"allow": ["mcp__webconf__*"]}` dans
+`%USERPROFILE%\.claude\settings.json`. Jeton d'écriture : même chose avec un second serveur
+(`webconf-ecriture`, variable `WEBCONF_WRITE_TOKEN`). Les comptes rendus finaux déposés apparaissent dans
+le menu ⋯ de l'enregistrement (✅).
+
 ## iPhone / iPad : HTTPS valide obligatoire pour le micro
 
 Safari n'autorise le micro qu'avec un certificat valide. Le plus simple, puisque tu as déjà Tailscale
@@ -194,6 +244,12 @@ un worker = une réunion à la fois** ; plusieurs conteneurs sur un même hôte 
 | `worker/container/supervisord.conf` | les 5 services du worker dans le conteneur (équivalents des unités systemd) |
 | `deploy/deploy-containers.sh` | installe Docker sur l'hôte, construit l'image, crée un conteneur par worker, pare-feu |
 | `deploy/proxmox-create-vms.sh` | `VMS_SPEC="233 192.168.0.201 192.168.0.233 webconf-ct 8 12288 60G"` crée la VM hôte |
+
+`NAMES` doit lister **tous** les conteneurs de l'hôte : le script réécrit `compose.yml` avec ces seuls noms
+et supprimerait les autres (il s'arrête désormais si un conteneur existant manque, sauf `ALLOW_REMOVE=1`).
+Pour essayer une version sur un seul conteneur sans toucher aux autres : image `webconf-worker:test` et
+`docker compose -f compose.yml -f compose.test.yml up -d --no-deps w3` (fichier de surcharge qui ne change
+que l'image de `w3`).
 
 ```bash
 HOST=192.168.0.233 NAMES="w3 w4" CONTROL_IPS="192.168.0.230" ./deploy/deploy-containers.sh

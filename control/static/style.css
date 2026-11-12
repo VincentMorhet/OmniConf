@@ -450,3 +450,18 @@ body.focus header.top, body.focus nav.tabs { display: none !important; }
 @media (max-width: 560px) { .tr-body .slide { grid-template-columns: 1fr; } }
 #playerSlides { min-height: 36px; padding: 6px 12px; }
 .tr-body .slide.again { grid-template-columns: 70px 1fr; padding: 4px 8px; border-left-color: var(--line); opacity: .85; }
+
+/* accès de Claude (MCP) */
+#mcpBox > summary { cursor: pointer; list-style: none; }
+#mcpBox > summary h2 { display: inline; }
+#mcpBox > summary::-webkit-details-marker { display: none; }
+#mcpBox .hint { color: var(--mute); font-size: 13px; }
+#mcpBox code { font-size: 12.5px; word-break: break-all; }
+#mcpTokens { display: grid; gap: 8px; margin: 10px 0; }
+#mcpTokens .tok { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: 10px; }
+#mcpTokens .tok small { color: var(--mute); flex: 1 1 220px; }
+#mcpTokens .badge.warn { background: #b45309; color: #fff; }
+#mcpBox .row { display: flex; flex-wrap: wrap; gap: 8px; }
+.mcp-new { margin-top: 10px; padding: 10px; border-radius: 10px; border: 1px solid var(--accent); }
+.mcp-new input { flex: 1 1 260px; font-family: ui-monospace, monospace; font-size: 12.5px; }

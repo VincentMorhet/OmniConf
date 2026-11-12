@@ -897,6 +897,45 @@ function dayLabel(d) {
   return d.toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
 }
 
+// ------------------------------------------------------------------ accès de Claude (serveur MCP) : jetons
+async function loadTokens() {
+  const box = $("#mcpTokens"); if (!box) return;
+  try {
+    const d = await api("/api/mcp/tokens");
+    $("#mcpUrl").textContent = d.url;
+    $("#mcpCa").classList.toggle("hidden", !d.ca);
+    $("#mcpCaFp").textContent = d.ca_sha256 || "";
+    const live = d.tokens.filter(x => !x.revoked);
+    box.innerHTML = live.length ? live.map(x => `<div class="tok"><b>${esc(x.name)}</b>
+      <span class="badge ${x.scope === "write" ? "warn" : ""}">${x.scope === "write" ? "écriture (dépôt du CR final)" : "lecture"}</span>
+      <small>créé le ${new Date(x.created).toLocaleString("fr-FR")} · ${x.last_used ? "utilisé le " + new Date(x.last_used).toLocaleString("fr-FR") : "jamais utilisé"}</small>
+      <button class="danger" data-id="${esc(x.id)}">Révoquer</button></div>`).join("") : "<small>Aucun jeton actif.</small>";
+    box.querySelectorAll("button[data-id]").forEach(b => b.onclick = async () => {
+      if (!confirm("Révoquer ce jeton ? Claude ne pourra plus s'en servir (il faudra en créer un autre).")) return;
+      try { await api("/api/mcp/tokens/" + b.dataset.id, { method: "DELETE" }); loadTokens(); } catch (e) { toast(e.message); }
+    });
+  } catch (e) { box.textContent = "Erreur : " + e.message; }
+}
+async function createToken(scope) {
+  const name = prompt("Nom du jeton (pour le reconnaître, ex. « Claude PC bureau ») :", scope === "write" ? "Claude écriture" : "Claude");
+  if (!name) return;
+  try {
+    const d = await api("/api/mcp/tokens", { method: "POST", json: { name, scope } });
+    const out = $("#mcpNew"); out.classList.remove("hidden");
+    $("#mcpNewTok").value = d.token;
+    $("#mcpNewVar").textContent = scope === "write" ? "WEBCONF_WRITE_TOKEN" : "WEBCONF_TOKEN";
+    loadTokens();
+  } catch (e) { toast(e.message); }
+}
+$("#mcpCreate").onclick = () => createToken("read");
+$("#mcpCreateW").onclick = () => createToken("write");
+$("#mcpCopy").onclick = async () => {
+  const v = $("#mcpNewTok").value;
+  try { await navigator.clipboard.writeText(v); toast("Jeton copié"); } catch (e) { $("#mcpNewTok").select(); }
+};
+$("#mcpHide").onclick = () => { $("#mcpNewTok").value = ""; $("#mcpNew").classList.add("hidden"); };
+$("#mcpBox").addEventListener("toggle", () => { if ($("#mcpBox").open) loadTokens(); });
+
 async function loadRecordings() {
   try {
     const [items, disks] = await Promise.all([api("/api/recordings"), api("/api/storage")]);
@@ -950,7 +989,7 @@ function recItem(r, started, opts = {}) {
   el.innerHTML = `
     <div class="thumb ${video ? "" : "tthumb"}">${video ? '<img loading="lazy" alt="">' : "📝"}
       ${r.recording ? '<span class="live">● EN COURS</span>' : ""}
-      ${r.transcript && video ? `<span class="tr" title="Transcription${r.report ? " et compte rendu" : ""} disponible">📝${r.report ? "📋" : ""}</span>` : ""}
+      ${r.transcript && video ? `<span class="tr" title="Transcription${r.report ? " et compte rendu" : ""}${r.final_cr ? " (final déposé)" : ""} disponible">📝${r.report ? "📋" : ""}${r.final_cr ? "✅" : ""}</span>` : ""}
       <span class="plat">${esc(platOf(r) === "web" ? (r.meta?.site || siteOf(r.meta?.url || "") || "web") : platOf(r))}</span>
       ${r.duration != null ? `<span class="dur">${fmtSec(r.duration)}</span>` : ""}</div>
     <div class="rbody">
@@ -966,6 +1005,8 @@ function recItem(r, started, opts = {}) {
         ${video ? `<a href="${url}?download=1" download="${esc(r.name)}">⬇ Télécharger la vidéo</a>` : ""}
         ${r.transcript ? `<a href="${url}/transcript?fmt=md&download=1">📝 Télécharger la transcription</a>` : ""}
         ${r.report ? `<a href="${url}/report?fmt=docx&download=1">📄 Compte rendu (Word)</a>` : ""}
+        ${r.final_cr ? `<a href="${url}/final?fmt=md" target="_blank" rel="noopener">✅ Compte rendu final (Markdown)</a>
+          <a href="${url}/final?fmt=pdf" target="_blank" rel="noopener">✅ Compte rendu final (PDF, s'il a été joint)</a>` : ""}
         <button class="ren">✏️ Renommer</button>
         <button class="del" ${r.recording ? "disabled title=\"Enregistrement en cours\"" : ""}>🗑 Supprimer</button>
       </div>

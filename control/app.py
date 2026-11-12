@@ -151,6 +151,7 @@ class StartMeeting(BaseModel):
     duration_min: int | None = None
     transcribe: bool = True
     worker: str | None = None  # None/"auto" = premier worker libre
+    calendar: dict | None = None  # événement d'agenda (eid Google / id Exchange, organisateur, invités), facultatif
 
 
 async def start_meeting(m: StartMeeting) -> dict:
@@ -322,6 +323,20 @@ async def recording_rename(name: str, file: str, body: Rename):
     return (await wcall(name, "PATCH", f"/recordings/{file}", json=body.model_dump())).json()
 
 
+@app.get("/api/recordings/{name}/{file}/final", dependencies=AUTH)
+async def recording_final(name: str, file: str, fmt: str = "md", download: int = 0):
+    """Compte rendu final déposé par Claude (outil MCP attach_cr)."""
+    if fmt not in ("md", "pdf", "json"):
+        raise HTTPException(400)
+    r = await wcall(name, "GET", f"/recordings/{file}/final?fmt={fmt}")
+    if fmt == "json":
+        return JSONResponse(r.json())
+    stem = file.removesuffix(".mp4").removesuffix(".transcript.json")
+    mime = "text/markdown; charset=utf-8" if fmt == "md" else "application/pdf"
+    return Response(r.content, media_type=mime, headers={
+        "Content-Disposition": f'{"attachment" if download else "inline"}; filename="{stem} - compte rendu final.{fmt}"'})
+
+
 @app.get("/api/storage", dependencies=AUTH)
 async def storage():
     async def one(n):
@@ -452,6 +467,13 @@ async def novnc_static(path: str, request: Request):
     if not str(p).startswith(str(NOVNC_DIR.resolve())) or not p.is_file():
         raise HTTPException(404)
     return FileResponse(p)
+
+
+# ----------------------------------------------------------------------------- serveur MCP (accès de Claude)
+import mcp_server  # noqa: E402
+
+mcp = mcp_server.mount(app, http=http, workers=WORKERS, token=TOKEN, data_dir=DATA, secret=os.environ["SECRET_KEY"],
+                       site=os.environ.get("SITE_ADDRESS"), require_login=Depends(require_login))
 
 
 # ----------------------------------------------------------------------------- IHM

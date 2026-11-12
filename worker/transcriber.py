@@ -44,8 +44,41 @@ FORMAT_EVERY = float(os.environ.get("TRANSCRIPT_FORMAT_EVERY", "20"))
 RATE = 16000
 FRAME = 320  # 20 ms
 # Phrases que Whisper invente sur du bruit ou du silence (sous-titres YouTube…)
-HALLU = re.compile(r"sous-titr|amara\.org|merci d'avoir regardé|abonnez-vous|thanks for watching|"
+HALLU = re.compile(r"sous-titr|amara\.org|merci d'avoir regardé|abonnez-vous|thanks for watching|\bMFP\b|"
                    r"^\W*(thank you|you)\W*$", re.I)
+# Boucles : 2 à 4 mots répétés au moins 4 fois de suite (« je pense que je pense que… »), ou un même mot
+# 8 fois (« non, non, non, non » se dit vraiment : réglé sur de vraies réunions)
+LOOP_PHRASE = re.compile(r"\b(\w+(?:\W+\w+){1,3}?)(?:\W+\1\b){3,}", re.I)
+LOOP_WORD = re.compile(r"\b(\w+)\b(?:\W+\1\b){7,}", re.I)
+MERCI = re.compile(r"^\W*(merci(\s+(beaucoup|à tous|à toutes))?\W*){2,}$", re.I)
+RETRY_CHUNK = float(os.environ.get("TRANSCRIPT_RETRY_CHUNK", "6"))   # tronçons du second essai (secondes)
+
+
+def suspect_reason(text: str, segs: list, dur: float) -> str | None:
+    """Transcription probablement inventée par Whisper (hallucination) : raison, sinon None."""
+    t = (text or "").strip()
+    if not t:
+        return None
+    if HALLU.search(t):
+        return "phrase type de sous-titrage"
+    if LOOP_PHRASE.search(t) or LOOP_WORD.search(t):
+        return "boucle de répétition"
+    words = re.findall(r"\w+", t.lower())
+    if len(words) >= 16 and len(set(words)) / len(words) < 0.25:
+        return "boucle de répétition"
+    if any(float(s.get("compression_ratio") or 0) > 2.4 for s in segs):
+        return "texte anormalement répétitif"
+    if MERCI.match(t) or (re.fullmatch(r"\W*merci\W*", t, re.I) and dur > 8):
+        return "« Merci » en série"
+    return None
+
+
+def seg_conf(s: dict) -> float | None:
+    """Confiance d'un segment Whisper (0-1) : probabilité moyenne des mots, d'après avg_logprob."""
+    try:
+        return max(0.0, min(1.0, float(np.exp(float(s["avg_logprob"])))))
+    except (KeyError, TypeError, ValueError):
+        return None
 
 SYSTEM_PROMPT = """Tu mets en forme la transcription automatique (speech-to-text) d'une réunion en {lang}.
 Chaque ligne : [horodatage] [identifiant] nom du locuteur : texte.
@@ -114,6 +147,8 @@ class Transcriber:
         self.paragraphs: list[dict] = []   # {id, t, spk, text}
         self.slides: list[dict] = []       # diapositives lues à l'écran : {n, t, titre, texte, visuel}
         self.slide_reader = None
+        self.participants: dict[str, dict] = {}   # nom affiché -> {first, last, seen, spoke_first, spoke_last}
+        self.asr_stats = {"suspects": 0, "retries": 0, "fixed": 0, "removed": []}
         self._next_id = 1
         self.diar.reset()
         self.inflight = 0
@@ -259,29 +294,79 @@ class Transcriber:
         self.inflight += 1
         asyncio.create_task(self._asr(entry, pcm))
 
+    async def _whisper(self, pcm: np.ndarray) -> dict:
+        async with self.asr_sem:
+            for attempt in range(3):
+                try:
+                    r = await self.http.post(
+                        f"{API}/audio/transcriptions",
+                        data={"model": ASR_MODEL, "language": LANG, "response_format": "verbose_json",
+                              "temperature": "0", "prompt": "Réunion professionnelle." + (f" {GLOSSARY}." if GLOSSARY else "")},
+                        files={"file": ("seg.wav", _wav(pcm), "audio/wav")})
+                    r.raise_for_status()
+                    return r.json()
+                except httpx.HTTPError:
+                    if attempt == 2:
+                        raise
+                    await asyncio.sleep(1 + attempt * 2)
+
+    @staticmethod
+    def _segments(d: dict, dur: float, offset: float = 0.0) -> list[dict]:
+        segs = [{**x, "start": float(x.get("start", 0)) + offset, "end": float(x.get("end", dur)) + offset}
+                for x in d.get("segments") or []
+                if not (x.get("no_speech_prob", 0) > 0.6 and x.get("avg_logprob", 0) < -0.8) and x.get("text", "").strip()]
+        if not d.get("segments") and (d.get("text") or "").strip():
+            segs = [{"start": offset, "end": offset + dur, "text": d["text"]}]
+        return segs
+
+    @staticmethod
+    def _chunks(pcm: np.ndarray, target: float) -> list[tuple[int, np.ndarray]]:
+        """Découpe en tronçons de ~`target` s, aux endroits les plus calmes."""
+        out, i, n, step = [], 0, len(pcm), int(target * RATE)
+        while n - i > step * 1.4:
+            lo, hi = i + int(step * 0.7), min(n, i + int(step * 1.3))
+            win = pcm[lo:hi][: (hi - lo) // FRAME * FRAME].reshape(-1, FRAME).astype(np.float32)
+            cut = lo + int(np.argmin(np.abs(win).mean(axis=1))) * FRAME + FRAME // 2 if len(win) else i + step
+            out.append((i, pcm[i:cut]))
+            i = cut
+        out.append((i, pcm[i:]))
+        return out
+
     async def _asr(self, entry: dict, pcm: np.ndarray):
         try:
-            async with self.asr_sem:
-                for attempt in range(3):
-                    try:
-                        r = await self.http.post(
-                            f"{API}/audio/transcriptions",
-                            data={"model": ASR_MODEL, "language": LANG, "response_format": "verbose_json",
-                                  "temperature": "0", "prompt": "Réunion professionnelle." + (f" {GLOSSARY}." if GLOSSARY else "")},
-                            files={"file": ("seg.wav", _wav(pcm), "audio/wav")})
-                        r.raise_for_status()
-                        break
-                    except httpx.HTTPError:
-                        if attempt == 2:
-                            raise
-                        await asyncio.sleep(1 + attempt * 2)
-            d = r.json()
-            segs = [x for x in d.get("segments") or []
-                    if not (x.get("no_speech_prob", 0) > 0.6 and x.get("avg_logprob", 0) < -0.8)
-                    and x.get("text", "").strip() and not HALLU.search(x["text"])]
-            if not d.get("segments") and (d.get("text") or "").strip() and not HALLU.search(d["text"]):
-                segs = [{"start": 0, "end": len(pcm) / RATE, "text": d["text"]}]
-            parts = self._split(entry, segs, len(pcm) / RATE)
+            dur = len(pcm) / RATE
+            segs = self._segments(await self._whisper(pcm), dur)
+            text = " ".join(x["text"].strip() for x in segs)
+            why = suspect_reason(text, segs, dur)
+            if why:
+                # Hallucination probable : nouvelle transcription en tronçons plus courts
+                self.asr_stats["suspects"] += 1
+                self.asr_stats["retries"] += 1
+                retry = []
+                for off, part in self._chunks(pcm, RETRY_CHUNK):
+                    if len(part) >= RATE // 2:
+                        retry += self._segments(await self._whisper(part), len(part) / RATE, off / RATE)
+                rtext = " ".join(x["text"].strip() for x in retry)
+                rwhy = suspect_reason(rtext, retry, dur)
+                entry["retranscrit"] = True
+                if not rwhy:                      # second essai propre : on le garde
+                    segs, why = retry, None
+                    self.asr_stats["fixed"] += 1
+                elif _similar(text, rtext) and not HALLU.search(rtext):
+                    why = None                    # même texte des deux façons : probablement prononcé tel quel
+                else:
+                    segs, why = retry, rwhy       # toujours douteux : signalé
+                if why and any(HALLU.search(x["text"]) for x in segs):
+                    # phrase type de sous-titres même au second essai : retirée de la transcription
+                    self.asr_stats["removed"].append({"t": entry["t"], "te": entry["te"], "text": rtext[:200], "raison": why})
+                    segs = [x for x in segs if not HALLU.search(x["text"])]
+                    why = suspect_reason(" ".join(x["text"] for x in segs), segs, dur) if segs else None
+            parts = self._split(entry, segs, dur)
+            for p in parts:
+                if why:
+                    p["suspect"] = why
+                if entry.get("retranscrit"):
+                    p["retranscrit"] = True
             if entry["stream"] != "ME":
                 await asyncio.to_thread(self._diarize, parts, pcm, entry["t"])
             if len(parts) > 1:  # une phrase Whisper par entrée : permet un locuteur par phrase
@@ -290,7 +375,7 @@ class Transcriber:
                     self._next_id += 1
                     self.raw.append(p)
             first = parts[0] if parts else {"text": "", "spk": entry["spk"]}
-            entry.update({k: first[k] for k in ("t", "te", "spk", "ui") if k in first})
+            entry.update({k: first[k] for k in ("t", "te", "spk", "ui", "conf", "suspect", "retranscrit") if k in first})
             entry["text"] = first["text"]
             self.last_error = None
         except Exception as e:
@@ -308,15 +393,22 @@ class Transcriber:
         for x in segs:
             s0, s1 = max(0.0, float(x.get("start", 0))), min(dur, float(x.get("end", dur)))
             txt = x["text"].strip()
+            c = seg_conf(x)
             if cur and (cur["_e"] - cur["_s"] < 1.5 or s1 - s0 < 0.8):
                 cur["text"] += " " + txt
                 cur["_e"] = s1
+                if c is not None:
+                    cur["_c"].append((max(0.1, s1 - s0), c))
                 continue
-            cur = {"_s": s0, "_e": s1, "text": txt, "stream": entry["stream"], "spk": entry["spk"], "done": False}
+            cur = {"_s": s0, "_e": s1, "text": txt, "stream": entry["stream"], "spk": entry["spk"], "done": False,
+                   "_c": [(max(0.1, s1 - s0), c)] if c is not None else []}
             parts.append(cur)
         for p in parts:
             p["t"] = round(entry["t"] + p["_s"], 1)
             p["te"] = round(entry["t"] + p["_e"], 1)
+            cs = p.pop("_c")
+            if cs:
+                p["conf"] = round(sum(w * c for w, c in cs) / sum(w for w, _ in cs), 2)
         return parts
 
     def _diarize(self, parts: list[dict], pcm: np.ndarray, base_t: float):
@@ -342,6 +434,24 @@ class Transcriber:
     def ui_sample(self, names):
         if self.active:
             self.diar.ui_sample(time.time(), names)
+            self._seen(names, spoke=True)
+
+    def participants_sample(self, names):
+        if self.active:
+            self._seen(names)
+
+    def _seen(self, names, spoke: bool = False):
+        """Participants vus à l'écran (vignettes) ou affichés comme orateur : premières/dernières apparitions."""
+        now = round(time.time() - self.t0, 1)
+        for n in names or ():
+            if not n or n.strip().lower() in self.diar.bot_names:
+                continue
+            p = self.participants.setdefault(n, {"first": now, "last": now, "seen": 0})
+            p["last"] = now
+            p["seen"] += 1
+            if spoke:
+                p.setdefault("spoke_first", now)
+                p["spoke_last"] = now
 
     def _merge(self):
         with self.dlock:
@@ -505,12 +615,23 @@ class Transcriber:
         a = self.analysis
         return {"meta": self.meta, "t0": self.t0, "speakers": self.labels(), "diarizer": self.diar.state(),
                 "paragraphs": self.paragraphs, "slides": self.slides,
-                "raw": [{k: e.get(k) for k in ("t", "te", "spk", "ui", "text")} for e in self.raw if e["text"]],
+                "participants": [{"name": k, **v} for k, v in sorted(self.participants.items(), key=lambda kv: kv[1]["first"])],
+                "asr_stats": self.asr_stats,
+                "raw": [{k: e[k] for k in ("t", "te", "spk", "ui", "text", "conf", "suspect", "retranscrit") if k in e}
+                        for e in self.raw if e["text"]],
                 "analysis": {"state": a["state"], "flashes": a["flashes"], "upto": a["upto"], "at": a["at"]}}
 
     def _save(self):
         if self.base:
             save_doc(self.base, self.doc())
+
+
+def _similar(a: str, b: str) -> bool:
+    wa, wb = re.findall(r"\w+", (a or "").lower()), re.findall(r"\w+", (b or "").lower())
+    if not wa or not wb:
+        return False
+    sa, sb = set(wa), set(wb)
+    return len(sa & sb) / len(sa | sb) >= 0.6 and 0.6 <= len(wa) / len(wb) <= 1.6
 
 
 def save_doc(base: Path, doc: dict):
@@ -544,7 +665,7 @@ def to_markdown(doc: dict) -> str:
     meta = doc.get("meta", {})
     lines = [f"# {meta.get('title') or 'Réunion'}", ""]
     if meta.get("started_at"):
-        start = dt.datetime.fromisoformat(meta["started_at"])
+        start = analyst.local(meta["started_at"])
         lines.append(f"*{start:%d/%m/%Y %H:%M}" + (f" · {meta['url']}" if meta.get("url") else "") + "*")
         lines.append("")
     spk = [v["label"] for k, v in (doc.get("speakers") or {}).items()
