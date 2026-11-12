@@ -191,8 +191,9 @@ certutil -user -addstore Root "$env:USERPROFILE\Downloads\omniconf-ca.crt"
 # 2. Jeton créé dans l'IHM, gardé dans une variable d'environnement (puis rouvrir le terminal)
 setx WEBCONF_TOKEN "wcr_..."
 # 3. Déclaration dans Claude Code : guillemets SIMPLES pour que ${WEBCONF_TOKEN} reste tel quel
-#    (Claude Code le remplace au lancement ; entre guillemets doubles, PowerShell le viderait)
-claude mcp add-json webconf '{"type":"http","url":"https://192.168.0.230/mcp","headers":{"Authorization":"Bearer ${WEBCONF_TOKEN}"}}' --scope user
+#    (Claude Code le remplace au lancement ; entre guillemets doubles, PowerShell le viderait).
+#    Pas de « add-json » sous Windows PowerShell 5.1 : il retire les guillemets du JSON (« Invalid input »).
+claude mcp add --transport http webconf https://192.168.0.230/mcp --header 'Authorization: Bearer ${WEBCONF_TOKEN}' --scope user
 claude mcp list        # webconf: ... ✔ Connected
 ```
 
