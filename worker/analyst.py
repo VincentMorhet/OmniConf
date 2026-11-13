@@ -32,6 +32,7 @@ import time
 from zoneinfo import ZoneInfo
 
 import httpx
+from collections import Counter
 
 import lexicon
 
@@ -211,13 +212,13 @@ def speakers_info(doc: dict) -> dict[str, dict]:
         if m and src != "manual":
             label, voice = m.group("base"), int(m.group("n"))
         org = None
-        if src != "manual":
+        if src == "ui":                      # « Intervenant 4 (sans vignette) » n'est pas une organisation
             mo = ORG.match(label)
             if mo and not re.fullmatch(r"\d+", mo.group("org") or mo.group("org2") or ""):
                 label, org = mo.group("name").strip(), (mo.group("org") or mo.group("org2")).strip()
             if src == "ui":
                 label = lex.canonical(label) or label
-        out[k] = {"name": label, "org": org, "voice": voice, "source": src}
+        out[k] = {"name": label, "org": org, "voice": voice, "source": src, "no_tile": bool(v.get("no_tile"))}
     words: dict[str, int] = {}
     for p in paragraphs(doc):
         words[p.get("spk")] = words.get(p.get("spk"), 0) + len(str(p.get("text") or "").split())
@@ -263,6 +264,10 @@ def speaker_table(doc: dict) -> str:
         if v["voice"] > 1:
             how = (f"autre voix sur la connexion de {v['name']} : même personne ou autre personne de la salle ; "
                    f"attribution incertaine, nomme la personne si la transcription l'établit")
+        if v.get("no_tile") and src != "manual":
+            seen = ", ".join(n for n, _ in Counter((doc.get("diarizer") or {}).get(k, {}).get("votes") or {}).most_common(3))
+            how = (f"voix sans vignette à son nom (plusieurs noms affichés pendant ses phrases : {seen}) : personne "
+                   f"sans doute sur le poste ou dans la salle d'un autre participant ; nomme-la si la transcription l'établit")
         lines.append(f"- {{{k}}} = {v['display']}" + (f", organisation affichée : {v['org']}" if v["org"] else "")
                      + (f" ({how})" if how else ""))
     lines.append(f"- {{ME}} = {me_label(doc)} : l'utilisateur pour qui tu travailles (il assiste à la réunion)")
@@ -868,8 +873,18 @@ async def build_report(llm: LLM, doc: dict, progress=lambda step: None, version:
 
 
 def shared_voices(doc: dict) -> list[dict]:
-    """Plusieurs voix distinctes sous un même nom de plateforme : salle partagée possible (avertissement)."""
+    """Plusieurs voix distinctes sous un même nom de plateforme, ou voix sans vignette : avertissements."""
     info = speakers_info(doc)
+    out = []
+    for k, v in info.items():
+        if v.get("no_tile") and v["source"] != "manual" and v["words"] >= 50:
+            votes = Counter((doc.get("diarizer") or {}).get(k, {}).get("votes") or {})
+            tot = sum(votes.values()) or 1
+            seen = ", ".join(f"{n} ({round(100 * w / tot)} %)" for n, w in votes.most_common(3))
+            first = next((p.get("t") for p in paragraphs(doc) if p.get("spk") == k), None)
+            out.append({"texte": f"« {v['display']} » parle sans vignette à son nom (poste partagé, salle, ou vignette non "
+                                 f"visible) ; noms affichés pendant ses phrases : {seen}. À nommer dans l'IHM (renommer la "
+                                 f"voix) : le compte rendu suivra.", "t": fmt_t(first) if first is not None else None})
     first = {}
     for p in paragraphs(doc):
         first.setdefault(p.get("spk"), p.get("t"))
@@ -877,7 +892,6 @@ def shared_voices(doc: dict) -> list[dict]:
     for k, v in info.items():
         if v["words"]:
             by_name.setdefault(v["name"], []).append(k)
-    out = []
     for name, ids in by_name.items():
         extra = [k for k in ids if info[k]["voice"] > 1]
         if len(ids) > 1 and extra and info[ids[0]]["shared"]:

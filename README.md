@@ -181,6 +181,34 @@ créé au premier démarrage avec `ADMIN_PASSWORD` (dans `/etc/webconf/control.e
      - une **couverture partielle** : entrée terminée à la main, créneau d'agenda dépassé, ou début ou fin
        manquants selon les modèles.
 
+**Ré-identification des intervenants en fin de réunion** (`worker/reid.py`). Pendant la réunion, les voix
+sont regroupées au fil de l'eau et nommées d'après la vignette que la plateforme encadre. Or la plateforme
+désigne un appareil, pas une personne : quelqu'un qui parle depuis le poste d'un autre prend le nom de ce
+poste. Avant chaque compte rendu, toute la réunion est donc reprise :
+1. une empreinte vocale par phrase (modèle NVIDIA TitaNet large), signature du canal retirée ;
+2. un regroupement global (lien moyen, seuil 0,20) ;
+3. chaque groupe est nommé d'après les vignettes encadrées pendant ses phrases ; un renommage fait à la main
+   l'emporte. Un groupe qui a reçu plusieurs noms sans majorité devient « Intervenant N (sans vignette) » :
+   le compte rendu le signale, et il suffit de le renommer dans l'IHM.
+
+La transcription d'avant est gardée (`*.transcript.avant-reid.json`). Réglages : `REID=0` pour désactiver,
+`REID_MODEL`, `REID_THRESHOLD`.
+
+Choix du modèle (banc d'essai `tests/speaker_models_bench.py`, 6 réunions, 29 personnes, 777 phrases dont
+l'auteur est connu) :
+
+| Modèle | AUC | F1 du regroupement |
+|---|---|---|
+| TitaNet large (retenu) | 0,952 | 0,875 |
+| ERes2Net VoxCeleb | 0,948 | 0,866 |
+| CAM++ 3D-Speaker (pendant la réunion) | 0,941 | 0,844 |
+| ERes2NetV2 | 0,954 | 0,837 |
+| WeSpeaker ResNet34 / ResNet293 / CAM++ | 0,52 à 0,86 | 0,36 à 0,74 |
+
+Les combinaisons de modèles ne font pas mieux. Sur deux réunions de référence :
+- un poste partagé : la personne sans vignette est retrouvée seule, 26 voix ramenées aux 8 participants ;
+- trois personnes sur un même micro : elles sont séparées.
+
 ### Réglages de la transcription (`/etc/webconf/worker.env`, puis `systemctl restart webconf-agent`)
 
 | Variable | Défaut | Rôle |

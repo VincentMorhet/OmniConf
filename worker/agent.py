@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 import analyst
 import lexicon
+import reid
 from audio_bridge import AudioBridge
 from meetings import (PLATFORMS, SPEAKER_DEBUG_JS, Browser, active_speakers, clean_name, detect_platform, unwrap_url,
                       visible_participants)
@@ -272,6 +273,7 @@ async def _report_job(stem: str):
         if words < 30:
             job.update(state="skipped", step=None, error="réunion trop courte pour un compte rendu")
             return
+        doc = await _reidentify(stem, doc, job)
         rep = await analyst.build_report(transcriber.llm, doc, lambda st: job.update(step=st))
         rep["id"] = f"{NAME}:{stem}"
         (recorder.dir / (stem + ".report.json")).write_text(json.dumps(rep, ensure_ascii=False, indent=1))
@@ -280,6 +282,30 @@ async def _report_job(stem: str):
     except Exception as e:
         log.exception("compte rendu %s", stem)
         job.update(state="error", step=None, error=str(e)[:300])
+
+
+async def _reidentify(stem: str, doc: dict, job: dict) -> dict:
+    """Voix recalculées sur toute la réunion (une fois par réunion), avant le compte rendu."""
+    media = recorder.dir / (stem + ".mp4")
+    if not reid.ENABLED or (doc.get("reid") or {}).get("version") or not media.exists() or not os.path.exists(reid.MODEL):
+        return doc
+    p = recorder.dir / (stem + ".transcript.json")
+    backup = recorder.dir / (stem + ".transcript.avant-reid.json")
+    job.update(step="ré-identification des voix")
+    try:
+        if not backup.exists():
+            backup.write_text(p.read_text())
+        info = await asyncio.to_thread(reid.reidentify, doc, media)
+        if info.get("skipped"):
+            log.info("ré-identification %s : %s", stem, info["skipped"])
+            return json.loads(p.read_text())
+        doc["reid"] = info
+        save_doc(recorder.dir / stem, doc)
+        log.info("ré-identification %s : %d voix -> %d", stem, info["voix_avant"], info["voix_apres"])
+        return doc
+    except Exception as e:
+        log.warning("ré-identification %s : %s", stem, e)
+        return json.loads(p.read_text())        # transcription d'origine, intacte
 
 
 def _start_speaker_loop():

@@ -19,11 +19,14 @@ RUN python3 -m venv /opt/webconf/venv \
  && /opt/webconf/venv/bin/pip install -q --no-cache-dir --upgrade pip \
  && /opt/webconf/venv/bin/pip install -q --no-cache-dir -r /opt/webconf/worker/requirements.txt
 
-# Modèle d'empreinte vocale (distinction des intervenants) : 3D-Speaker CAM++ zh/en, ~28 Mo
+# Modèles d'empreinte vocale : 3D-Speaker CAM++ zh/en (~28 Mo) pendant la réunion, NVIDIA TitaNet large (~100 Mo)
+# pour la ré-identification de fin de réunion (worker/reid.py, meilleur du banc d'essai)
 # (nettement meilleur que WeSpeaker ResNet34 sur le son des visios : voir worker/speakers.py)
 RUN mkdir -p /opt/webconf/models \
  && curl -fsSL -o /opt/webconf/models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx \
-      https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx
+      https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx \
+ && curl -fsSL -o /opt/webconf/models/nemo_en_titanet_large.onnx \
+      https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/nemo_en_titanet_large.onnx
 
 # Utilisateur bot (même uid que sur les VM : les fichiers des volumes restent compatibles)
 RUN useradd -u 1500 -m -s /bin/bash bot \
