@@ -1396,6 +1396,7 @@ function applyAccount() {
   $("#accountName").textContent = me.name || me.login;
   $("#accountBtn").title = `Mon compte (${me.login}${me.admin ? ", administrateur" : ""})`;
   $("#usersBox").classList.toggle("hidden", !me.admin);
+  $("#voiceBox").classList.toggle("hidden", !me.admin);
   $("#lexText").readOnly = !me.admin;
   $("#lexSave").classList.toggle("hidden", !me.admin);
 }
@@ -1513,6 +1514,60 @@ async function loadUsers() {
   } catch (e) { box.textContent = "Erreur : " + e.message; }
 }
 $("#usersBox").addEventListener("toggle", () => { if ($("#usersBox").open) loadUsers(); });
+
+// Empreintes vocales : consentements attestés sur l'honneur par un administrateur
+let consentTarget = null, consentText = "";
+async function loadConsents() {
+  const box = $("#voiceList");
+  try {
+    const d = await api("/api/voice-consents");
+    consentText = d.attestation;
+    box.innerHTML = d.items.length ? d.items.map(x => `<div class="user consent" data-id="${esc(x.id)}">
+      <label class="ck"><input type="checkbox" ${x.consent ? "checked" : ""}> <b>${esc(x.name)}</b></label>
+      <div class="who"><small>${x.consent ? `✅ consentement attesté le ${new Date(x.at).toLocaleString("fr-FR")} par ${esc(x.by_name || x.by)}`
+        : x.at ? `retiré le ${new Date(x.at).toLocaleString("fr-FR")}` : "en attente du consentement"}</small>
+        ${x.note ? `<small>📝 ${esc(x.note)}</small>` : ""}</div>
+      ${x.consent ? "" : `<button class="ghost danger remove" title="Retirer de la liste">🗑</button>`}</div>`).join("")
+      : "<small>Personne pour l'instant.</small>";
+    box.querySelectorAll(".consent").forEach(row => {
+      const x = d.items.find(i => i.id === row.dataset.id), cb = $("input[type=checkbox]", row);
+      cb.onchange = async () => {
+        if (cb.checked) {          // attestation sur l'honneur dans une fenêtre
+          cb.checked = false; consentTarget = x;
+          $("#csName").textContent = x.name; $("#csText").textContent = consentText;
+          $("#csAttest").checked = false; $("#csOk").disabled = true; $("#csNote").value = x.note || "";
+          $("#dlgConsent").showModal();
+        } else {
+          if (!confirm(`Retirer le consentement de ${x.name} ? Son empreinte vocale sera effacée.`)) { cb.checked = true; return; }
+          try { await api(`/api/voice-consents/${x.id}`, { method: "PUT", json: { consent: false } }); toast("Consentement retiré"); }
+          catch (e) { toast(e.message); } loadConsents();
+        }
+      };
+      if ($(".remove", row)) $(".remove", row).onclick = async () => {
+        if (!confirm(`Retirer ${x.name} de la liste ?`)) return;
+        try { await api(`/api/voice-consents/${x.id}`, { method: "DELETE" }); } catch (e) { toast(e.message); } loadConsents();
+      };
+    });
+  } catch (e) { box.textContent = "Erreur : " + e.message; }
+}
+$("#voiceBox").addEventListener("toggle", () => { if ($("#voiceBox").open) loadConsents(); });
+$("#csAttest").onchange = () => { $("#csOk").disabled = !$("#csAttest").checked; };
+$("#dlgConsent").addEventListener("close", async () => {
+  const x = consentTarget; consentTarget = null;
+  if ($("#dlgConsent").returnValue !== "ok" || !x || !$("#csAttest").checked) return;
+  try {
+    await api(`/api/voice-consents/${x.id}`, { method: "PUT", json: { consent: true, attest: true, note: $("#csNote").value.trim() } });
+    toast(`Consentement de ${x.name} enregistré`);
+  } catch (e) { toast(e.message); }
+  loadConsents();
+});
+$("#voiceAdd").onsubmit = async (e) => {
+  e.preventDefault();
+  try {
+    await api("/api/voice-consents", { method: "POST", json: { name: $("#va-name").value.trim(), note: $("#va-note").value.trim() || null } });
+    $("#va-name").value = ""; $("#va-note").value = ""; loadConsents();
+  } catch (x) { toast(x.message); }
+};
 $("#userAdd").onsubmit = async (e) => {
   e.preventDefault();
   try {

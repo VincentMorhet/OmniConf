@@ -64,6 +64,7 @@ DATA = Path(os.environ.get("DATA_DIR", "/var/lib/webconf"))
 DATA.mkdir(parents=True, exist_ok=True)
 SCHEDULE_FILE = DATA / "schedule.json"
 LEXICON_FILE = DATA / "lexicon.md"
+CONSENT_FILE = DATA / "voice_consents.json"   # consentements aux empreintes vocales (attestés par un administrateur)
 USERS = Users(DATA / "users.json", admin_password=PASSWORD, admin_login=os.environ.get("ADMIN_LOGIN"),
               admin_name=os.environ.get("ADMIN_NAME"),
               bot_names=json.loads(os.environ["DEFAULT_NAMES"]) if os.environ.get("DEFAULT_NAMES") else None)   # lexique de l'installation (noms, corrections, sigles, registre), poussé aux workers
@@ -712,6 +713,94 @@ async def scheduler():
                 it["status"], it["result"] = "pending", f"en attente: {e.detail}"
         if changed:
             save_schedule(items)
+
+
+# ----------------------------------------------------------------------------- consentements (empreintes vocales)
+CONSENT_TEXT = ("J'atteste sur l'honneur avoir reçu le consentement explicite de cette personne à l'utilisation de son "
+                "empreinte vocale pour la reconnaître dans les réunions enregistrées par OmniConf.")
+
+
+def load_consents() -> list[dict]:
+    try:
+        return json.loads(CONSENT_FILE.read_text())
+    except (FileNotFoundError, ValueError):
+        return []
+
+
+def save_consents(items: list[dict]):
+    tmp = CONSENT_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(items, ensure_ascii=False, indent=1))
+    os.chmod(tmp, 0o600)
+    tmp.replace(CONSENT_FILE)
+
+
+class ConsentPerson(BaseModel):
+    name: str
+    note: str | None = None
+
+
+class ConsentSet(BaseModel):
+    consent: bool | None = None
+    note: str | None = None
+    attest: bool = False          # case « sur l'honneur » cochée dans la fenêtre de confirmation
+
+
+@app.get("/api/voice-consents")
+async def consents_list(u: dict = Depends(require_admin)):
+    names = USERS.names()
+    items = [{**x, "by_name": names.get(x.get("by"), x.get("by"))} for x in load_consents()]
+    return {"items": sorted(items, key=lambda x: x["name"].lower()), "attestation": CONSENT_TEXT}
+
+
+@app.post("/api/voice-consents")
+async def consents_add(body: ConsentPerson, u: dict = Depends(require_admin)):
+    name = " ".join(body.name.split())[:80]
+    if len(name) < 3:
+        raise HTTPException(400, "nom obligatoire (Prénom Nom)")
+    items = load_consents()
+    if any(x["name"].lower() == name.lower() for x in items):
+        raise HTTPException(400, "cette personne est déjà dans la liste")
+    now = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    entry = {"id": uuid.uuid4().hex[:8], "name": name, "consent": False, "at": None, "by": None,
+             "note": (body.note or "").strip()[:300] or None,
+             "history": [{"at": now, "by": u["login"], "action": "ajout"}]}
+    save_consents(items + [entry])
+    return entry
+
+
+@app.put("/api/voice-consents/{cid}")
+async def consents_set(cid: str, body: ConsentSet, u: dict = Depends(require_admin)):
+    items = load_consents()
+    x = next((i for i in items if i["id"] == cid), None)
+    if not x:
+        raise HTTPException(404, "personne inconnue")
+    now = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    if body.note is not None:
+        x["note"] = body.note.strip()[:300] or None
+    if body.consent is True and not x["consent"]:
+        if not body.attest:
+            raise HTTPException(400, "l'attestation sur l'honneur doit être cochée")
+        x.update(consent=True, at=now, by=u["login"])
+        x["history"].append({"at": now, "by": u["login"], "action": "consentement attesté", "texte": CONSENT_TEXT})
+        log.info("consentement (empreinte vocale) de %s attesté par %s", x["name"], u["login"])
+    elif body.consent is False and x["consent"]:
+        x.update(consent=False, at=now, by=u["login"])
+        x["history"].append({"at": now, "by": u["login"], "action": "consentement retiré : empreinte à effacer"})
+        log.info("consentement (empreinte vocale) de %s retiré par %s", x["name"], u["login"])
+    save_consents(items)
+    return x
+
+
+@app.delete("/api/voice-consents/{cid}")
+async def consents_delete(cid: str, u: dict = Depends(require_admin)):
+    items = load_consents()
+    x = next((i for i in items if i["id"] == cid), None)
+    if not x:
+        raise HTTPException(404, "personne inconnue")
+    if x["consent"]:
+        raise HTTPException(400, "retirer d'abord le consentement (décocher), puis supprimer la ligne")
+    save_consents([i for i in items if i["id"] != cid])
+    return {"ok": True}
 
 
 # ----------------------------------------------------------------------------- lexique

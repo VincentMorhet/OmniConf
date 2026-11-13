@@ -172,6 +172,18 @@
         <button class="primary">+ Créer le compte</button>
       </form>
     </details>
+    <details class="card hidden" id="voiceBox">
+      <summary><h2>🎙 Empreintes vocales : consentements</h2></summary>
+      <p class="hint">Une empreinte vocale permet de reconnaître une personne à sa voix, même quand elle parle depuis
+        le poste d'un autre. C'est une donnée biométrique : elle ne sera calculée que pour les personnes dont le
+        consentement explicite est attesté ici. Décocher retire le consentement, et l'empreinte est alors effacée.</p>
+      <div id="voiceList"></div>
+      <form id="voiceAdd" class="row">
+        <input id="va-name" placeholder="Prénom Nom" required>
+        <input id="va-note" placeholder="Note (facultatif)">
+        <button class="primary">+ Ajouter</button>
+      </form>
+    </details>
     <details class="card" id="lexBox">
       <summary><h2>📖 Lexique du projet</h2></summary>
       <p class="hint">Noms des personnes, mots mal reconnus (« entendu → correct »), sigles et registre des sujets.
@@ -352,6 +364,14 @@
     <h2 id="cfTitle"></h2>
     <p id="cfText" class="hint"></p>
     <div class="row end"><button value="cancel" class="ghost" id="cfNo">Annuler</button><button value="ok" id="cfYes" class="primary">OK</button></div>
+  </form>
+</dialog>
+<dialog id="dlgConsent" class="dlg">
+  <form method="dialog">
+    <h2>🎙 Consentement de <span id="csName"></span></h2>
+    <label class="attest"><input type="checkbox" id="csAttest"> <span id="csText"></span></label>
+    <label>Comment le consentement a été reçu (facultatif)<input id="csNote" placeholder="ex. courriel du 14/11, accord oral en réunion"></label>
+    <div class="row end"><button value="cancel" class="ghost" formnovalidate>Annuler</button><button id="csOk" value="ok" class="primary" disabled>Valider</button></div>
   </form>
 </dialog>
 <dialog id="dlgSecret" class="dlg">

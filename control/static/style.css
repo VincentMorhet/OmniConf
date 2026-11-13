@@ -536,3 +536,18 @@ dialog.dlg .row { flex-wrap: wrap; margin-top: 12px; }
 .cr .kv table td { text-align: left; }
 .cr .warn-t { color: var(--warn); font-weight: 600; }
 .cr ol { padding-left: 22px; }
+/* consentements aux empreintes vocales */
+#voiceBox > summary, #voiceBox > summary h2 { cursor: pointer; list-style: none; }
+#voiceBox > summary h2 { display: inline; }
+#voiceBox > summary::-webkit-details-marker { display: none; }
+#voiceBox .hint { color: var(--mute); font-size: 13px; }
+#voiceList .user { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+#voiceList .ck { display: flex; align-items: center; gap: 8px; flex: 0 1 260px; cursor: pointer; }
+#voiceList .who { flex: 1 1 220px; min-width: 0; display: flex; flex-direction: column; }
+#voiceList .who small { color: var(--mute); font-size: 12px; }
+#voiceList .user button { flex: 0 0 auto; }
+#voiceAdd { flex-wrap: wrap; margin-top: 10px; }
+#voiceAdd input { flex: 1 1 180px; }
+#voiceAdd button { flex: 0 0 auto; }
+dialog.dlg label.attest { flex-direction: row; align-items: flex-start; gap: 10px; color: var(--fg); font-size: 14px; line-height: 1.4; }
+dialog.dlg label.attest input { margin-top: 3px; flex: 0 0 auto; }
