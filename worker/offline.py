@@ -284,13 +284,20 @@ class VideoScan:
         return names, rosters
 
 
-def merge_same_name(doc: dict) -> dict[str, str]:
-    """Voix nommées d'après l'écran qui portent le même nom -> une seule personne.
+MERGE_MAX_WORDS = int(os.environ.get("OFFLINE_MERGE_MAX_WORDS", "120"))   # même seuil que la « salle partagée » du CR
 
-    L'empreinte vocale coupe souvent une même personne en plusieurs voix (micro, compression) ; en direct,
-    les doublons « Nom (2) » servent aux salles de réunion (plusieurs voix derrière une vignette). Après
-    coup, chaque vignette encadrée est en pratique une personne : on regroupe (votes quasi purs constatés)."""
+
+def merge_same_name(doc: dict) -> dict[str, str]:
+    """Voix nommées d'après l'écran qui portent le même nom : les petites voix secondaires sont regroupées avec
+    la principale (l'empreinte vocale coupe parfois une même personne en plusieurs voix).
+
+    Une voix secondaire qui parle vraiment (au moins MERGE_MAX_WORDS mots) reste à part : c'est souvent une
+    AUTRE personne sur le même poste ou dans la même salle (Teams encadre l'appareil, pas la personne). Le
+    compte rendu l'affiche « Nom (voix 2) » avec un avertissement « salle partagée »."""
     st, spk = doc.get("diarizer") or {}, doc.get("speakers") or {}
+    words: dict[str, int] = {}
+    for p in doc.get("paragraphs") or []:
+        words[p.get("spk")] = words.get(p.get("spk"), 0) + len(str(p.get("text") or "").split())
     groups: dict[str, list[str]] = {}
     for sid, v in spk.items():
         if sid != "ME" and v.get("source") == "ui" and not v.get("name"):
@@ -301,7 +308,7 @@ def merge_same_name(doc: dict) -> dict[str, str]:
             continue
         keep = max(sids, key=lambda k: (st.get(k) or {}).get("n", 0))
         for k in sids:
-            if k == keep:
+            if k == keep or words.get(k, 0) >= MERGE_MAX_WORDS:
                 continue
             remap[k] = keep
             if k in st and keep in st:
