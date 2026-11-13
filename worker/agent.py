@@ -273,6 +273,7 @@ async def _report_job(stem: str):
             job.update(state="skipped", step=None, error="réunion trop courte pour un compte rendu")
             return
         rep = await analyst.build_report(transcriber.llm, doc, lambda st: job.update(step=st))
+        rep["id"] = f"{NAME}:{stem}"
         (recorder.dir / (stem + ".report.json")).write_text(json.dumps(rep, ensure_ascii=False, indent=1))
         job.update(state="done", step=None, secs=rep["secs"])
         log.info("compte rendu %s : %d s", stem, rep["secs"])
@@ -509,7 +510,9 @@ def _report_paths(name: str):
 
 
 @app.get("/recordings/{name}/report", dependencies=[Depends(auth)])
-async def recording_report(name: str, fmt: str = "json"):
+async def recording_report(name: str, fmt: str = "json", variant: str = "travail"):
+    """fmt=json|md|docx ; variant=travail (complet) ou diffusion (sans intervenants, réserves ni méthode)."""
+    variant = variant if variant in analyst.VARIANTS else "travail"
     stem, tp, rp = _report_paths(name)
     if not tp.exists():
         raise HTTPException(404, "pas de transcription")
@@ -517,14 +520,15 @@ async def recording_report(name: str, fmt: str = "json"):
     rep = json.loads(rp.read_text()) if rp.exists() else None
     if fmt == "json":
         return {"report": rep, "job": reports.get(stem), "speakers": doc.get("speakers"),
+                "labels": analyst.report_labels(rep, doc) if rep else None,
                 "me_name": analyst.me_label(doc), "meta": doc.get("meta"),
                 "analysis": doc.get("analysis"), "live": transcriber.active and transcriber.base and transcriber.base.name == stem}
     if not rep:
         raise HTTPException(404, "pas de compte rendu")
     if fmt == "md":
-        return Response(analyst.report_markdown(rep, doc), media_type="text/markdown; charset=utf-8")
+        return Response(analyst.report_markdown(rep, doc, variant), media_type="text/markdown; charset=utf-8")
     if fmt == "docx":
-        data = await asyncio.to_thread(analyst.report_docx, rep, doc)
+        data = await asyncio.to_thread(analyst.report_docx, rep, doc, variant)
         return Response(data, media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
     raise HTTPException(400, "format inconnu")
 

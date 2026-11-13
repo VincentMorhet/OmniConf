@@ -169,7 +169,7 @@ def _norm(n: str) -> str:
 
 
 def resolve_names(obs: list[str]) -> dict[str, str]:
-    """Regroupe les lectures d'un même nom : fautes de lecture (« Olivier Gles » / « Olivier Gies »), accents,
+    """Regroupe les lectures d'un même nom : fautes de lecture (« Camille Durad » / « Camille Durand »), accents,
     casse, noms tronqués (« Camille Dur… », « CAMILLE ») -> nom complet le plus vu, s'il est unique."""
     cnt = Counter(o for o in obs if o)
     canon: list[str] = []                 # une forme par personne, de la plus vue à la moins vue

@@ -565,15 +565,19 @@ REPORT_TYPES = {"md": ("text/markdown; charset=utf-8", "md"),
 
 
 @app.get("/api/recordings/{name}/{file}/report")
-async def recording_report(name: str, file: str, fmt: str = "json", download: int = 0, u: dict = CU):
+async def recording_report(name: str, file: str, fmt: str = "json", download: int = 0, variant: str = "travail",
+                           u: dict = CU):
     await rec_meta(name, file, u)
-    r = await wcall(name, "GET", f"/recordings/{file}/report?fmt={fmt if fmt in REPORT_TYPES else 'json'}", timeout=60)
+    variant = "diffusion" if variant == "diffusion" else "travail"
+    r = await wcall(name, "GET", f"/recordings/{file}/report?fmt={fmt if fmt in REPORT_TYPES else 'json'}&variant={variant}",
+                    timeout=60)
     if fmt not in REPORT_TYPES:
         return JSONResponse(r.json(), headers={"Cache-Control": "no-store"})
     mime, ext = REPORT_TYPES[fmt]
     stem = file.removesuffix(".mp4").removesuffix(".transcript.json")
+    label = "compte rendu (diffusion)" if variant == "diffusion" else "compte rendu"
     return Response(r.content, media_type=mime, headers={
-        "Content-Disposition": f'{"attachment" if download else "inline"}; filename="{stem} - compte rendu.{ext}"'})
+        "Content-Disposition": f'{"attachment" if download else "inline"}; filename="{stem} - {label}.{ext}"'})
 
 
 @app.post("/api/recordings/{name}/{file}/report")

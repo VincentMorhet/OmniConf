@@ -647,7 +647,70 @@ function paintAnalysis(name) {
   box.scrollTop = y;
 }
 
-function reportHtml(rep, sp) {
+// Format en note (version 2) : en-tête, intervenants, résumé par sujet, décisions, actions, points ouverts,
+// réserves sur la source, annexe (temps de parole, méthode)
+const DATE_FMT = { weekday: "long", day: "numeric", month: "long", year: "numeric" };
+function textBlocksH(text, W) {
+  return String(text || "").trim().split(/\n\s*\n/).map(chunk => {
+    const lines = chunk.split("\n").filter(l => l.trim());
+    const items = lines.filter(l => /^\s*[-•*]\s+/.test(l));
+    if (items.length && items.length === lines.length) return "<ul>" + items.map(l => `<li>${W(l.replace(/^\s*[-•*]\s+/, ""))}</li>`).join("") + "</ul>";
+    return lines.map(l => /^\s*[-•*]\s+/.test(l) ? `<ul><li>${W(l.replace(/^\s*[-•*]\s+/, ""))}</li></ul>` : `<p>${W(l)}</p>`).join("");
+  }).join("");
+}
+function reportHtmlV2(rep, sp, meta, labels) {
+  const cr = rep.cr || {};
+  sp = { ...sp };
+  // noms calculés par le service (lexique, « Nom (voix 2) », fusion des voix d'une même personne), sauf renommage
+  for (const [id, lab] of Object.entries(labels || {})) if (sp[id] && sp[id].source !== "manual" && id !== "ME") sp[id] = { ...sp[id], label: lab };
+  // voix identifiée par une présentation explicite : nom donné dans « intervenants » (sauf renommage)
+  for (const it of cr.intervenants || []) {
+    const id = String(it?.qui || "").replace(/[{} ]/g, "");
+    if (id && sp[id] && sp[id].source !== "manual" && it.nom && !/^null$/i.test(it.nom)) sp[id] = { ...sp[id], label: it.nom };
+  }
+  const W = (x) => whoH(x, sp);
+  const tbl = (head, rows) => rows.length ? `<div class="tw"><table><tr>${head.map(h => `<th>${h}</th>`).join("")}</tr>${rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join("")}</tr>`).join("")}</table></div>` : "";
+  const m = meta || {}, cov = cr.couverture || {};
+  const start = m.started_at ? new Date(m.started_at) : null, end = m.ended_at ? new Date(m.ended_at) : null;
+  const hm = (d) => d.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }).replace(":", "h");
+  const partial = cov.debut_manquant || cov.fin_manquante;
+  const why = [...(cov.service || []), cov.commentaire].filter(x => x && x !== "Séance complète").join(" ; ");
+  const rows = [
+    ["Date", start ? start.toLocaleDateString("fr-FR", DATE_FMT).replace(/^./, c => c.toUpperCase()) + ", " + hm(start) + (end ? " → " + hm(end) : "") : ""],
+    ["Créneau", cr.creneau ? W(cr.creneau) : ""],
+    ["Outil", [({ teams: "Teams", zoom: "Zoom" })[m.platform] || m.site || m.platform, cr.outil ? W(cr.outil) : ""].filter(Boolean).join(", ")],
+    ["Couverture", partial ? `<span class="warn-t">Partielle : ${[cov.debut_manquant && "début manquant", cov.fin_manquante && "fin manquante"].filter(Boolean).join(" et ")}.</span> ${W(why)}` : (why ? W(why) : "Séance complète.")]];
+  let h = `<h2>${W(cr.titre || "Compte rendu")}</h2><div class="tw kv"><table>${rows.filter(r => r[1]).map(r => `<tr><th>${r[0]}</th><td>${r[1]}</td></tr>`).join("")}</table></div>`;
+  h += secH("👥 Intervenants identifiés", ulH(cr.intervenants, it => `${W(it.qui)}${it.organisation && !/^null$/i.test(it.organisation) ? ` <span class="meta">(${W(it.organisation)})</span>` : ""}${it.role ? " : " + W(it.role) : ""}${it.justification ? `<div class="meta">${W(it.justification)}</div>` : ""}`)
+    + ((cr.cites || []).length ? `<p class="meta">Cités : ${(cr.cites || []).map(W).join(", ")}</p>` : ""));
+  h += secH("📝 Résumé", (cr.resume || []).map(s => `<div class="subj"><h5>${W(s.titre)}${tsH(s.debut)}</h5>${textBlocksH(s.texte, W)}</div>`).join(""));
+  h += secH("✅ Décisions", (cr.decisions || []).length ? ulH(cr.decisions, x => W(x.texte) + (x.porteur ? ` <span class="meta">(porteur : ${W(x.porteur)})</span>` : "")
+      + (x.statut && x.statut !== "actée" ? ` <span class="meta">— ${esc(x.statut)}</span>` : "") + tsH(x.t))
+      : `<p>Aucune${cr.decisions_commentaire ? " : " + W(cr.decisions_commentaire) : "."}</p>`)
+    + secH("📌 Actions", tbl(["Action", "Porteur", "Échéance", ""], (cr.actions || []).map(x =>
+        [W(x.action), W(x.responsable || "non désigné"), W(x.echeance || "non fixée"), tsH(x.t)])))
+    + secH("❓ Points ouverts", ulH(cr.points_ouverts, x => W(x.texte) + tsH(x.t)));
+  const res = (cr.reserves || []).filter(x => x?.texte).map(x => W(x.texte) + tsH(x.t));
+  if ((cr.ecarte || []).length) res.push("Non repris : " + cr.ecarte.map(W).join(" ; ") + ".");
+  h += secH("🔍 Réserves sur la source", res.length ? "<ol>" + res.map(x => `<li>${x}</li>`).join("") + "</ol>" : "", "warn");
+  const st = rep.stats || [];
+  h += secH("⏱ Temps de parole", st.length ? `<div class="bars">${st.map(s => `<div class="bar-row"><span>${W(`{${s.spk}}`)}</span>
+      <span class="b"><i class="c${(spkOf(sp, null, s.spk).color || 0) % 9}" style="width:${s.share}%"></i></span><span class="meta">${fmtT(s.secs)} · ${s.share} %</span></div>`).join("")}</div>` : "");
+  return h + methodH(rep, W);
+}
+function methodH(rep, W) {
+  const steps = rep.steps || [], ok = (e) => steps.filter(s => s.etape === e && s.ok).map(s => esc(s.modele));
+  return `<details class="method"><summary>🔬 Méthode et contrôle (${ok("rédaction").length} modèles, ${(rep.arbitrages || []).length} arbitrages, ${(rep.corrections || []).length} corrections)</summary>
+    <p class="meta">Rédaction indépendante : ${ok("rédaction").join(", ") || "—"}${ok("confrontation").length ? ` · confrontation : ${ok("confrontation")}` : ""}${ok("contrôle").length ? ` · contrôle qualité : ${ok("contrôle")}` : ""}
+    · ${rep.secs ? Math.round(rep.secs / 60 * 10) / 10 + " min" : ""} · généré le ${new Date(rep.generated_at).toLocaleString("fr-FR")}</p>
+    ${steps.filter(s => !s.ok).map(s => `<p class="meta">⚠ ${esc(s.etape)} ${esc(s.modele)} : ${esc(s.erreur || "échec")}</p>`).join("")}
+    ${(rep.arbitrages || []).length ? "<h5>Arbitrages entre les projets</h5>" + ulH(rep.arbitrages, a => `<b>${W(a.point)}</b><div class="meta">${W(a.versions)}</div>Retenu : ${W(a.retenu)}${a.justification ? ` <span class="meta">(${W(a.justification)})</span>` : ""}`) : ""}
+    ${(rep.corrections || []).length ? "<h5>Corrections du contrôle qualité</h5>" + ulH(rep.corrections, c => `<b>${W(c.element)}</b> : ${W(c.probleme)} → ${W(c.correction)}`) : ""}
+  </details>`;
+}
+
+function reportHtml(rep, sp, meta, labels) {
+  if ((rep.version || 1) >= 2) return reportHtmlV2(rep, sp, meta, labels);
   const cr = rep.cr || {}, W = (x) => whoH(x, sp);
   const tbl = (head, rows) => rows.length ? `<div class="tw"><table><tr>${head.map(h => `<th>${h}</th>`).join("")}</tr>${rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join("")}</tr>`).join("")}</table></div>` : "";
   const st = rep.stats || [];
@@ -1250,10 +1313,12 @@ function paintPlayerCr() {
   else if (job.state === "error") bar += `<span class="err">⚠ ${esc(job.error || "échec")}</span>`;
   else if (job.state === "skipped") bar += `<span class="meta">${esc(job.error || "")}</span>`;
   if (!running && !d.live) bar += `<button class="cr-gen" title="Relance la rédaction multi-modèles (ex. après avoir renommé les intervenants : les noms se mettent déjà à jour tout seuls)">${d.report ? "↻ Régénérer" : "📋 Générer le compte rendu"}</button>`;
-  if (d.report) bar += `<a class="btn" href="${player.url}/report?fmt=docx&download=1">⬇ Word</a><a class="btn" href="${player.url}/report?fmt=md&download=1">⬇ Markdown</a><button class="cr-copy">📋 Copier</button>`;
+  if (d.report) bar += `<a class="btn" href="${player.url}/report?fmt=docx&download=1">⬇ Word</a><a class="btn" href="${player.url}/report?fmt=md&download=1">⬇ Markdown</a>`
+    + ((d.report.version || 1) >= 2 ? `<a class="btn" href="${player.url}/report?fmt=docx&variant=diffusion&download=1" title="Sans les intervenants, les réserves ni la méthode : à envoyer aux participants">⬇ Word (diffusion)</a>` : "")
+    + `<button class="cr-copy">📋 Copier</button>`;
   bar += "</div>";
   let body = "";
-  if (d.report) body = reportHtml(d.report, playerSpeakers());
+  if (d.report) body = reportHtml(d.report, playerSpeakers(), d.meta, d.labels);
   else if (running) body = `<p class="empty">Le compte rendu est rédigé séparément par plusieurs modèles, puis leurs versions sont confrontées entre elles et vérifiées contre la transcription. Comptez 2 à 10 minutes selon la durée de la réunion.</p>`;
   else if (d.live) body = `<p class="empty">Réunion en cours : le compte rendu sera rédigé automatiquement à la fin. En attendant, voir les points d'étape sur la carte du worker.</p>`;
   else if (!job.state) body = `<p class="empty">Pas encore de compte rendu pour cette réunion.</p>`;

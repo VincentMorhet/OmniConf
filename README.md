@@ -306,6 +306,7 @@ un worker = une réunion à la fois** ; plusieurs conteneurs sur un même hôte 
 | `worker/Dockerfile` | image `webconf-worker` (Debian 12, Chrome, Xvfb, PulseAudio, ffmpeg, x11vnc/noVNC, agent, modèle d'empreinte vocale) |
 | `worker/container/supervisord.conf` | les 5 services du worker dans le conteneur (équivalents des unités systemd) |
 | `deploy/deploy-containers.sh` | installe Docker sur l'hôte, construit l'image, crée un conteneur par worker, pare-feu |
+| `deploy/host/webconf-update` | met à jour les assistants libres ; ceux en réunion à la fin (minuteur, chaque minute) |
 | `deploy/proxmox-create-vms.sh` | `VMS_SPEC="233 192.168.0.201 192.168.0.233 webconf-ct 8 12288 60G"` crée la VM hôte |
 
 `NAMES` doit lister **tous** les conteneurs de l'hôte : le script réécrit `compose.yml` avec ces seuls noms
@@ -313,6 +314,19 @@ et supprimerait les autres (il s'arrête désormais si un conteneur existant man
 Pour essayer une version sur un seul conteneur sans toucher aux autres : image `webconf-worker:test` et
 `docker compose -f compose.yml -f compose.test.yml up -d --no-deps w3` (fichier de surcharge qui ne change
 que l'image de `w3`).
+
+**Mise à jour sans couper de réunion.** `deploy-containers.sh` construit la nouvelle image, mais ne recrée
+que les assistants libres. Un assistant occupé garde son ancienne version et passe à la nouvelle dès qu'il est
+libre. Sont occupés les assistants :
+- en réunion ou en navigation manuelle ;
+- qui enregistrent ou transcrivent ;
+- qui rédigent un compte rendu ou lisent des diapositives ;
+- qui font une transcription après coup.
+
+C'est `webconf-update` qui s'en charge : script `/usr/local/sbin/webconf-update` sur l'hôte, lancé toutes les
+minutes par `webconf-update.timer`. `sudo webconf-update --status` montre ce qui attend. Le contrôle (IHM)
+se met à jour à part (`install-control.sh`) et ne touche jamais aux assistants : pendant son redémarrage
+(quelques secondes), les réunions continuent, seule la page est momentanément indisponible.
 
 ```bash
 HOST=192.168.0.233 NAMES="w3 w4" CONTROL_IPS="192.168.0.230" ./deploy/deploy-containers.sh

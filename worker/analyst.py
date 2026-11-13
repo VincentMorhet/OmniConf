@@ -421,7 +421,7 @@ def fix_dates(obj, doc: dict, warn: list | None = None):
     if not start:
         return obj
     ref = start.date()
-    known = obj.get("a_verifier") or [] if isinstance(obj, dict) else []  # déjà signalé par le LLM
+    known = (obj.get("a_verifier") or []) + (obj.get("reserves") or []) if isinstance(obj, dict) else []  # déjà signalé
 
     def fix_rel(m):  # « vendredi (22 novembre) » : la date calculée doit être un vendredi
         wd, mid, day, mon = m.group(1).lower(), m.group(2), int(m.group(3)), _month(m.group(4))
@@ -454,7 +454,7 @@ def fix_dates(obj, doc: dict, warn: list | None = None):
             return [walk(v, t, fix) for v in x]
         if isinstance(x, dict):
             tt = x.get("t", t)
-            return {k: (walk(v, tt, fix and k != "a_verifier") if k != "t" else v) for k, v in x.items()}
+            return {k: (walk(v, tt, fix and k not in ("a_verifier", "reserves")) if k != "t" else v) for k, v in x.items()}
         return x
     return walk(obj)
 
@@ -527,23 +527,95 @@ REPORT_SCHEMA = """{
                 "commentaire": "indices, ex. « commence au milieu d'un échange sur X, sans accueil ni ordre du jour »"}
 }"""
 
+REPORT_VERSION = 2
+# Format de note (version 2) : un résumé par sujet, décisions, actions, points ouverts ; intervenants justifiés et
+# réserves sur la source à part ; une version « diffusion » en est dérivée (sans intervenants, réserves ni méthode).
+REPORT_SCHEMA_V2 = """{
+ "titre": "titre explicite, comme celui d'une note : objet de la réunion et sujets principaux",
+ "creneau": "nom de la réunion et créneau prévu s'ils sont connus (agenda, titre saisi, annonce en séance : « Point de situation, 9h30 → 10h00 »), sinon null ; jamais la seule date",
+ "outil": "particularités utiles de la connexion (ex. « avec une salle équipée », « une connexion pour trois personnes »), sinon null",
+ "couverture": {"debut_manquant": false, "fin_manquante": false,
+                "commentaire": "« Séance complète », ou les indices d'une couverture partielle"},
+ "intervenants": [{"qui": "{S1}", "nom": "Prénom Nom seul, si l'identité de cette voix est établie avec certitude autrement que par son étiquette (présentation explicite) ; sinon null (le doute va dans la justification)",
+                   "organisation": "organisation, ville, si connues, sinon null",
+                   "role": "ce que la personne apporte à la réunion, en une ligne",
+                   "justification": "comment l'identité est établie (nom affiché par la plateforme, propos « … » à mm:ss) ou pourquoi elle est incertaine"}],
+ "cites": ["personnes citées qui ne parlent pas, Prénom Nom"],
+ "resume": [{"titre": "intertitre court du sujet", "debut": "mm:ss", "fin": "mm:ss",
+             "texte": "résumé factuel du sujet : paragraphes courts séparés par une ligne vide, listes avec « - »"}],
+ "decisions": [{"texte": "décision formulée précisément (quoi, qui, quand)", "porteur": "{S1} ou null",
+                "statut": "actée|conditionnelle|à confirmer", "t": "mm:ss"}],
+ "decisions_commentaire": "si aucune décision : pourquoi (ex. « séance de présentation »), sinon null",
+ "actions": [{"action": "verbe à l'infinitif + objet précis", "responsable": "{S2}, nom cité, ou \"non désigné\"",
+              "echeance": "telle que dite + date calculée, ou \"non fixée\"", "t": "mm:ss"}],
+ "points_ouverts": [{"texte": "question en suspens, risque ou désaccord persistant", "t": "mm:ss"}],
+ "reserves": [{"texte": "réserve sur la source : passage ambigu ou inaudible, nom ou chiffre incertain, terme non élucidé, attribution douteuse, contradiction", "t": "mm:ss"}],
+ "ecarte": ["ce qui n'est volontairement pas repris, décrit sans le détail (ex. « une remarque personnelle de {S3} »)"]
+}"""
+
+REPORT_STYLE = """- Une note, pas un procès-verbal : chaque information n'apparaît qu'une fois. Pas de synthèse qui
+  répète les sujets, pas de liste « à retenir ». Le résumé suit l'ordre des sujets ; chaque sujet a un
+  intertitre court et un texte factuel (présent ou passé composé), avec les chiffres, dates, noms et
+  sigles exacts. Citations courtes entre guillemets seulement quand la formule porte le sens.
+- Longueur : respecte la longueur cible donnée (résumé, décisions, actions et points ouverts). Condense ce
+  qui est secondaire ; ne perds aucune décision, action, échéance ni chiffre important.
+- Faits seulement : aucun jugement sur des personnes ou des équipes, aucune anecdote personnelle (santé,
+  carrière, situation familiale), aucune remarque sur le ton. Ces passages vont dans « ecarte », décrits
+  sans leur contenu.
+- Vocabulaire du titre, du résumé, des décisions, des actions et des points ouverts : jamais
+  « enregistrement », « transcription », « vidéo », « micro », « audio », « diarisation », « IA »,
+  « Speaker », « Intervenant N » ni « probable » ; écris « sans doute ». Ces mots restent permis dans
+  « intervenants », « couverture » et « reserves ».
+- Intervenants : une entrée par voix ({S1}, {S2}…). Quand une voix « Nom (voix 2) » est identifiée par
+  une présentation explicite (« c'est Éric qui présente »), donne son nom dans « nom » et justifie-le.
+  Pour {ME} sans parole, écris « aucune parole captée » dans « role »."""
+
 REPORT_RULES = """- Couverture : dis si l'enregistrement commence en cours de réunion (pas d'accueil ni d'ordre du jour,
   sujet déjà engagé, renvois à ce qui « vient d'être dit ») ou s'arrête avant la fin (coupure en pleine
   phrase, ni conclusion ni salutations). Tiens compte de ce que le service sait de la couverture.
 - Noms : orthographe du lexique et de la liste des intervenants. Une personne citée qui n'y figure pas :
-  garde le nom entendu et ajoute-la dans « a_verifier ». Un sigle ou un numéro de sujet (« le 120 ») se
-  comprend avec le lexique ; si l'écran ou les propos contredisent l'état du registre, signale-le dans
-  « a_verifier ».
+  garde le nom entendu et signale-la dans les réserves (« reserves », ou « a_verifier » selon le format). Un
+  sigle ou un numéro de sujet (« le 120 ») se comprend avec le lexique ; si l'écran ou les propos
+  contredisent l'état du registre, signale-le dans les réserves.
 - Les lignes de l'écran partagé peuvent contenir des erreurs de lecture : un numéro de ticket ou une valeur
-  qui diffère entre l'écran et l'oral (unité, chiffre) va dans « a_verifier ».
+  qui diffère entre l'écran et l'oral (unité, chiffre) va dans les réserves.
 - Rétractations : quand un intervenant revient sur ce qu'il a dit (« j'ai fait une erreur », « je me suis
   trompé », « pardon, c'est… », « non, en fait… »), seule la version corrigée figure dans le compte rendu,
-  partout (synthèse, sujets, chiffres, dates) ; mentionne la correction et son horodatage. L'affirmation
+  partout (résumé, sujets, chiffres, dates) ; mentionne la correction et son horodatage. L'affirmation
   retirée ne doit jamais rester présentée comme un fait.
 - Attribution : l'étiquetage des voix peut se tromper. Quand l'écran affiche le porteur d'un sujet
   (« Référent », « Titulaire », « Porteur », « Pilote : X ») et que les propos qui le commentent sont
   attribués à quelqu'un d'autre, préfère le porteur affiché si le contenu le confirme, et signale
-  l'incertitude dans « a_verifier »."""
+  l'incertitude dans les réserves."""
+
+DRAFT_SYSTEM_V2 = """Tu rédiges le compte rendu d'une réunion professionnelle à partir de sa transcription
+intégrale, sous forme de note de travail : exacte, complète sur l'essentiel, concise et directement exploitable.
+""" + COMMON_RULES + """
+""" + REPORT_STYLE + """
+""" + REPORT_RULES + """
+Réponds UNIQUEMENT par un JSON de cette forme (listes vides [] si rien) :
+""" + REPORT_SCHEMA_V2
+
+JUDGE_SYSTEM_V2 = """Tu es le rédacteur en chef chargé du compte rendu DÉFINITIF d'une réunion. Tu reçois sa
+transcription intégrale et plusieurs projets rédigés indépendamment par des modèles différents
+(projet A, B, C…). Méthode :
+1. Confronte les projets point par point (décisions, actions, responsables, échéances, chiffres, dates,
+   identification des intervenants, réserves).
+2. Pour chaque divergence ou élément présent dans un seul projet, reviens à la transcription et tranche :
+   garde la version exacte, corrige ou supprime ce qui n'est pas étayé.
+3. Conserve tout fait important étayé par la transcription, même s'il n'est que dans un projet (décision,
+   action, échéance, chiffre, engagement, dépendance), mais réécris l'ensemble en une note concise : fusionne
+   les doublons, condense le secondaire, respecte la longueur cible.
+4. Réunis toutes les réserves étayées des projets, sans doublon.
+""" + COMMON_RULES + """
+""" + REPORT_STYLE + """
+""" + REPORT_RULES + """
+Réponds UNIQUEMENT par ce JSON :
+{"compte_rendu": <objet au format ci-dessous>,
+ "arbitrages": [{"point": "élément discuté", "versions": "ce que disaient les projets (A : …, B : …)",
+                 "retenu": "ce qui est retenu", "justification": "[mm:ss] ce que dit la transcription"}]}
+Format du compte rendu :
+""" + REPORT_SCHEMA_V2
 
 DRAFT_SYSTEM = """Tu rédiges le compte rendu officiel d'une réunion professionnelle à partir de sa
 transcription intégrale. Ce compte rendu fera foi : il doit être exact, complet et directement exploitable.
@@ -582,7 +654,10 @@ rendu (JSON). Vérifie CHAQUE élément contre la transcription :
   échéances, des horodatages ;
 - décision présentée comme actée alors qu'elle ne l'est pas, ou l'inverse ;
 - contresens, attribution à la mauvaise personne ;
-- noms de personnes absents de la liste des intervenants et du lexique : à ajouter dans « a_verifier » ;
+- noms de personnes absents de la liste des intervenants et du lexique : à ajouter aux réserves
+  (rubrique « reserves » si elle existe, sinon « a_verifier ») ;
+- format en note (rubrique « resume ») : jugements sur des personnes, anecdotes personnelles ou remarques de
+  ton restés dans le texte : à supprimer (et à mentionner dans « ecarte ») ;
 - OUBLIS : relis la transcription ligne par ligne et repère toute action (même secondaire : fournir un
   document, vérifier auprès de quelqu'un, prévenir une équipe), tout engagement, chiffre, date, question
   ou risque qui manque au compte rendu.
@@ -619,7 +694,7 @@ def _path(cr, path: str):
     return cur, last
 
 
-def apply_audit(cr: dict, audit: dict) -> list[dict]:
+def apply_audit(cr: dict, audit: dict, keys: tuple | None = None) -> list[dict]:
     """Applique les corrections du contrôleur ; renvoie le journal de ce qui a été modifié."""
     log_, dels = [], []
     retracted = re.compile(r"pas d'erreur|aucune erreur|est correct|était correct|je retire|ne nécessite pas|"
@@ -637,7 +712,7 @@ def apply_audit(cr: dict, audit: dict) -> list[dict]:
         log_.append({"element": c.get("chemin"), "probleme": c.get("probleme"),
                      "correction": c["valeur"] if isinstance(c["valeur"], str) else json.dumps(c["valeur"], ensure_ascii=False)})
     for a in audit.get("ajouts") or []:
-        if isinstance(a, dict) and a.get("rubrique") in LIST_KEYS and a.get("element"):
+        if isinstance(a, dict) and a.get("rubrique") in (keys or LIST_KEYS) and a.get("element"):
             cr.setdefault(a["rubrique"], []).append(a["element"])
             el = a["element"]
             txt = el if isinstance(el, str) else next((el.get(k) for k in ("texte", "action", "valeur", "titre", "date") if el.get(k)), "")
@@ -645,7 +720,8 @@ def apply_audit(cr: dict, audit: dict) -> list[dict]:
     for d in audit.get("suppressions") or []:
         if isinstance(d, dict):
             box, key = _path(cr, d.get("chemin"))
-            if isinstance(box, list) and box is not cr.get("sujets"):
+            if isinstance(box, list) and box is not cr.get("sujets") and box is not cr.get("resume") \
+                    and box is not cr.get("intervenants"):
                 dels.append((id(box), box, key, d))
     for _, box, key, d in sorted(dels, key=lambda x: (x[0], -x[2])):
         removed = box.pop(key)
@@ -656,31 +732,56 @@ def apply_audit(cr: dict, audit: dict) -> list[dict]:
 
 LIST_KEYS = ("a_retenir", "sujets", "decisions", "actions", "questions_ouvertes", "risques", "chiffres",
              "dates", "pour_moi", "a_verifier")
+LIST_KEYS_V2 = ("intervenants", "cites", "resume", "decisions", "actions", "points_ouverts", "reserves", "ecarte")
+WARN_KEY = {1: "a_verifier", 2: "reserves"}     # où vont les avertissements calculés (dates, salle partagée)
+# Longueur cible du corps (résumé, décisions, actions, points ouverts) : environ une page par 20 minutes
+WORDS_PER_MIN = float(os.environ.get("REPORT_WORDS_PER_MIN", "25"))
 
 
-def _richness(cr: dict) -> int:
+def list_keys(version: int) -> tuple:
+    return LIST_KEYS_V2 if version >= 2 else LIST_KEYS
+
+
+def _richness(cr: dict, version: int = REPORT_VERSION) -> int:
     """Nombre d'éléments d'un projet de compte rendu (pour choisir le plus complet)."""
-    return sum(len(cr.get(k) or []) for k in LIST_KEYS)
+    return sum(len(cr.get(k) or []) for k in list_keys(version))
 
 
-def _clean_cr(cr) -> dict | None:
-    if not isinstance(cr, dict) or not (cr.get("synthese") or cr.get("sujets") or cr.get("decisions")):
-        return None
-    for k in LIST_KEYS:
+def _clean_cr(cr, version: int = 1) -> dict | None:
+    if version >= 2:
+        if not isinstance(cr, dict) or not (cr.get("resume") or cr.get("decisions") or cr.get("actions")):
+            return None
+        scalars = ("titre", "creneau", "outil", "decisions_commentaire")
+    else:
+        if not isinstance(cr, dict) or not (cr.get("synthese") or cr.get("sujets") or cr.get("decisions")):
+            return None
+        scalars = ("titre", "objet", "synthese", "prochaine_reunion")
+    for k in list_keys(version):
         v = cr.get(k)
         cr[k] = [x for x in v if x] if isinstance(v, list) else []
-    for k in ("titre", "objet", "synthese", "prochaine_reunion"):
+    for k in scalars:
         if cr.get(k) in ("null", "None", ""):
             cr[k] = None
     return cr
 
 
-async def build_report(llm: LLM, doc: dict, progress=lambda step: None) -> dict:
+def target_words(doc: dict) -> int:
+    """Longueur cible du corps du compte rendu, d'après la durée de parole."""
+    last = max((p["t"] for p in paragraphs(doc)), default=0) / 60
+    return int(min(3500, max(350, round(last * WORDS_PER_MIN / 50) * 50)))
+
+
+async def build_report(llm: LLM, doc: dict, progress=lambda step: None, version: int = REPORT_VERSION) -> dict:
     t_start = time.time()
     text = transcript_text(doc)
     if not text.strip():
         raise RuntimeError("transcription vide")
-    head = context_block(doc) + "\n\nTranscription intégrale :\n" + text
+    draft_sys, judge_sys = (DRAFT_SYSTEM_V2, JUDGE_SYSTEM_V2) if version >= 2 else (DRAFT_SYSTEM, JUDGE_SYSTEM)
+    head = context_block(doc)
+    if version >= 2:
+        head += (f"\nLongueur cible : environ {target_words(doc)} mots pour le résumé, les décisions, les actions et "
+                 f"les points ouverts (intervenants et réserves en plus).")
+    head += "\n\nTranscription intégrale :\n" + text
     drafters = [m for m in REPORT_MODELS
                 if len(text) < next((v for k, v in CTX_CHARS.items() if k in m.lower()), 800_000)]
     steps = []
@@ -692,8 +793,8 @@ async def build_report(llm: LLM, doc: dict, progress=lambda step: None) -> dict:
     async def draft(spec):
         nonlocal done
         try:
-            data, res = await llm.chat_json(spec, DRAFT_SYSTEM, head, reasoning="medium", max_tokens=32000, deadline=600)
-            cr = _clean_cr(data.get("compte_rendu", data) if isinstance(data, dict) else None)
+            data, res = await llm.chat_json(spec, draft_sys, head, reasoning="medium", max_tokens=32000, deadline=600)
+            cr = _clean_cr(data.get("compte_rendu", data) if isinstance(data, dict) else None, version)
             if not cr:
                 raise ValueError("compte rendu vide ou mal formé")
             steps.append({"etape": "rédaction", "modele": model_name(spec), "secs": res["secs"], "ok": True})
@@ -712,7 +813,7 @@ async def build_report(llm: LLM, doc: dict, progress=lambda step: None) -> dict:
 
     # 2. confrontation des projets
     # À défaut d'arbitrage, on garde le projet le plus complet (et non le premier arrivé)
-    final, arbitrages = max(drafts, key=lambda d: _richness(d[1]))[1], []
+    final, arbitrages = max(drafts, key=lambda d: _richness(d[1], version))[1], []
     if len(drafts) > 1:
         progress(f"confrontation des {len(drafts)} projets")
         letters = "ABCDEFGH"
@@ -721,9 +822,9 @@ async def build_report(llm: LLM, doc: dict, progress=lambda step: None) -> dict:
         # Réflexion « medium » d'abord ; si OVH est trop lent, nouvel essai avec une réflexion courte
         for reasoning, deadline in (("medium", JUDGE_SECS), ("low", JUDGE_RETRY_SECS)):
             try:
-                data, res = await llm.chat_json(REPORT_JUDGE, JUDGE_SYSTEM, body, reasoning=reasoning,
+                data, res = await llm.chat_json(REPORT_JUDGE, judge_sys, body, reasoning=reasoning,
                                                 max_tokens=32000, deadline=deadline)
-                cr = _clean_cr(data.get("compte_rendu"))
+                cr = _clean_cr(data.get("compte_rendu"), version)
                 if cr:
                     final = cr
                     arbitrages = [a for a in data.get("arbitrages") or [] if isinstance(a, dict)]
@@ -743,7 +844,7 @@ async def build_report(llm: LLM, doc: dict, progress=lambda step: None) -> dict:
     try:
         body = head + "\n\n===== COMPTE RENDU À CONTRÔLER =====\n" + json.dumps(final, ensure_ascii=False)
         data, res = await llm.chat_json(REPORT_AUDITOR, AUDIT_SYSTEM, body, reasoning="low", max_tokens=16000, deadline=420)
-        corrections = apply_audit(final, data)
+        corrections = apply_audit(final, data, list_keys(version))
         steps.append({"etape": "contrôle", "modele": model_name(REPORT_AUDITOR), "secs": res["secs"], "ok": True})
     except Exception as e:
         log.warning("contrôle : %s", e)
@@ -751,15 +852,16 @@ async def build_report(llm: LLM, doc: dict, progress=lambda step: None) -> dict:
 
     warn = []
     final = fix_dates(final, doc, warn)
-    final["a_verifier"] = final.get("a_verifier", []) + warn + shared_voices(doc)
+    wk = WARN_KEY[2 if version >= 2 else 1]
+    final[wk] = final.get(wk, []) + warn + shared_voices(doc)
     final["couverture"] = coverage(final.get("couverture"), doc)
     # horodatages hors de la réunion : on les retire plutôt que d'afficher un lien faux
     last_t = max((p["t"] for p in paragraphs(doc)), default=0) + 60
-    for k in LIST_KEYS:
+    for k in list_keys(version):
         for x in final.get(k) or []:
             if isinstance(x, dict) and "t" in x and (parse_t(x["t"]) is None or parse_t(x["t"]) > last_t):
                 x["t"] = None
-    return {"version": 1, "generated_at": dt.datetime.now().astimezone().isoformat(),
+    return {"version": version, "generated_at": dt.datetime.now().astimezone().isoformat(),
             "secs": round(time.time() - t_start), "cr": final, "arbitrages": arbitrages,
             "corrections": corrections, "steps": steps, "stats": stats(doc),
             "drafts": {model_name(s): cr for s, cr in drafts}}
@@ -817,8 +919,29 @@ def _ts(x) -> str:
     return f" [{fmt_t(t)}]" if t is not None else ""
 
 
-def report_sections(report: dict, doc: dict) -> list[tuple]:
+DIFFUSION_FOOTER = os.environ.get("REPORT_DIFFUSION_FOOTER", "Document interne — diffusion restreinte")
+VARIANTS = ("travail", "diffusion")
+PLATFORM_FR = {"teams": "Teams", "zoom": "Zoom"}
+
+
+def report_labels(report: dict, doc: dict) -> dict[str, str]:
+    """Noms des intervenants pour le rendu ; format en note : une voix identifiée par une présentation explicite
+    (« Nom (voix 2) » = Éric) prend ce nom, sauf si l'utilisateur l'a renommée lui-même."""
+    lab = labels(doc)
+    if (report.get("version") or 1) >= 2:
+        manual = {k for k, v in (doc.get("speakers") or {}).items() if v.get("source") == "manual"}
+        for it in (report.get("cr") or {}).get("intervenants") or []:
+            sid = str((it or {}).get("qui") or "").strip("{} ")
+            nom = str((it or {}).get("nom") or "").strip()
+            if sid in lab and sid not in manual and nom and nom.lower() not in ("null", "none"):
+                lab[sid] = nom
+    return lab
+
+
+def report_sections(report: dict, doc: dict, variant: str = "travail") -> list[tuple]:
     """Structure commune Markdown / Word : liste de (type, contenu)."""
+    if (report.get("version") or 1) >= 2:
+        return report_sections_v2(report, doc, variant)
     cr, lab = report["cr"], labels(doc)
     N = lambda s: names(s, lab)
     meta = doc.get("meta") or {}
@@ -924,13 +1047,201 @@ def report_sections(report: dict, doc: dict) -> list[tuple]:
     return out
 
 
+def _blocks(text: str) -> list[tuple]:
+    """Texte d'un sujet -> paragraphes (« p ») et listes (« ul »)."""
+    out = []
+    for chunk in re.split(r"\n\s*\n", str(text or "").strip()):
+        lines = [l.rstrip() for l in chunk.splitlines() if l.strip()]
+        if not lines:
+            continue
+        items, para = [], []
+        for l in lines:
+            m = re.match(r"^\s*[-•*]\s+(.*)$", l)
+            if m:
+                if para:
+                    out.append(("p", " ".join(para))); para = []
+                items.append(m.group(1))
+            elif items and l.startswith("  "):          # suite d'un élément de liste
+                items[-1] += " " + l.strip()
+            else:
+                if items:
+                    out.append(("ul", items)); items = []
+                para.append(l.strip())
+        if para:
+            out.append(("p", " ".join(para)))
+        if items:
+            out.append(("ul", items))
+    return out
+
+
+def _date_line(doc: dict, variant: str) -> str:
+    meta, d = doc.get("meta") or {}, meeting_date(doc)
+    if not d:
+        return ""
+    out = f"{WEEKDAYS[d.weekday()].capitalize()} {d.day} {MONTHS[d.month - 1]} {d.year}, {d:%Hh%M}"
+    try:
+        out += f" → {local(meta['ended_at']):%Hh%M}"
+    except (KeyError, ValueError, TypeError):
+        pass
+    if variant == "travail" and _dur(doc):
+        out += f" ({_dur(doc)} enregistrées)"
+    return out
+
+
+def _source_line(report: dict, doc: dict) -> str:
+    meta = doc.get("meta") or {}
+    srcs = {v.get("source") for v in (doc.get("speakers") or {}).values()}
+    plat = PLATFORM_FR.get(meta.get("platform"), "plateforme")
+    how = ", ".join(x for x, k in ((f"noms affichés par {plat}", "ui"), ("voix reconnues", "voice"),
+                                   ("noms saisis à la main", "manual")) if k in srcs) or "voix"
+    n_slides = len(doc.get("slides") or [])
+    drafted = [s["modele"] for s in report.get("steps") or [] if s["etape"] == "rédaction" and s.get("ok")]
+    ident = report.get("id") or meta.get("worker") or ""
+    parts = [f"transcription ({how})"]
+    if n_slides:
+        parts.append(f"{n_slides} écran{'s' if n_slides > 1 else ''} partagé{'s' if n_slides > 1 else ''} relu{'s' if n_slides > 1 else ''}")
+    if meta.get("offline"):
+        parts.append("transcription faite après coup")
+    parts.append(f"rédaction par {len(drafted)} modèle{'s' if len(drafted) > 1 else ''} puis confrontation et contrôle")
+    return f"OmniConf{' ' + ident if ident else ''} : " + ", ".join(parts)
+
+
+def report_sections_v2(report: dict, doc: dict, variant: str = "travail") -> list[tuple]:
+    """Format en note : en-tête, intervenants, résumé par sujet, décisions, actions, points ouverts ;
+    puis (fichier de travail) réserves sur la source et annexe technique. « diffusion » : sans les éléments
+    sur la source, les intervenants ni les réserves."""
+    cr, lab = report["cr"], report_labels(report, doc)
+    N = lambda x: names(x, lab)
+    meta, work = doc.get("meta") or {}, variant != "diffusion"
+    out = [("h1", N(cr.get("titre") or meta.get("title") or "Compte rendu de réunion"))]
+    rows = [("Date", _date_line(doc, variant))]
+    cal = meta.get("calendar") or {}
+    creneau = cr.get("creneau") or cal.get("title") or cal.get("subject")
+    if creneau:
+        rows.append(("Créneau", N(creneau)))
+    plat = PLATFORM_FR.get(meta.get("platform")) or meta.get("site") or meta.get("platform")
+    if plat or cr.get("outil"):
+        rows.append(("Outil", ", ".join(x for x in (plat, N(cr.get("outil") or "")) if x)))
+    if work:
+        rows.append(("Source", _source_line(report, doc)))
+        cov = cr.get("couverture") or {}
+        partial = cov.get("debut_manquant") or cov.get("fin_manquante")
+        what = " et ".join(x for x, k in (("début manquant", "debut_manquant"), ("fin manquante", "fin_manquante")) if cov.get(k))
+        why = "; ".join(x for x in [*(cov.get("service") or []), N(cov.get("commentaire") or "")] if x and x != "Séance complète")
+        rows.append(("Couverture", f"Partielle : {what}." + (f" {why}" if why else "") if partial
+                     else (why or "Séance complète.")))
+    out.append(("kv", [(k, v) for k, v in rows if v]))
+
+    # participants
+    inter = [x for x in cr.get("intervenants") or [] if isinstance(x, dict) and x.get("qui")]
+    cites = [N(x) for x in cr.get("cites") or [] if x]
+    if work:
+        if inter:
+            items = []
+            for it in inter:
+                who = N(it["qui"])
+                org = f" ({N(it['organisation'])})" if it.get("organisation") and str(it["organisation"]).lower() != "null" else ""
+                txt = f"{who}{org}" + (f" : {N(it['role'])}" if it.get("role") else "")
+                if it.get("justification"):
+                    txt += f". {N(it['justification'])}"
+                items.append(txt.replace("..", "."))
+            out += [("pb", ("Intervenants identifiés", "")), ("ul", items)]
+        if cites:
+            out.append(("pb", ("Cités : ", ", ".join(cites))))
+    else:
+        people = list(dict.fromkeys(N(it["qui"]) for it in inter if not re.match(r"^Intervenant \d+$", N(it["qui"]))))
+        if people:
+            out.append(("pb", ("Participants : ", ", ".join(people))))
+        if cites:
+            out.append(("pb", ("Cités : ", ", ".join(cites))))
+
+    # résumé par sujet
+    if cr.get("resume"):
+        out.append(("h2", "Résumé"))
+        for sj in cr["resume"]:
+            if not isinstance(sj, dict):
+                continue
+            title = N(sj.get("titre") or "").strip().rstrip(".")
+            blocks = _blocks(N(sj.get("texte") or ""))
+            if blocks and blocks[0][0] == "p":
+                out.append(("pb", (title + ". ", blocks[0][1])))
+                blocks = blocks[1:]
+            else:
+                out.append(("pb", (title + " :", "")))
+            out += blocks
+    out.append(("h2", "Décisions"))
+    if cr.get("decisions"):
+        out.append(("ul", [N(x.get("texte")) + (f" (porteur : {N(x['porteur'])})" if x.get("porteur") else "")
+                           + (f" — {x['statut']}" if x.get("statut") and x["statut"] != "actée" else "")
+                           + (_ts(x) if work else "") for x in cr["decisions"] if isinstance(x, dict)]))
+    else:
+        out.append(("p", "Aucune" + (f" : {N(cr['decisions_commentaire'])}" if cr.get("decisions_commentaire") else ".")))
+    if cr.get("actions"):
+        head = ["Action", "Porteur", "Échéance"] + (["Réf."] if work else [])
+        out += [("h2", "Actions"), ("table", head, [
+            [N(x.get("action")), N(x.get("responsable") or "non désigné"), N(x.get("echeance") or "non fixée")]
+            + ([_ts(x).strip(" []")] if work else []) for x in cr["actions"] if isinstance(x, dict)])]
+    if cr.get("points_ouverts"):
+        out += [("h2", "Points ouverts"), ("ul", [N(x.get("texte")) + (_ts(x) if work else "")
+                                                  for x in cr["points_ouverts"] if isinstance(x, dict)])]
+    if not work:
+        out.append(("footer", DIFFUSION_FOOTER))
+        return out
+
+    # réserves sur la source, puis annexe technique
+    res = [N(x.get("texte")) + _ts(x) for x in cr.get("reserves") or [] if isinstance(x, dict) and x.get("texte")]
+    ecarte = [N(x) for x in cr.get("ecarte") or [] if x]
+    if ecarte:
+        res.append("Non repris : " + " ; ".join(ecarte) + ".")
+    if res:
+        out += [("hr",), ("h3", "Réserves sur la source"), ("ol", res)]
+    st = report.get("stats") or []
+    out.append(("h2", "Annexe"))
+    if st:
+        agg: dict[str, list] = {}
+        for x in st:
+            a = agg.setdefault(lab.get(x["spk"], x["spk"]), [0, 0, 0])
+            a[0] += x["secs"]; a[1] += x["share"]; a[2] += x["turns"]
+        out += [("h3", "Temps de parole"), ("table", ["Intervenant", "Durée", "Part", "Interventions"],
+                                             [[n, fmt_t(a[0]), f"{a[1]} %", str(a[2])]
+                                              for n, a in sorted(agg.items(), key=lambda kv: -kv[1][0])])]
+    out += _method_sections(report, N)
+    return out
+
+
+def _method_sections(report: dict, N) -> list[tuple]:
+    out = [("h3", "Méthode et contrôle")]
+    steps = report.get("steps") or []
+    drafted = [s["modele"] for s in steps if s["etape"] == "rédaction" and s.get("ok")]
+    judge = next((s["modele"] for s in steps if s["etape"] == "confrontation" and s.get("ok")), None)
+    audit = next((s["modele"] for s in steps if s["etape"] == "contrôle" and s.get("ok")), None)
+    m = (f"Compte rendu généré automatiquement depuis la transcription (Whisper). Rédaction indépendante par "
+         f"{len(drafted)} modèle(s) : {', '.join(drafted)}")
+    if judge:
+        m += f" ; confrontation et arbitrage : {judge}"
+    elif len(drafted) > 1:
+        m += " ; confrontation non aboutie (délai dépassé) : le projet le plus complet a été retenu"
+    m += f" ; contrôle qualité : {audit}" if audit else ""
+    m += f". Généré le {local(report['generated_at']):%d/%m/%Y à %H:%M}. " \
+         "Les références [mm:ss] renvoient à l'enregistrement et à la transcription."
+    out.append(("note", m))
+    if report.get("arbitrages"):
+        out += [("h3", "Arbitrages entre les projets"), ("ul", [
+            f"{N(a.get('point'))} — retenu : {N(a.get('retenu'))}" + (f" ({N(a['justification'])})" if a.get("justification") else "")
+            for a in report["arbitrages"]])]
+    if report.get("corrections"):
+        out += [("h3", "Corrections du contrôle qualité"), ("ul", [
+            f"{N(c.get('element'))} : {N(c.get('probleme'))} → {N(c.get('correction'))}" for c in report["corrections"]])]
+    return out
+
+
 def _md_cell(s) -> str:
     return str(s or "").replace("|", "\\|").replace("\n", " ")
 
 
-def report_markdown(report: dict, doc: dict) -> str:
+def report_markdown(report: dict, doc: dict, variant: str = "travail") -> str:
     lines = []
-    for kind, *c in report_sections(report, doc):
+    for kind, *c in report_sections(report, doc, variant):
         if kind == "h1":
             lines += [f"# {c[0]}", ""]
         elif kind == "h2":
@@ -944,9 +1255,17 @@ def report_markdown(report: dict, doc: dict) -> str:
         elif kind == "p":
             lines += [c[0], ""]
         elif kind == "pb":
-            lines += [f"**{c[0][0].strip()}** {c[0][1]}", ""]
+            lines += [f"**{c[0][0].strip()}** {c[0][1]}".rstrip(), ""]
         elif kind == "ul":
             lines += [f"- {x}" for x in c[0]] + [""]
+        elif kind == "ol":
+            lines += [f"{i}. {x}" for i, x in enumerate(c[0], 1)] + [""]
+        elif kind == "kv":
+            lines += ["| | |", "|---|---|"] + [f"| **{k}** | {_md_cell(v)} |" for k, v in c[0]] + [""]
+        elif kind == "hr":
+            lines += ["---", ""]
+        elif kind == "footer":
+            lines += ["---", "", f"*{c[0]}*", ""]
         elif kind == "table":
             head, rows = c
             lines += ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
@@ -954,7 +1273,7 @@ def report_markdown(report: dict, doc: dict) -> str:
     return "\n".join(lines)
 
 
-def report_docx(report: dict, doc: dict) -> bytes:
+def report_docx(report: dict, doc: dict, variant: str = "travail") -> bytes:
     from docx import Document
     from docx.enum.table import WD_TABLE_ALIGNMENT
     from docx.oxml import OxmlElement
@@ -973,9 +1292,38 @@ def report_docx(report: dict, doc: dict) -> bytes:
         sh.set(qn("w:val"), "clear"), sh.set(qn("w:color"), "auto"), sh.set(qn("w:fill"), color)
         tc.append(sh)
 
-    for kind, *c in report_sections(report, doc):
+    for kind, *c in report_sections(report, doc, variant):
         if kind == "h1":
             d.add_heading(c[0], 0)
+        elif kind == "kv":
+            t = d.add_table(rows=0, cols=2)
+            t.style = "Table Grid"
+            for k, v in c[0]:
+                cells = t.add_row().cells
+                cells[0].text = ""
+                cells[0].paragraphs[0].add_run(k).bold = True
+                shade(cells[0], "DCE6F0")
+                cells[1].text = str(v or "")
+            for row in t.rows:
+                row.cells[0].width, row.cells[1].width = Pt(90), Pt(400)
+                for cell in row.cells:
+                    for p in cell.paragraphs:
+                        for run in p.runs:
+                            run.font.size = Pt(9.5)
+            d.add_paragraph()
+        elif kind == "ol":
+            for x in c[0]:
+                d.add_paragraph(x, style="List Number")
+        elif kind == "hr":
+            d.add_paragraph("―" * 30).alignment = 1
+        elif kind == "footer":
+            for s in d.sections:
+                fp = s.footer.paragraphs[0]
+                fp.text = c[0]
+                fp.alignment = 1
+                for run in fp.runs:
+                    run.font.size = Pt(8.5)
+                    run.font.color.rgb = RGBColor(0x55, 0x5F, 0x6D)
         elif kind in ("h2", "h3"):
             d.add_heading(c[0], 1 if kind == "h2" else 2)
         elif kind in ("meta", "note"):
@@ -989,7 +1337,8 @@ def report_docx(report: dict, doc: dict) -> bytes:
         elif kind == "pb":
             p = d.add_paragraph()
             p.add_run(c[0][0]).bold = True
-            p.add_run(c[0][1])
+            if c[0][1]:
+                p.add_run(c[0][1])
         elif kind == "ul":
             for x in c[0]:
                 d.add_paragraph(x, style="List Bullet")

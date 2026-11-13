@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Déploie des workers webconf en conteneurs Docker sur un hôte (VM Debian 12), depuis pve-00.
+# Sans couper de réunion : un assistant occupé (réunion, enregistrement, transcription, compte rendu) garde son
+# ancienne version et passe à la nouvelle dès qu'il est libre (webconf-update, toutes les minutes).
 # Un conteneur = un worker = une réunion à la fois. Réseau de l'hôte (WebRTC direct) :
 # chaque conteneur a ses propres ports (API, VNC) et son propre écran virtuel.
 #
@@ -84,7 +86,16 @@ for n in "${NAMES[@]}"; do
   PORTS="${PORTS:-} $api"
   WL="${WL:+$WL,}$n=http://$WORKER_URL_HOST:$api"
 done
-printf '%s\n' "$COMPOSE" | $SSH 'sudo tee /opt/webconf/compose.yml >/dev/null && cd /opt/webconf && sudo docker compose up -d --remove-orphans 2>&1 | tail -n +1 | grep -vE "^\s*$" | tail -4'
+# Mise à jour sans couper de réunion : on crée les conteneurs manquants sans toucher aux autres, puis
+# webconf-update ne recrée que les assistants LIBRES ; ceux en réunion sont mis à jour à la fin (minuteur).
+tar -C deploy/host -cf - webconf-update webconf-update.service webconf-update.timer | $SSH 'sudo tar -C /tmp -xf - &&
+  sudo install -m 755 /tmp/webconf-update /usr/local/sbin/webconf-update &&
+  sudo install -m 644 /tmp/webconf-update.service /tmp/webconf-update.timer /etc/systemd/system/ &&
+  sudo rm -f /tmp/webconf-update /tmp/webconf-update.service /tmp/webconf-update.timer &&
+  sudo systemctl daemon-reload && sudo systemctl enable -q --now webconf-update.timer'
+printf '%s\n' "$COMPOSE" | $SSH 'sudo tee /opt/webconf/compose.yml >/dev/null && cd /opt/webconf &&
+  { sudo docker compose up -d --no-recreate --remove-orphans 2>&1 | grep -E "Creat|Remov" | tail -4; true; } &&
+  sudo /usr/local/sbin/webconf-update --wait'
 
 echo "=== $HOST : pare-feu (API et VNC des workers réservés au contrôle)"
 # Table dédiée (pas de « flush ruleset » : les règles de Docker sont conservées)
@@ -112,6 +123,7 @@ sleep 20
 for n in "${NAMES[@]}"; do
   $SSH "sudo docker inspect -f '{{.Name}} {{.State.Status}} santé={{if .State.Health}}{{.State.Health.Status}}{{end}}' webconf-$n"
 done
+$SSH 'sudo /usr/local/sbin/webconf-update --status'
 echo
 echo "Ligne à ajouter à WORKERS dans /etc/webconf/control.env (VM de contrôle) :"
 echo "  $WL"

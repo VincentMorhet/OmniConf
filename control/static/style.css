@@ -531,3 +531,8 @@ dialog.dlg .row { flex-wrap: wrap; margin-top: 12px; }
   #player.page .modal-head > a.btn, #player.page .modal-head > button:not(.back):not(#playerPlay) { padding: 6px 9px; font-size: 13px; min-height: 34px; }
   #player.page #playerPlay { flex: 1 1 100%; order: 3; }
 }
+/* compte rendu en note (version 2) */
+.cr .kv table th { text-align: left; white-space: nowrap; color: var(--mute); font-weight: 600; width: 1%; }
+.cr .kv table td { text-align: left; }
+.cr .warn-t { color: var(--warn); font-weight: 600; }
+.cr ol { padding-left: 22px; }

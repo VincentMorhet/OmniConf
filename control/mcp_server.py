@@ -759,7 +759,8 @@ class MCP:
         models = {"drafting": [s["modele"] for s in steps if s.get("etape") == "rédaction" and s.get("ok")],
                   "arbitration": next((s["modele"] for s in steps if s.get("etape") == "confrontation" and s.get("ok")), None),
                   "quality_check": next((s["modele"] for s in steps if s.get("etape") == "contrôle" and s.get("ok")), None)}
-        hdr = {"id": id, "generated_at": local_iso(rep.get("generated_at")), "generation_secs": rep.get("secs"),
+        hdr = {"id": id, "format_version": rep.get("version") or 1,
+               "generated_at": local_iso(rep.get("generated_at")), "generation_secs": rep.get("secs"),
                "models": models, "chars": len(md), "next_cursor": str(nxt) if nxt < len(md) else None}
         return {"content": [{"type": "text", "text": json.dumps(hdr, ensure_ascii=False)},
                             {"type": "text", "text": part}]}

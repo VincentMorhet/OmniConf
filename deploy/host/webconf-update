@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Met à jour les assistants (conteneurs webconf-*) dont l'image ou les réglages ont changé, SEULEMENT s'ils sont
+# libres : un assistant en réunion, qui enregistre, transcrit, rédige un compte rendu ou lit des diapositives
+# attend la fin. Lancé par le déploiement, puis chaque minute (webconf-update.timer) pour les mises à jour différées.
+#   webconf-update            met à jour ce qui peut l'être
+#   webconf-update --status   montre seulement l'état (à jour / libre / occupé)
+set -uo pipefail
+cd /opt/webconf 2>/dev/null || exit 0
+[ -f compose.yml ] || exit 0
+# une seule exécution à la fois ; --wait (déploiement) attend la fin de celle en cours au lieu de passer son tour
+exec 9>/run/webconf-update.lock
+if [ "${1:-}" = --wait ]; then flock -w 300 9 || exit 1; shift; else flock -n 9 || exit 0; fi
+FILES="-f compose.yml"; [ -f compose.test.yml ] && FILES="$FILES -f compose.test.yml"   # essais : image :test
+COMPOSE="docker compose $FILES"
+# image voulue par service (compose.test.yml peut en changer pour certains)
+declare -A IMG
+while read -r svc img; do IMG[$svc]=$(docker image inspect -f '{{.Id}}' "$img" 2>/dev/null); done < <(
+  $COMPOSE config --format json 2>/dev/null | python3 -c 'import json,sys
+for k, v in json.load(sys.stdin)["services"].items(): print(k, v.get("image", ""))')
+
+busy() {   # occupé si l'assistant répond et n'est pas libre (sinon : arrêté ou en panne, on peut le recréer)
+  local n=$1 f=/etc/webconf/containers/$1.env port tok
+  port=$(sed -n 's/^AGENT_PORT=//p' "$f"); tok=$(sed -n 's/^AGENT_TOKEN=//p' "$f")
+  docker exec "webconf-$n" pgrep -f offline.py >/dev/null 2>&1 && { echo "transcription après coup"; return 0; }
+  python3 - "$port" "$tok" <<'PY'
+import json, sys, urllib.request
+port, tok = sys.argv[1], sys.argv[2]
+def get(p):
+    r = urllib.request.Request(f"http://127.0.0.1:{port}{p}", headers={"x-agent-token": tok})
+    return json.load(urllib.request.urlopen(r, timeout=8))
+try:
+    s = get("/status")
+except Exception:
+    sys.exit(1)                          # ne répond pas : pas de réunion à protéger
+why = []
+if s.get("state") != "idle":
+    why.append(f"état {s.get('state')}")
+if s.get("recording"):
+    why.append("enregistrement")
+if (s.get("transcript") or {}).get("active"):
+    why.append("transcription")
+try:
+    for x in get("/recordings"):
+        for k, lab in (("report_job", "compte rendu"), ("slides_job", "diapositives")):
+            if (x.get(k) or {}).get("state") == "running":
+                why.append(lab)
+except Exception:
+    pass
+if why:
+    print(", ".join(dict.fromkeys(why)))
+    sys.exit(0)
+sys.exit(1)
+PY
+}
+
+for svc in $($COMPOSE config --services 2>/dev/null); do
+  [ -n "${IMG[$svc]:-}" ] || continue
+  want="${IMG[$svc]} $($COMPOSE config --hash="$svc" 2>/dev/null | awk '{print $2}')"
+  cur=$(docker inspect -f '{{.Image}} {{index .Config.Labels "com.docker.compose.config-hash"}}' "webconf-$svc" 2>/dev/null || true)
+  if [ "$cur" = "$want" ]; then
+    [ "${1:-}" = --status ] && echo "$svc : à jour"
+    continue
+  fi
+  if [ -n "$cur" ] && why=$(busy "$svc"); then
+    echo "$svc : occupé ($why) : mise à jour à la fin de la réunion"
+    continue
+  fi
+  [ "${1:-}" = --status ] && { echo "$svc : mise à jour en attente (libre)"; continue; }
+  echo "$svc : mise à jour"
+  $COMPOSE up -d --no-deps "$svc" 2>&1 | grep -vE '^\s*$' | tail -2
+done

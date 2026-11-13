@@ -1,0 +1,7 @@
+[Unit]
+Description=OmniConf : mise à jour des assistants libres (ceux en réunion attendent la fin)
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/webconf-update
