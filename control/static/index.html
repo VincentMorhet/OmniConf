@@ -7,7 +7,9 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#0b1020">
 <link rel="manifest" href="/manifest.webmanifest">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ctext y=%22.9em%22 font-size=%2290%22%3E🎧%3C/text%3E%3C/svg%3E">
+<link rel="icon" type="image/svg+xml" href="/static/icons/favicon.svg">
+<link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-title" content="OmniConf">
 <title>OmniConf</title>
 <link rel="stylesheet" href="/static/style.css">
 <script>/* thème avant l'affichage (pas de flash) : choix mémorisé, sinon celui de l'appareil */
@@ -16,9 +18,47 @@
   document.querySelector('meta[name="theme-color"]').content = t === "light" ? "#f5f7fb" : "#0b1020"; })();</script>
 </head>
 <body>
+<svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+  <!-- logo : ondes de la voix -->
+  <symbol id="logo-bars" viewBox="0 0 24 24"><g fill="currentColor"><rect x="3" y="9" width="2.6" height="6" rx="1.3"/><rect x="7.4" y="6" width="2.6" height="12" rx="1.3"/><rect x="11.8" y="3" width="2.6" height="18" rx="1.3"/><rect x="16.2" y="7" width="2.6" height="10" rx="1.3"/><rect x="20.6" y="10" width="2.2" height="4" rx="1.1"/></g></symbol>
+  <symbol id="i-home" viewBox="0 0 24 24"><path d="M3.5 10.5 12 3.5l8.5 7"/><path d="M5.5 9v11h5v-6h3v6h5V9"/></symbol>
+  <symbol id="i-rec" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="3"/><path d="m10 9 5 3-5 3z"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 6.5h9M17 6.5h3M4 12h3M11 12h9M4 17.5h11M19 17.5h1"/><circle cx="15" cy="6.5" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="17.5" r="2"/></symbol>
+  <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4.5 20.5c.6-3.6 3.8-5.5 7.5-5.5s6.9 1.9 7.5 5.5"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M4.6 4.6 6 6M18 18l1.4 1.4M2.5 12h2M19.5 12h2M4.6 19.4 6 18M18 6l1.4-1.4"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.6A8.2 8.2 0 0 1 9.4 4 8.3 8.3 0 1 0 20 14.6z"/></symbol>
+  <symbol id="i-audio" viewBox="0 0 24 24"><path d="M4 15.5V12a8 8 0 0 1 16 0v3.5"/><rect x="3" y="14" width="4.5" height="7" rx="1.8"/><rect x="16.5" y="14" width="4.5" height="7" rx="1.8"/></symbol>
+  <symbol id="i-logout" viewBox="0 0 24 24"><path d="M14.5 4H18a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3.5"/><path d="M10 16.5 5.5 12 10 7.5M5.5 12H16"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="2.5"/><path d="M8.5 10.5V7.5a3.5 3.5 0 0 1 7 0v3"/></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15.5" r="4"/><path d="M11 12.5 20 3.5M17 6.5l2.5 2.5M14.5 9l2 2"/></symbol>
+  <symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8.5" r="3.5"/><path d="M2.5 20c.5-3.2 3.2-5 6.5-5s6 1.8 6.5 5"/><path d="M15.5 5a3.5 3.5 0 0 1 0 7M17.5 15.2c2.2.5 3.6 2.2 4 4.8"/></symbol>
+  <symbol id="i-wave" viewBox="0 0 24 24"><path d="M3 12h1.5M7 8.5v7M10.5 5v14M14 8v8M17.5 10v4M21 12h0"/></symbol>
+  <symbol id="i-book" viewBox="0 0 24 24"><path d="M5 19.5V5a2 2 0 0 1 2-2h12v15H7a2 2 0 0 0-2 2 2 2 0 0 0 2 2h12"/><path d="M9 7.5h6"/></symbol>
+  <symbol id="i-disk" viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9.5 6 6 6-6 6"/></symbol>
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="m14.5 6-6 6 6 6"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor"/></symbol>
+  <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5.5" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="18.5" cy="12" r="1.6" fill="currentColor"/></symbol>
+  <symbol id="i-share" viewBox="0 0 24 24"><path d="M12 15V3.5M7.5 8 12 3.5 16.5 8"/><path d="M5 12v6.5A2 2 0 0 0 7 20.5h10a2 2 0 0 0 2-2V12"/></symbol>
+  <symbol id="i-doc" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h6"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 19.5h14"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="11.5" height="11.5" rx="2.5"/><path d="M15.5 8.5V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7.5a2 2 0 0 0 2 2h2.5"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11.5a8 8 0 1 0-2.3 5.6M20 4.5v7h-7"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4.5 7h15M9.5 7V4.5h5V7M6.5 7l1 13h9l1-13"/></symbol>
+  <symbol id="i-slides" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12.5" rx="2"/><path d="M12 16.5V20M8.5 20h7"/></symbol>
+  <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 14a4.5 4.5 0 0 0 6.4 0l3-3a4.5 4.5 0 0 0-6.4-6.4l-1.2 1.2"/><path d="M14 10a4.5 4.5 0 0 0-6.4 0l-3 3a4.5 4.5 0 0 0 6.4 6.4l1.2-1.2"/></symbol>
+  <symbol id="i-hand" viewBox="0 0 24 24"><path d="M8 12.5V6a1.5 1.5 0 0 1 3 0v5.5M11 11V4.5a1.5 1.5 0 0 1 3 0V11M14 11V5.5a1.5 1.5 0 0 1 3 0v7"/><path d="M17 9.5a1.5 1.5 0 0 1 3 0V14a7 7 0 0 1-7 7h-1a7 7 0 0 1-5.6-2.8L3.6 15a1.6 1.6 0 0 1 2.5-2L8 15"/></symbol>
+  <symbol id="i-expand" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.5 2.6 3.6 5.5 3.6 8.5s-1.1 5.9-3.6 8.5c-2.5-2.6-3.6-5.5-3.6-8.5s1.1-5.9 3.6-8.5z"/></symbol>
+  <symbol id="i-mic-off" viewBox="0 0 24 24"><path d="M9 9v3a3 3 0 0 0 5.1 2.1M15 9.5V5.5a3 3 0 0 0-5.8-1"/><path d="M5.5 11.5a6.5 6.5 0 0 0 11 4.7M18.5 11.5c0 .7-.1 1.3-.3 1.9M12 18v3M3.5 3.5l17 17"/></symbol>
+  <symbol id="i-calendar" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M3.5 10h17M8 3v4M16 3v4"/></symbol>
+  <symbol id="i-sparkle" viewBox="0 0 24 24"><path d="M12 3.5 13.8 9l5.7 1.8-5.7 1.8L12 18l-1.8-5.4L4.5 10.8 10.2 9z"/><path d="M19 15.5l.8 2.2 2.2.8-2.2.8L19 21.5l-.8-2.2-2.2-.8 2.2-.8z"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h4.5L19.5 9 15 4.5 4 15.5z"/><path d="m12.8 6.7 4.5 4.5"/></symbol>
+</svg>
 <div id="login" class="hidden">
   <form id="loginForm" class="login-card">
-    <div class="logo big">◉</div>
+    <div class="logo big"><svg><use href="#logo-bars"/></svg></div>
     <h1>OmniConf</h1>
     <p class="tagline">Votre assistant de réunion : il écoute, transcrit et rédige le compte rendu.</p>
     <input type="text" id="loginId" placeholder="Identifiant" autocomplete="username" autocapitalize="none" spellcheck="false">
@@ -30,15 +70,13 @@
 
 <div id="app" class="hidden">
   <header class="top">
-    <a class="brand" href="#home"><span class="logo">◉</span><span>OmniConf</span></a>
+    <a class="brand" href="#home"><span class="logo"><svg><use href="#logo-bars"/></svg></span><span>OmniConf</span></a>
     <nav class="tabs">
-      <button data-tab="home" class="tab active"><span class="ico">🏠</span><span>Accueil</span><span id="liveBadge" class="count live hidden"></span></button>
-      <button data-tab="rec" class="tab"><span class="ico">📁</span><span>Enregistrements</span><span id="recCount" class="count hidden"></span></button>
+      <button data-tab="home" class="tab active"><svg class="i"><use href="#i-home"/></svg><span>Accueil</span><span id="liveBadge" class="count live hidden"></span></button>
+      <button data-tab="rec" class="tab"><svg class="i"><use href="#i-rec"/></svg><span>Enregistrements</span><span id="recCount" class="count hidden"></span></button>
+      <button data-tab="set" class="tab"><svg class="i"><use href="#i-settings"/></svg><span>Réglages</span></button>
     </nav>
-    <button id="themeBtn" class="ghost" title="Changer de thème">☀️</button>
-    <button id="audioBtn" class="ghost" title="Réglages audio : micro et sortie">🎚</button>
-    <button id="accountBtn" class="ghost account" title="Mon compte">👤 <span id="accountName"></span></button>
-    <button id="logout" class="ghost" title="Déconnexion">⎋</button>
+    <button id="accountBtn" class="avatar-btn" title="Mon compte"><span class="avatar" id="accountInitials"></span><span id="accountName"></span></button>
   </header>
 
   <!-- ============================================================ accueil -->
@@ -52,7 +90,7 @@
           <button class="primary" id="btnStart">Envoyer l'assistant</button>
         </div>
         <details id="opts">
-          <summary>Options</summary>
+          <summary><svg class="i"><use href="#i-settings"/></svg>Options : nom affiché, titre, enregistrement, planification</summary>
           <div class="opts-grid">
             <label>Nom affiché<input id="f-name" placeholder="Nom affiché"></label>
             <label>Code / mot de passe<input id="f-pass" placeholder="facultatif"></label>
@@ -77,7 +115,7 @@
       <h2 class="sec">Réunions en cours <span id="liveCount" class="pill hidden"></span></h2>
       <div id="liveGrid" class="tiles"></div>
       <div id="liveEmpty" class="empty-state hidden">
-        <div class="es-ico">☕</div>
+        <div class="es-ico"><svg class="i"><use href="#logo-bars"/></svg></div>
         <b>Aucune réunion en cours</b>
         <span>Collez un lien ci-dessus : un assistant rejoint la réunion, et elle apparaît ici.</span>
       </div>
@@ -112,7 +150,7 @@
       <button id="fLeave" class="danger" title="Faire quitter la réunion à l'assistant">🚪 Quitter</button>
       <span id="fCtl" class="fctl"></span>
       <button id="fCc" class="on" title="Afficher / masquer les sous-titres">💬 Sous-titres</button>
-      <button id="fHand" title="Prendre la main sur l'écran de l'assistant">🖐 Prendre la main</button>
+      <button id="fHand" title="Prendre la main sur l'écran de l'assistant"><svg class="i"><use href="#i-hand"/></svg><span>Prendre la main</span></button>
       <button id="fSide" class="on" title="Afficher / masquer le résumé de l'IA">🧠 Résumé</button>
       <button id="fFull" class="icon" title="Plein écran">⛶</button>
     </div>
@@ -127,22 +165,12 @@
     <aside id="fSidebox" class="fside"></aside>
   </main>
 
-  <!-- ============================================================ enregistrements -->
-  <main id="tab-rec" class="hidden">
-    <section class="card">
-      <h2>Enregistrements</h2>
-      <div class="rec-toolbar">
-        <input id="r-search" type="search" placeholder="🔍 Rechercher (titre, date…)">
-        <select id="r-platform"><option value="">Toutes plateformes</option><option value="teams">Teams</option>
-          <option value="zoom">Zoom</option><option value="web">Autres webconfs</option></select>
-        <select id="r-worker"><option value="">Tous les assistants</option></select>
-        <button id="refreshRec" title="Actualiser">↻</button>
-      </div>
-      <div id="storage" class="storage"></div>
-      <div id="recordings"></div>
-    </section>
-    <details class="card" id="mcpBox">
-      <summary><h2>🔑 Accès de Claude (MCP)</h2></summary>
+  <!-- ============================================================ réglages -->
+  <main id="tab-set" class="hidden">
+    <section class="page-head"><h1>Réglages</h1><p class="sub">Accès de Claude, lexique, comptes, consentements et stockage.</p></section>
+    <div class="settings">
+      <details class="card" id="mcpBox">
+      <summary><svg class="i"><use href="#i-key"/></svg><h2>Accès de Claude (MCP)</h2><svg class="i chev"><use href="#i-chevron"/></svg></summary>
       <p class="hint">Claude peut lister les réunions et lire transcriptions, comptes rendus, diapositives et audio,
         en lecture seule, avec un jeton qui lui est propre (révocable ici). Adresse du serveur : <code id="mcpUrl"></code></p>
       <p class="hint hidden" id="mcpCa">Le poste doit faire confiance au certificat de l'IHM :
@@ -158,9 +186,9 @@
           dans la variable d'environnement <code id="mcpNewVar">WEBCONF_TOKEN</code> (Paramètres › Variables d'environnement).</p>
         <div class="row"><input id="mcpNewTok" readonly spellcheck="false"><button id="mcpCopy">Copier</button><button id="mcpHide" class="ghost">Masquer</button></div>
       </div>
-    </details>
-    <details class="card hidden" id="usersBox">
-      <summary><h2>👥 Utilisateurs</h2></summary>
+      </details>
+      <details class="card hidden" id="usersBox">
+      <summary><svg class="i"><use href="#i-users"/></svg><h2>Utilisateurs</h2><svg class="i chev"><use href="#i-chevron"/></svg></summary>
       <p class="hint">Chacun voit les réunions qu'il a lancées, et celles qu'on partage avec lui ; un administrateur
         voit tout et gère les comptes. Un compte créé reçoit un mot de passe provisoire, à changer à la première
         connexion. Les réunions d'avant les comptes appartiennent aux administrateurs.</p>
@@ -171,21 +199,22 @@
         <select id="ua-role"><option value="user">Utilisateur</option><option value="admin">Administrateur</option></select>
         <button class="primary">+ Créer le compte</button>
       </form>
-    </details>
-    <details class="card hidden" id="voiceBox">
-      <summary><h2>🎙 Empreintes vocales : consentements</h2></summary>
+      </details>
+      <details class="card hidden" id="voiceBox">
+      <summary><svg class="i"><use href="#i-wave"/></svg><h2>Empreintes vocales : consentements</h2><svg class="i chev"><use href="#i-chevron"/></svg></summary>
       <p class="hint">Une empreinte vocale permet de reconnaître une personne à sa voix, même quand elle parle depuis
         le poste d'un autre. C'est une donnée biométrique : elle ne sera calculée que pour les personnes dont le
         consentement explicite est attesté ici. Décocher retire le consentement, et l'empreinte est alors effacée.</p>
+      <div id="vpStatus" class="vp-status"></div>
       <div id="voiceList"></div>
       <form id="voiceAdd" class="row">
         <input id="va-name" placeholder="Prénom Nom" required>
         <input id="va-note" placeholder="Note (facultatif)">
         <button class="primary">+ Ajouter</button>
       </form>
-    </details>
-    <details class="card" id="lexBox">
-      <summary><h2>📖 Lexique du projet</h2></summary>
+      </details>
+      <details class="card" id="lexBox">
+      <summary><svg class="i"><use href="#i-book"/></svg><h2>Lexique du projet</h2><svg class="i chev"><use href="#i-chevron"/></svg></summary>
       <p class="hint">Noms des personnes, mots mal reconnus (« entendu → correct »), sigles et registre des sujets.
         La transcription s'en sert (Whisper, mise en forme, noms des intervenants), ainsi que le compte rendu.
         Il est envoyé à tous les assistants dès l'enregistrement, et Claude le lit par MCP (get_lexicon).
@@ -197,7 +226,27 @@
         <span id="lexInfo" class="hint"></span>
         <button id="lexSave" class="primary">Enregistrer et envoyer aux assistants</button>
       </div>
-    </details>
+      </details>
+      <details class="card" id="storageBox">
+        <summary><svg class="i"><use href="#i-disk"/></svg><h2>Stockage des assistants</h2><svg class="i chev"><use href="#i-chevron"/></svg></summary>
+        <div id="storage" class="storage"></div>
+      </details>
+    </div>
+  </main>
+
+  <!-- ============================================================ enregistrements -->
+  <main id="tab-rec" class="hidden">
+    <section class="page-head"><h1>Enregistrements</h1></section>
+    <section class="rec-list">
+      <div class="rec-toolbar">
+        <input id="r-search" type="search" placeholder="Rechercher : titre, date, sujet…">
+        <select id="r-platform"><option value="">Toutes plateformes</option><option value="teams">Teams</option>
+          <option value="zoom">Zoom</option><option value="web">Autres webconfs</option></select>
+        <select id="r-worker"><option value="">Tous les assistants</option></select>
+        <button id="refreshRec" class="icon" title="Actualiser"><svg class="i"><use href="#i-refresh"/></svg></button>
+      </div>
+      <div id="recordings"></div>
+    </section>
   </main>
 </div>
 
@@ -207,7 +256,7 @@
       <span class="tstate"></span>
       <span class="plat"></span>
       <span class="ttime"></span>
-      <button class="tfollow" title="Suivre en grand dans un nouvel onglet : écran, sous-titres et résumé de l'IA">⛶ Suivre en grand</button>
+      <button class="tfollow" title="Suivre en grand dans un nouvel onglet : écran, sous-titres et résumé de l'IA"><svg class="i"><use href="#i-expand"/></svg>Suivre en grand</button>
     </div>
     <div class="tbody">
       <b class="ttitle"></b>
@@ -220,10 +269,10 @@
 <template id="tplWorker">
   <article class="worker meet hidden">
     <div class="mhead">
-      <button class="ghost back" title="Retour à l'accueil">←</button>
+      <button class="ghost back icon" title="Retour à l'accueil"><svg class="i"><use href="#i-back"/></svg></button>
       <div class="mtitle"><h2 class="wtitle"></h2><div class="winfo"></div></div>
       <span class="rec hidden">● REC <span class="rectime"></span></span>
-      <span class="trb hidden" title="Transcription en direct">📝</span>
+      <span class="trb hidden" title="Transcription en direct"><svg class="i"><use href="#i-doc"/></svg></span>
       <span class="badge"></span>
       <span class="wname" title="Assistant"></span>
     </div>
@@ -232,7 +281,7 @@
         <div class="screen">
           <img class="shot" alt="Écran de la réunion">
           <iframe class="vnc hidden" title="Écran interactif" allow="clipboard-read; clipboard-write"></iframe>
-          <span class="screen-hint">🖐 Cliquer pour prendre la main</span>
+          <span class="screen-hint">Toucher pour prendre la main</span>
           <div class="ended hidden"><b>Réunion terminée</b><span class="ended-txt"></span><button class="primary b-final">📋 Voir le compte rendu final</button></div>
         </div>
         <div class="wnote"></div>
@@ -243,26 +292,26 @@
           <input class="vol hidden" type="range" min="0" max="1" step="0.05" value="1" title="Volume">
           <meter class="lvl hidden" min="0" max="1" value="0"></meter>
         </div>
-        <button class="primary b-follow" title="Ouvre un nouvel onglet : écran en grand, sous-titres en direct et résumé de l'IA">⛶ Suivre en grand (nouvel onglet)</button>
+        <button class="primary b-follow" title="Ouvre un nouvel onglet : écran en grand, sous-titres en direct et résumé de l'IA"><svg class="i"><use href="#i-expand"/></svg>Suivre en grand</button>
         <div class="actions">
-          <button class="b-screen" title="Prendre la main sur l'écran de l'assistant (ici)">🖐 Prendre la main</button>
-          <button class="b-full icon" title="Ouvrir l'écran dans un nouvel onglet">⛶</button>
+          <button class="b-screen" title="Prendre la main sur l'écran de l'assistant (ici)"><svg class="i"><use href="#i-hand"/></svg>Prendre la main</button>
+          <button class="b-full icon" title="Ouvrir l'écran dans un nouvel onglet"><svg class="i"><use href="#i-expand"/></svg></button>
           <button class="b-rec">⏺ Enregistrer</button>
-          <button class="b-mute" title="Bascule le micro de l'assistant dans la réunion">🔇 Muet</button>
-          <button class="b-open" title="Ouvrir une page (ex : se connecter à son compte Teams ou Zoom)">🔑 Ouvrir une page</button>
+          <button class="b-mute" title="Bascule le micro de l'assistant dans la réunion"><svg class="i"><use href="#i-mic-off"/></svg>Muet</button>
+          <button class="b-open" title="Ouvrir une page (ex : se connecter à son compte Teams ou Zoom)"><svg class="i"><use href="#i-globe"/></svg>Ouvrir une page</button>
           <button class="danger b-leave">Quitter la réunion</button>
         </div>
       </div>
       <aside class="side tr-panel">
         <div class="vtabs">
-          <button class="vt on" data-v="an">🧠 Compte rendu en direct <span class="an-new hidden">nouveau</span></button>
-          <button class="vt" data-v="tr">📝 Transcription</button>
+          <button class="vt on" data-v="an">Compte rendu en direct <span class="an-new hidden">nouveau</span></button>
+          <button class="vt" data-v="tr">Transcription</button>
         </div>
         <div class="tr-head">
           <span class="tr-status"></span>
           <button class="an-now hidden" title="Mettre à jour le compte rendu tout de suite">↻ Mettre à jour</button>
           <button class="tr-toggle"></button>
-          <button class="tr-copy icon" title="Copier le texte">📋</button>
+          <button class="tr-copy icon" title="Copier le texte"><svg class="i"><use href="#i-copy"/></svg></button>
         </div>
         <div class="tr-spk"></div>
         <div class="tr-body hidden"></div>
@@ -276,23 +325,20 @@
   <div class="modal-body">
    <div class="pl-top">
     <div class="modal-head">
-      <button class="ghost back" title="Revenir aux enregistrements">←</button>
+      <button class="ghost back icon" title="Revenir aux enregistrements"><svg class="i"><use href="#i-back"/></svg></button>
       <div class="pl-title"><b id="playerTitle"></b><small id="playerInfo"></small></div>
-      <button id="playerPlay" class="primary hidden" title="Afficher le lecteur et lancer la vidéo">▶ Lire la vidéo</button>
-      <button class="ghost" onclick="openAudioPanel()" title="Sortie audio">🎚</button>
-      <a id="playerMd" class="btn hidden" download title="Transcription (Markdown)">📝 Texte</a>
-      <a id="playerDocx" class="btn hidden" download title="Compte rendu (Word)">📋 Word</a>
-      <a id="playerDl" class="btn" download>⬇ Vidéo</a>
-      <button id="playerSlides" class="hidden" title="Lire après coup les diapositives et documents partagés dans la vidéo">🖥 Lire les diapositives</button>
-      <button id="playerDel" class="danger" title="Supprimer cet enregistrement">🗑 Supprimer</button>
+      <div class="pl-actions">
+        <button id="playerPlay" class="primary hidden" title="Afficher le lecteur et lancer la vidéo">▶ Lire la vidéo</button>
+        <button id="playerShare" class="pl-share" title="Exporter, partager, supprimer…"><svg class="i"><use href="#i-share"/></svg><span>Exporter</span></button>
+      </div>
       <button class="ghost close" title="Fermer">✕</button>
     </div>
     <video controls playsinline preload="none"></video>
    </div>
     <div id="playerTabs" class="vtabs hidden">
-      <button class="vt on" data-v="tr">📝 Transcription</button>
-      <button class="vt" data-v="cr">📋 Compte rendu</button>
-      <button class="vt" data-v="an">🧠 Points d'étape</button>
+      <button class="vt" data-v="cr">Compte rendu</button>
+      <button class="vt on" data-v="tr">Transcription</button>
+      <button class="vt" data-v="an">Points d'étape</button>
     </div>
     <div id="playerSpk" class="tr-spk hidden"></div>
     <div id="playerTr" class="tr-body hidden"></div>
@@ -323,6 +369,44 @@
 <div id="toast"></div>
 <audio id="dummy" playsinline></audio>
 <!-- ============================================================ fenêtres -->
+<dialog id="dlgExport" class="dlg sheet">
+  <form method="dialog">
+    <div class="me-head"><div class="me-id"><b>Exporter et gérer</b><small id="exTitle"></small></div>
+      <button value="close" class="ghost icon close" title="Fermer"><svg class="i"><use href="#i-x"/></svg></button></div>
+    <div class="menu-list" id="exCr">
+      <a id="playerDocx" class="hidden" download><svg class="i"><use href="#i-doc"/></svg><span>Compte rendu (Word)<small>version de travail, avec les réserves</small></span></a>
+      <a id="exDiff" class="hidden" download><svg class="i"><use href="#i-doc"/></svg><span>Compte rendu à diffuser (Word)<small>sans réserves ni détails techniques</small></span></a>
+      <a id="exMdCr" class="hidden" download><svg class="i"><use href="#i-download"/></svg><span>Compte rendu (Markdown)</span></a>
+      <button type="button" id="exCopy" class="hidden"><svg class="i"><use href="#i-copy"/></svg><span>Copier le compte rendu</span></button>
+      <button type="button" id="exGen" class="hidden"><svg class="i"><use href="#i-refresh"/></svg><span id="exGenLabel">Régénérer le compte rendu</span></button>
+    </div>
+    <div class="menu-list">
+      <a id="playerMd" class="hidden" download><svg class="i"><use href="#i-download"/></svg><span>Transcription (texte)</span></a>
+      <a id="playerDl" download><svg class="i"><use href="#i-download"/></svg><span>Vidéo</span></a>
+      <button type="button" id="playerSlides" class="hidden"><svg class="i"><use href="#i-slides"/></svg><span>Lire les diapositives</span></button>
+      <button type="button" id="exAudio" onclick="openAudioPanel()"><svg class="i"><use href="#i-audio"/></svg><span>Sortie audio</span></button>
+    </div>
+    <div class="menu-list">
+      <button type="button" id="exShareRec" class="hidden"><svg class="i"><use href="#i-link"/></svg><span>Partager avec…</span></button>
+      <button type="button" id="exRename" class="hidden"><svg class="i"><use href="#i-edit"/></svg><span>Renommer</span></button>
+      <button type="button" id="playerDel" class="bad"><svg class="i"><use href="#i-trash"/></svg><span>Supprimer l'enregistrement</span></button>
+    </div>
+  </form>
+</dialog>
+<dialog id="dlgMe" class="dlg sheet">
+  <form method="dialog">
+    <div class="me-head"><span class="avatar big" id="meInitials"></span>
+      <div class="me-id"><b id="meName"></b><small id="meLogin"></small></div>
+      <button value="close" class="ghost icon close" title="Fermer"><svg class="i"><use href="#i-x"/></svg></button></div>
+    <div class="menu-list">
+      <button type="button" id="meProfile"><svg class="i"><use href="#i-edit"/></svg><span>Mon profil<small>nom dans les comptes rendus, nom de l'assistant</small></span><svg class="i chev"><use href="#i-chevron"/></svg></button>
+      <button type="button" id="mePw"><svg class="i"><use href="#i-lock"/></svg><span>Mot de passe</span><svg class="i chev"><use href="#i-chevron"/></svg></button>
+      <button type="button" id="themeBtn"><svg class="i"><use id="themeIco" href="#i-moon"/></svg><span id="themeLabel">Thème</span></button>
+      <button type="button" id="audioBtn"><svg class="i"><use href="#i-audio"/></svg><span>Micro et sortie audio</span><svg class="i chev"><use href="#i-chevron"/></svg></button>
+      <button type="button" id="logout" class="bad"><svg class="i"><use href="#i-logout"/></svg><span>Se déconnecter</span></button>
+    </div>
+  </form>
+</dialog>
 <dialog id="dlgAccount" class="dlg">
   <form method="dialog">
     <h2>👤 Mon compte</h2>

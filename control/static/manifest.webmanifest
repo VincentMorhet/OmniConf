@@ -1,2 +1,5 @@
-{"name":"WebConf","short_name":"WebConf","start_url":"/","display":"standalone",
- "background_color":"#0f1419","theme_color":"#0f1419","icons":[]}
+{"name": "OmniConf", "short_name": "OmniConf", "description": "Assistant de réunion : il écoute, transcrit et rédige le compte rendu.",
+ "start_url": "/", "scope": "/", "display": "standalone", "lang": "fr",
+ "background_color": "#0b1020", "theme_color": "#0b1020",
+ "icons": [{"src": "/static/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+           {"src": "/static/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}]}

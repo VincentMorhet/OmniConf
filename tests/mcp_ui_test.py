@@ -24,10 +24,10 @@ async def main():
         await page.fill("#pw", PW)
         await page.press("#pw", "Enter")
         await page.wait_for_selector("#app:not(.hidden)", timeout=15000)
-        await page.goto(BASE + "/#rec")
-        await page.wait_for_selector("#recordings .ritem", timeout=20000)
+        await page.goto(BASE + "/#reglages")
+        await page.wait_for_selector("#tab-set:not(.hidden)", timeout=20000)
         await page.click("#mcpBox > summary")
-        await page.wait_for_selector("#mcpTokens .tok", timeout=10000)
+        await page.wait_for_selector("#mcpTokens .tok, #mcpTokens small", timeout=10000)   # aucun jeton actif : possible
         n0 = await page.locator("#mcpTokens .tok").count()
         print("url :", await page.text_content("#mcpUrl"), "| jetons actifs :", n0,
               "| certificat :", await page.is_visible("#mcpCa"), (await page.text_content("#mcpCaFp"))[:23])
@@ -43,6 +43,8 @@ async def main():
         await page.wait_for_function(f"document.querySelectorAll('#mcpTokens .tok').length == {n0}")
         print("révoqué, jetons actifs :", await page.locator("#mcpTokens .tok").count())
         # CR final dans le menu ⋯ d'un enregistrement qui en a un
+        await page.goto(BASE + "/#rec")
+        await page.wait_for_selector("#recordings .ritem", timeout=20000)
         items = page.locator("#recordings .ritem")
         found = False
         for i in range(await items.count()):

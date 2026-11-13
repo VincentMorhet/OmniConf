@@ -65,6 +65,7 @@ DATA.mkdir(parents=True, exist_ok=True)
 SCHEDULE_FILE = DATA / "schedule.json"
 LEXICON_FILE = DATA / "lexicon.md"
 CONSENT_FILE = DATA / "voice_consents.json"   # consentements aux empreintes vocales (attestés par un administrateur)
+VOICEPRINT_FILE = DATA / "voiceprints.json"   # empreintes de référence (personnes consentantes seulement)
 USERS = Users(DATA / "users.json", admin_password=PASSWORD, admin_login=os.environ.get("ADMIN_LOGIN"),
               admin_name=os.environ.get("ADMIN_NAME"),
               bot_names=json.loads(os.environ["DEFAULT_NAMES"]) if os.environ.get("DEFAULT_NAMES") else None)   # lexique de l'installation (noms, corrections, sigles, registre), poussé aux workers
@@ -749,7 +750,7 @@ class ConsentSet(BaseModel):
 async def consents_list(u: dict = Depends(require_admin)):
     names = USERS.names()
     items = [{**x, "by_name": names.get(x.get("by"), x.get("by"))} for x in load_consents()]
-    return {"items": sorted(items, key=lambda x: x["name"].lower()), "attestation": CONSENT_TEXT}
+    return {"items": sorted(items, key=lambda x: (not x.get("consent"), x["name"].lower())), "attestation": CONSENT_TEXT}
 
 
 @app.post("/api/voice-consents")
@@ -783,10 +784,18 @@ async def consents_set(cid: str, body: ConsentSet, u: dict = Depends(require_adm
         x.update(consent=True, at=now, by=u["login"])
         x["history"].append({"at": now, "by": u["login"], "action": "consentement attesté", "texte": CONSENT_TEXT})
         log.info("consentement (empreinte vocale) de %s attesté par %s", x["name"], u["login"])
+        save_consents(items)
+        vp_start_build([x["name"]], u["login"])          # empreinte calculée tout de suite (tâche de fond)
+        return x
     elif body.consent is False and x["consent"]:
         x.update(consent=False, at=now, by=u["login"])
-        x["history"].append({"at": now, "by": u["login"], "action": "consentement retiré : empreinte à effacer"})
-        log.info("consentement (empreinte vocale) de %s retiré par %s", x["name"], u["login"])
+        save_consents(items)
+        gone = vp_forget(x["name"])                       # effacée du contrôle, puis des assistants
+        pushed = await voiceprints_push()
+        x["history"].append({"at": now, "by": u["login"], "action": "consentement retiré : empreinte effacée"
+                             + ("" if gone else " (aucune n'avait été calculée)")
+                             + f" ; assistants : {', '.join(f'{k} {v}' for k, v in pushed.items()) or 'aucun'}"})
+        log.info("consentement (empreinte vocale) de %s retiré par %s ; empreinte effacée", x["name"], u["login"])
     save_consents(items)
     return x
 
@@ -801,6 +810,165 @@ async def consents_delete(cid: str, u: dict = Depends(require_admin)):
         raise HTTPException(400, "retirer d'abord le consentement (décocher), puis supprimer la ligne")
     save_consents([i for i in items if i["id"] != cid])
     return {"ok": True}
+
+
+# ----------------------------------------------------------------------------- empreintes vocales de référence
+# Calculées par les assistants sur leurs enregistrements (phrases dont l'auteur est certain), moyennées ici, puis
+# renvoyées à chaque assistant : seulement pour les personnes dont le consentement est attesté (et coché).
+vp_state: dict = {"job": None}
+
+
+def vp_load() -> dict:
+    try:
+        return json.loads(VOICEPRINT_FILE.read_text())
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def vp_save(d: dict):
+    tmp = VOICEPRINT_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(d, ensure_ascii=False))
+    os.chmod(tmp, 0o600)
+    tmp.replace(VOICEPRINT_FILE)
+
+
+def vp_consented() -> list[str]:
+    return [x["name"] for x in load_consents() if x.get("consent")]
+
+
+def vp_forget(name: str) -> bool:
+    d = vp_load()
+    gone = d.pop(name, None) is not None
+    if gone:
+        vp_save(d)
+    return gone
+
+
+def vp_payload() -> dict:
+    """Empreintes envoyées aux assistants : personnes cochées au moment de l'envoi, rien d'autre."""
+    ok = set(vp_consented())
+    return {n: {k: p.get(k) for k in ("v", "sec", "n", "meetings", "built_at")} for n, p in vp_load().items() if n in ok}
+
+
+def vp_version(payload: dict) -> str | None:
+    """Même empreinte que worker/voiceprints.py (après arrondi à 6 décimales côté assistant)."""
+    if not payload:
+        return None
+    norm = {n: {"v": [round(float(x), 6) for x in p["v"]], "sec": float(p.get("sec") or 0), "n": int(p.get("n") or 0),
+                "meetings": int(p.get("meetings") or 0), "built_at": p.get("built_at")} for n, p in payload.items()}
+    return hashlib.sha1(json.dumps(norm, sort_keys=True).encode()).hexdigest()[:12]
+
+
+async def voiceprints_push(names=None) -> dict:
+    """Envoie l'ensemble des empreintes aux assistants qui n'ont pas la bonne version. {assistant: état}."""
+    payload = vp_payload()
+    want = vp_version(payload)
+    out = {}
+
+    async def one(n):
+        st = await worker_status(n)
+        if not st.get("online"):
+            out[n] = "injoignable"
+            return
+        if st.get("voiceprints") == want:
+            out[n] = "à jour"
+            return
+        try:
+            r = await http.put(wurl(n) + "/voiceprints", json={"prints": payload}, timeout=15)
+            out[n] = "à jour" if r.status_code < 400 else f"erreur {r.status_code}"
+        except Exception as e:
+            out[n] = f"erreur : {str(e)[:80]}"
+    await asyncio.gather(*(one(n) for n in (names or WORKERS)))
+    return out
+
+
+async def voiceprints_build(names: list[str], by: str):
+    """Demande le calcul à chaque assistant libre, fait la moyenne, enregistre puis diffuse."""
+    job = vp_state["job"]
+    owners = USERS.names()
+
+    async def one(n):
+        try:
+            r = await http.post(wurl(n) + "/voiceprints/extract", json={"names": names, "owners": owners}, timeout=15)
+            if r.status_code >= 400:
+                job["workers"][n] = "occupé (réunion en cours)" if r.status_code == 409 else f"erreur {r.status_code}"
+                return None
+            job["workers"][n] = "calcul en cours"
+            for _ in range(720):                     # 1 h au plus
+                await asyncio.sleep(5)
+                g = (await http.get(wurl(n) + "/voiceprints/extract", timeout=15)).json()
+                if g.get("state") == "done":
+                    job["workers"][n] = "terminé"
+                    return g.get("result") or {}
+                if g.get("state") in ("error", "fetched", None):
+                    job["workers"][n] = f"erreur : {g.get('error') or g.get('state')}"
+                    return None
+            job["workers"][n] = "trop long"
+        except Exception as e:
+            job["workers"][n] = f"injoignable ({str(e)[:60]})"
+        return None
+    results = await asyncio.gather(*(one(n) for n in WORKERS))
+    ok = set(vp_consented())          # consentement retiré pendant le calcul : rien n'est gardé
+    d = vp_load()
+    now = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    for name in names:
+        if name not in ok:
+            d.pop(name, None)
+            continue
+        tot, n, sec, meetings = None, 0, 0.0, set()
+        kinds: dict[str, int] = {}
+        for res in results:
+            r = (res or {}).get(name)
+            if not r or not r.get("n"):
+                continue
+            v = r["sum"]
+            tot = list(v) if tot is None else [a + b for a, b in zip(tot, v)]
+            n += r["n"]
+            sec += r.get("sec") or 0
+            meetings |= set(r.get("meetings") or {})
+            for k, c in (r.get("kinds") or {}).items():
+                kinds[k] = kinds.get(k, 0) + c
+        if tot is None:
+            job["people"][name] = "aucun passage sûr dans les enregistrements"
+            continue
+        norm = sum(x * x for x in tot) ** 0.5 or 1.0
+        d[name] = {"v": [x / norm for x in tot], "n": n, "sec": round(sec, 1), "meetings": len(meetings),
+                   "kinds": kinds, "built_at": now, "by": by}
+        job["people"][name] = f"{round(sec / 60, 1)} min de voix, {len(meetings)} réunion(s)"
+    vp_save(d)
+    job["push"] = await voiceprints_push()
+    job.update(state="done", ended=now)
+    log.info("empreintes vocales calculées : %s", job["people"])
+
+
+def vp_start_build(names: list[str], by: str) -> dict:
+    if vp_state["job"] and vp_state["job"].get("state") == "running":
+        return vp_state["job"]
+    names = [n for n in names if n in set(vp_consented())]
+    vp_state["job"] = {"state": "running", "names": names, "by": by, "workers": {}, "people": {},
+                       "started": dt.datetime.now().astimezone().isoformat(timespec="seconds")}
+    if names:
+        asyncio.create_task(voiceprints_build(names, by))
+    else:
+        vp_state["job"].update(state="done", ended=vp_state["job"]["started"])
+    return vp_state["job"]
+
+
+@app.get("/api/voiceprints")
+async def voiceprints_status(u: dict = Depends(require_admin)):
+    """Empreintes des personnes cochées (durées, réunions ; jamais les vecteurs) et diffusion aux assistants."""
+    d, ok = vp_load(), vp_consented()
+    st = await asyncio.gather(*(worker_status(n) for n in WORKERS))
+    want = vp_version(vp_payload())
+    return {"people": {n: ({k: d[n].get(k) for k in ("sec", "n", "meetings", "kinds", "built_at")} if n in d else None) for n in ok},
+            "workers": {x["name"]: ("injoignable" if not x.get("online") else "à jour" if x.get("voiceprints") == want
+                                    else "en attente") for x in st},
+            "job": vp_state["job"]}
+
+
+@app.post("/api/voiceprints/build")
+async def voiceprints_rebuild(u: dict = Depends(require_admin)):
+    return vp_start_build(vp_consented(), u["login"])
 
 
 # ----------------------------------------------------------------------------- lexique
@@ -843,12 +1011,22 @@ async def lexicon_push(names=None, force: bool = False) -> dict:
 
 
 async def lexicon_sync():
-    """Workers redémarrés ou recréés : ils retrouvent le lexique au plus tard 2 minutes après."""
+    """Workers redémarrés ou recréés : ils retrouvent le lexique et les empreintes vocales au plus tard 2 minutes
+    après (une empreinte effacée disparaît aussi d'un assistant qui était injoignable). Empreintes recalculées
+    chaque nuit (nouvelles réunions)."""
     while True:
         try:
             await lexicon_push()
         except Exception as e:  # pragma: no cover
             log.warning("lexique : %s", e)
+        try:
+            await voiceprints_push()
+            now = dt.datetime.now().astimezone()
+            last = (vp_state.get("job") or {}).get("started") or ""
+            if now.hour == 3 and not last.startswith(now.date().isoformat()) and vp_consented():
+                vp_start_build(vp_consented(), "nuit")
+        except Exception as e:  # pragma: no cover
+            log.warning("empreintes vocales : %s", e)
         await asyncio.sleep(120)
 
 

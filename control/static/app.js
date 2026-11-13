@@ -45,8 +45,8 @@ function applyTheme(t, save) {
   document.documentElement.dataset.theme = t;
   if (save) localStorage.theme = t;
   $('meta[name="theme-color"]').content = t === "light" ? "#f5f7fb" : "#0b1020";
-  const b = $("#themeBtn"); b.textContent = t === "light" ? "🌙" : "☀️";
-  b.title = t === "light" ? "Passer en thème noir" : "Passer en thème blanc";
+  $("#themeIco").setAttribute("href", t === "light" ? "#i-moon" : "#i-sun");
+  $("#themeLabel").textContent = t === "light" ? "Passer en thème sombre" : "Passer en thème clair";
 }
 applyTheme(document.documentElement.dataset.theme || "dark");
 $("#themeBtn").onclick = () => applyTheme(document.documentElement.dataset.theme === "light" ? "dark" : "light", true);
@@ -61,17 +61,18 @@ function showTab(tab) {
   if (tab.startsWith("enr/")) { recRoute = tab; tab = "rec"; }   // page d'un enregistrement (sur la liste)
   else if (tab.startsWith("m/")) { w = decodeURIComponent(tab.slice(2)); tab = cfg.workers.includes(w) ? "meet" : "home"; }
   else if (tab.startsWith("suivre/")) { w = decodeURIComponent(tab.slice(7)); tab = cfg.workers.includes(w) ? "focus" : "home"; }
-  if (!["home", "rec", "meet", "focus"].includes(tab)) tab = "home";
+  if (tab === "reglages") tab = "set";
+  if (!["home", "rec", "meet", "focus", "set"].includes(tab)) tab = "home";
   if (tab !== "meet" && tab !== "focus") w = null;
   if (tab !== "focus" || fName !== w) exitFocus();
   document.querySelectorAll(".tab").forEach(x => x.classList.toggle("active", x.dataset.tab === (tab === "meet" ? "home" : tab)));
-  ["home", "meet", "rec", "focus"].forEach(t => $("#tab-" + t).classList.toggle("hidden", tab !== t));
+  ["home", "meet", "rec", "focus", "set"].forEach(t => $("#tab-" + t).classList.toggle("hidden", tab !== t));
   const want = recRoute || (tab === "meet" ? "m/" + encodeURIComponent(w) : tab === "focus" ? "suivre/" + encodeURIComponent(w) : tab);
   if (location.hash !== "#" + want) history.replaceState(null, "", "#" + want);
   if (recRoute) openRecRoute(recRoute); else if (player.url) closePlayer(true);
   setCur(w);
   if (tab === "focus") enterFocus(w);
-  if (tab === "rec") loadRecordings();
+  if (tab === "rec" || tab === "set") loadRecordings();   // réglages : stockage
   if (tab === "home") { refreshShots(); loadRecordings(); }
   if (!recRoute) window.scrollTo(0, 0);
 }
@@ -161,7 +162,7 @@ function toggleVnc(name, on) {
   if (on === !f.classList.contains("hidden")) return;
   if (on) f.src = vncUrl(name); else f.src = "about:blank";
   f.classList.toggle("hidden", !on); el.classList.toggle("vnc-on", on);
-  const b = $(".b-screen", el); b.textContent = on ? "✋ Rendre la main" : "🖐 Prendre la main"; b.classList.toggle("on", on);
+  const b = $(".b-screen", el); b.innerHTML = `<svg class="i"><use href="#i-hand"/></svg>${on ? "Rendre la main" : "Prendre la main"}`; b.classList.toggle("on", on);
 }
 // Vue « réunion » d'un assistant (une par assistant, une seule affichée)
 function card(name) {
@@ -248,10 +249,11 @@ function render(st) {
   $(".winfo", el).innerHTML = info.join(" · ");
   $(".winfo", el).title = st.url || "";
   let note = "";
-  if (st.error) note = `<div class="e">⚠ ${esc(st.error)} — terminez à la main avec « 🖐 Prendre la main ».</div>`;
-  else if (st.note && st.state === "in_meeting") note = `<div class="n">ℹ ${esc(st.note.replace("« Écran »", "« 🖐 Prendre la main »"))}</div>`;
+  if (st.error) note = `<div class="e">⚠ ${esc(st.error)} — terminez à la main avec « Prendre la main ».</div>`;
+  else if (st.note && st.state === "in_meeting") note = `<div class="n">ℹ ${esc(st.note.replace("« Écran »", "« Prendre la main »"))}</div>`;
   $(".wnote", el).innerHTML = note;
-  $(".b-rec", el).textContent = st.recording ? "⏹ Arrêter l'enregistrement" : "⏺ Enregistrer";
+  $(".b-rec", el).innerHTML = st.recording ? "<i class=\"dot sq\"></i>Arrêter l'enregistrement" : "<i class=\"dot\"></i>Enregistrer";
+  el.classList.toggle("idle", !isBusy(st) && !st.recording);    // assistant libre : seulement les actions utiles
   $(".b-leave", el).disabled = !isBusy(st);
   $(".audio-ctl", el).classList.toggle("hidden", !isBusy(st) && !sessions[st.name]);
   $(".b-mute", el).disabled = st.state !== "in_meeting";
@@ -263,10 +265,10 @@ function render(st) {
   $(".ended-txt", el).textContent = !st.online ? "Il ne répond pas : vérifier le conteneur ou la VM."
     : taken ? "Il est utilisé par un autre utilisateur. Choisissez un autre assistant (ou « Automatique »)."
     : t.ended ? (tr.enabled && tr.file ? "Le compte rendu final est rédigé automatiquement (2 à 10 minutes)." : "L'enregistrement est dans « Enregistrements ».")
-    : "Collez un lien sur l'accueil pour l'envoyer en réunion, ou « 🔑 Ouvrir une page » pour vous connecter à un compte.";
+    : "Collez un lien sur l'accueil pour l'envoyer en réunion, ou « Ouvrir une page » pour vous connecter à un compte.";
   $(".b-final", el).classList.toggle("hidden", !final || taken);
   el.querySelectorAll(".ended button:not(.b-final)").forEach(x => x.disabled = taken);
-  $(".b-final", el).textContent = tr.file ? "📋 Voir le compte rendu final" : "▶ Voir l'enregistrement";
+  $(".b-final", el).textContent = tr.file ? "Voir le compte rendu final" : "Voir l'enregistrement";
   el.classList.toggle("offline", !st.online);
   $(".trb", el).classList.toggle("hidden", !tr.active);
   t.status = tr;
@@ -336,13 +338,13 @@ const fmtT = (sec) => { sec = Math.max(0, Math.floor(sec || 0)); const h = Math.
 // Intervenants : {id: {label, color, source}} ; alias = groupes de voix fusionnés (ancien id -> nouvel id)
 const spkOf = (sp, al, id) => { const seen = new Set(); while (al && al[id] && !seen.has(id)) { seen.add(id); id = al[id]; }
   return { id, ...(sp?.[id] || { label: id || "?", color: 1 }) }; };
-const SRC_FR = { ui: "nom affiché par la plateforme", voice: "reconnu à la voix", manual: "nommé à la main", me: "ta voix (IHM)" };
+const SRC_FR = { ui: "nom affiché par la plateforme", voice: "reconnu à la voix", manual: "nommé à la main", me: "ta voix (IHM)", voiceprint: "reconnu par son empreinte vocale (consentement attesté)" };
 function paraEl(p, opts = {}) {
   const el = document.createElement("p");
   if (opts.pending) el.className = "pending";
   el.dataset.spk = p.spk || ""; el.dataset.t = p.t;
   const ts = document.createElement("span"); ts.className = "ts" + (opts.seek ? " seek" : ""); ts.textContent = fmtT(p.t);
-  if (opts.seek) ts.onclick = () => opts.seek(p.t);
+  if (opts.seek) { ts.onclick = () => opts.seek(p.t); ts.title = "Écouter ce passage"; }
   const spk = document.createElement("span"); spk.className = "spk";
   spk.onclick = () => opts.rename && opts.rename(el.dataset.spk);
   el.append(ts, spk, document.createTextNode(p.text));
@@ -382,7 +384,7 @@ function renderChips(box, speakers, used, rename) {
   box.innerHTML = "";
   Object.entries(speakers || {}).filter(([id]) => used.has(id)).forEach(([id, s]) => {
     const b = document.createElement("button"); b.type = "button"; b.className = "chip c" + (s.color % 9);
-    b.innerHTML = `${esc(s.label)}<small>${s.source === "ui" ? "🖥" : s.source === "voice" ? "🔊" : s.source === "manual" ? "✏️" : ""}</small>`;
+    b.innerHTML = `${esc(s.label)}<small>${s.source === "ui" ? "🖥" : s.source === "voice" ? "🔊" : s.source === "manual" ? "✏️" : s.source === "voiceprint" ? "🎙" : ""}</small>`;
     b.title = (SRC_FR[s.source] || "") + " — cliquer pour renommer";
     b.onclick = () => rename(id);
     box.appendChild(b);
@@ -522,7 +524,7 @@ function exitFocus() {
 }
 function syncFocusButtons() {
   $("#fCc").classList.toggle("on", fCc); $("#fSide").classList.toggle("on", fSideOn);
-  $("#fHand").classList.toggle("on", fHand); $("#fHand").textContent = fHand ? "✋ Rendre la main" : "🖐 Prendre la main";
+  $("#fHand").classList.toggle("on", fHand); $("#fHand span").textContent = fHand ? "Rendre la main" : "Prendre la main";
   $("#fCaps").classList.toggle("off", !fCc);
 }
 function renderFocus(st) {
@@ -601,7 +603,8 @@ async function confirmLeave(name) {
 const parseT = (s) => { if (typeof s === "number") return s;
   const m = /^\s*(\d+):(\d{1,2})(?::(\d{1,2}))?\s*$/.exec(s || ""); if (!m) return null;
   return m[3] != null ? +m[1] * 3600 + +m[2] * 60 + +m[3] : +m[1] * 60 + +m[2]; };
-const tsH = (t) => { const v = parseT(t); return v == null ? "" : ` <span class="ts seek" data-t="${v}" title="Aller à ce passage">${fmtT(v)}</span>`; };
+const SEEK_LEAD = 3;   // secondes de marge avant l'horodatage cliqué
+const tsH = (t) => { const v = parseT(t); return v == null ? "" : ` <span class="ts seek" data-t="${v}" title="Écouter ce passage (la vidéo démarre ${SEEK_LEAD} s avant)">${fmtT(v)}</span>`; };
 // {S1} / {ME} dans les textes du LLM -> nom coloré de l'intervenant (suit les renommages)
 const whoH = (text, sp, al) => esc(typeof text === "string" ? text : text?.texte ?? text ?? "").replace(/\{(S\d+|ME)\}/g, (m, id) => {
   const s = spkOf(sp, al, id); return `<b class="who c${(s.color || 0) % 9}">${esc(s.label)}</b>`; });
@@ -1142,60 +1145,61 @@ async function openRecRoute(route) {
   if (!r) { toast("Enregistrement introuvable (supprimé, ou réservé à un autre utilisateur)", 4000); location.hash = "#rec"; return; }
   const url = recUrl(r);
   if (player.url === url) { if (o.tab) showPlayerView(o.tab); if (o.play) showVideo(true); return; }
-  openPlayer(url, r.meta?.title || r.name, r.name, { video: r.kind !== "transcript", transcript: r.transcript,
+  openPlayer(url, r.cr_title || r.meta?.title || r.name, r.name, { video: r.kind !== "transcript", transcript: r.transcript,
     report: r.report || !!r.report_job, tab: o.tab, recording: r.recording, play: o.play, rec: r });
 }
+const PLAT_FR = { teams: "Teams", zoom: "Zoom" };
 function recItem(r, started, opts = {}) {
   const url = `/api/recordings/${encodeURIComponent(r.worker)}/${encodeURIComponent(r.name)}`;
-  const el = document.createElement("div"); el.className = "ritem";
+  const el = document.createElement("div"); el.className = "ritem" + (opts.short ? " short" : "");
   const video = r.kind !== "transcript";
+  const plat = platOf(r) === "web" ? (r.meta?.site || siteOf(r.meta?.url || "") || "Web") : (PLAT_FR[platOf(r)] || platOf(r));
+  const when = (opts.short ? dayLabel(started) + " · " : "") + started.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+  const state = r.recording ? `<span class="chip live">● En cours</span>`
+    : r.report ? `<span class="chip ok">Compte rendu</span>`
+    : r.report_job?.state === "running" ? `<span class="chip run" title="${esc(r.report_job.step || "")}">Compte rendu en cours…</span>`
+    : r.transcript ? `<span class="chip">Transcription</span>` : `<span class="chip">Vidéo seule</span>`;
+  const owner = r.mine || !r.owner_name ? "" : `<span class="chip soft">${r.can_edit ? "" : "partagée par "}${esc(r.owner_name)}</span>`;
   el.innerHTML = `
-    <div class="thumb ${video ? "" : "tthumb"}">${video ? '<img loading="lazy" alt="">' : "📝"}
-      ${r.recording ? '<span class="live">● EN COURS</span>' : ""}
-      ${r.transcript && video ? `<span class="tr" title="Transcription${r.report ? " et compte rendu" : ""}${r.final_cr ? " (final déposé)" : ""} disponible">📝${r.report ? "📋" : ""}${r.final_cr ? "✅" : ""}</span>` : ""}
-      <span class="plat">${esc(platOf(r) === "web" ? (r.meta?.site || siteOf(r.meta?.url || "") || "web") : platOf(r))}</span>
-      ${r.duration != null ? `<span class="dur">${fmtSec(r.duration)}</span>` : ""}</div>
+    <div class="thumb ${video ? "" : "tthumb"}">${video ? '<img loading="lazy" alt="">' : '<svg class="i"><use href="#i-doc"/></svg>'}
+      ${r.duration != null ? `<span class="dur">${fmtSec(r.duration)}</span>` : ""}
+      ${video ? `<button class="play" title="Lire la vidéo" aria-label="Lire la vidéo"><svg class="i"><use href="#i-play"/></svg></button>` : ""}</div>
     <div class="rbody">
       <b class="rtitle"></b>
-      <small>${opts.short ? esc(dayLabel(started)) + " à " : ""}${started.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}${opts.short ? "" : ` · ${fmtSize(r.size)} · ${esc(r.worker)}`}</small>
-      ${ownerLine(r)}
-      <div class="ractions">
-        <button class="play">${video ? "▶ Lire" : "📝 Lire"}</button>
-        ${r.report ? `<button class="cr" title="Compte rendu">📋 Compte rendu</button>`
-          : r.report_job?.state === "running" ? `<button class="cr run" title="${esc(r.report_job.step || "")}">⏳ Compte rendu…</button>` : ""}
-        <button class="icon more" title="Télécharger, renommer, supprimer…" aria-haspopup="menu">⋯</button>
-      </div>
-      <div class="rmenu hidden" role="menu">
-        ${video ? `<a href="${url}?download=1" download="${esc(r.name)}">⬇ Télécharger la vidéo</a>` : ""}
-        ${r.transcript ? `<a href="${url}/transcript?fmt=md&download=1">📝 Télécharger la transcription</a>` : ""}
-        ${r.report ? `<a href="${url}/report?fmt=docx&download=1">📄 Compte rendu (Word)</a>` : ""}
-        ${r.final_cr ? `<a href="${url}/final?fmt=md" target="_blank" rel="noopener">✅ Compte rendu final (Markdown)</a>
-          <a href="${url}/final?fmt=pdf" target="_blank" rel="noopener">✅ Compte rendu final (PDF, s'il a été joint)</a>` : ""}
-        ${r.can_edit === false ? "" : `<button class="share">🔗 Partager…</button>
-        <button class="ren">✏️ Renommer</button>
-        <button class="del" ${r.recording ? "disabled title=\"Enregistrement en cours\"" : ""}>🗑 Supprimer</button>`}
-      </div>
+      <div class="rmeta">${esc(when)} · ${esc(plat)}${opts.short ? "" : ` · ${esc(r.worker)}`}</div>
+      <div class="rtags">${state}${r.final_cr ? `<span class="chip ok">CR final</span>` : ""}${owner}</div>
+    </div>
+    <button class="icon more" title="Télécharger, partager, renommer, supprimer…" aria-haspopup="menu"><svg class="i"><use href="#i-more"/></svg></button>
+    <div class="rmenu hidden" role="menu">
+      ${video ? `<a href="${url}?download=1" download="${esc(r.name)}">Télécharger la vidéo</a>` : ""}
+      ${r.transcript ? `<a href="${url}/transcript?fmt=md&download=1">Télécharger la transcription</a>` : ""}
+      ${r.report ? `<a href="${url}/report?fmt=docx&download=1">Compte rendu (Word)</a>` : ""}
+      ${r.final_cr ? `<a href="${url}/final?fmt=md" target="_blank" rel="noopener">Compte rendu final (Markdown)</a>
+        <a href="${url}/final?fmt=pdf" target="_blank" rel="noopener">Compte rendu final (PDF, s'il a été joint)</a>` : ""}
+      ${r.can_edit === false ? "" : `<button class="share">Partager avec…</button>
+      <button class="ren">Renommer</button>
+      <button class="del bad" ${r.recording ? "disabled title=\"Enregistrement en cours\"" : ""}>Supprimer</button>`}
     </div>`;
-  const title = r.meta?.title || r.name;
+  const title = r.cr_title || r.meta?.title || r.name;
   $(".rtitle", el).textContent = title; $(".rtitle", el).title = title;
   const img = $("img", el);
   if (img) { img.src = url + "/thumb" + (r.recording ? "?t=" + Date.now() : ""); img.onerror = () => img.remove(); }
   const play = (tab, video) => openRec(r, { tab, play: video });
   const menu = $(".rmenu", el);
   $(".more", el).onclick = (e) => { e.stopPropagation(); const open = menu.classList.contains("hidden"); closeMenus(); menu.classList.toggle("hidden", !open); };
-  menu.addEventListener("click", () => closeMenus());
-  $(".thumb", el).onclick = () => play(); $(".rtitle", el).onclick = () => play();
-  $(".play", el).onclick = () => play(undefined, video);   // « ▶ Lire » : la page, vidéo lancée
-  if ($(".cr", el)) $(".cr", el).onclick = () => play("cr");
+  menu.addEventListener("click", (e) => { e.stopPropagation(); closeMenus(); });
+  el.onclick = () => play();                                     // toute la carte : compte rendu d'abord
+  if ($(".play", el)) $(".play", el).onclick = (e) => { e.stopPropagation(); play(undefined, video); };   // lecture immédiate
   if ($(".share", el)) $(".share", el).onclick = () => shareRecording(r, title);
-  if ($(".ren", el)) $(".ren", el).onclick = async () => {
-    const t = prompt("Nouveau titre :", title);
-    if (!t || t === title) return;
-    try { await api(url, { method: "PATCH", json: { title: t } }); loadRecordings(); } catch (e) { toast(e.message); }
-  };
+  if ($(".ren", el)) $(".ren", el).onclick = () => renameRecording(url, r.meta?.title || r.name);
   if ($(".del", el)) $(".del", el).onclick = () => deleteRecording(url, title);
   if (opts.short) el.querySelectorAll(".more, .rmenu").forEach(x => x.remove());
   return el;
+}
+async function renameRecording(url, title) {
+  const t = prompt("Nouveau titre :", title);
+  if (!t || t === title) return false;
+  try { await api(url, { method: "PATCH", json: { title: t } }); loadRecordings(); return true; } catch (e) { toast(e.message); return false; }
 }
 // Menu « ⋯ » des vignettes : un seul ouvert à la fois, fermé au moindre clic ailleurs
 function closeMenus() { document.querySelectorAll(".rmenu:not(.hidden)").forEach(m => m.classList.add("hidden")); }
@@ -1228,11 +1232,11 @@ $("#refreshRec").onclick = loadRecordings;
 let player = { url: null, doc: null, rep: null, seek: null };
 async function openPlayer(url, title, file, o = { video: true }) {
   const v = $("#player video"), pl = $("#player"), box = $("#playerTr");
-  player = { url, doc: null, rep: null, seek: null, view: o.transcript ? (o.tab || "tr") : null, title };
+  player = { url, doc: null, rep: null, seek: null, view: o.transcript ? (o.tab || "tr") : null, title, rec: o.rec };
   $("#playerTitle").textContent = title;
   $("#playerDel").disabled = !!o.recording; $("#playerDel").title = o.recording ? "Enregistrement en cours" : "Supprimer cet enregistrement";
   $("#playerSlides").classList.toggle("hidden", !o.video || !!o.recording);
-  $("#playerSlides").disabled = false; $("#playerSlides").textContent = "🖥 Lire les diapositives";
+  $("#playerSlides").disabled = false; $("#playerSlides span").textContent = "Lire les diapositives";
   $("#playerDl").classList.toggle("hidden", !o.video);
   $("#playerDl").href = url + "?download=1"; $("#playerDl").setAttribute("download", file);
   $("#playerMd").classList.toggle("hidden", !o.transcript);
@@ -1254,11 +1258,13 @@ async function openPlayer(url, title, file, o = { video: true }) {
   pl.classList.remove("hidden"); pl.scrollTop = 0;
   if (o.play) showVideo(true);
   if (!o.transcript) { box.classList.remove("hidden"); box.innerHTML = `<p class="empty">Pas de transcription pour cet enregistrement${o.video ? " : « ▶ Lire la vidéo » pour le regarder" : ""}.</p>`; return; }
-  // horodatage cliqué : dans la vidéo si elle est ouverte, sinon au passage de la transcription
+  // horodatage cliqué : la vidéo s'ouvre et démarre SEEK_LEAD s avant, pour entendre la phrase entière ;
+  // sans vidéo, on montre le passage dans la transcription
   const seek = (t) => {
-    if (player.videoOn) { v.currentTime = Math.max(0, t - 1); v.play().catch(() => { }); return; }
-    showPlayerView("tr"); let best = null; box.querySelectorAll(":scope > p").forEach(p => { if (+p.dataset.t <= t + 1) best = p; });
-    if (best) { best.scrollIntoView({ block: "center" }); best.classList.add("hl"); setTimeout(() => best.classList.remove("hl"), 2500); } };
+    if (player.hasVideo) { showVideo(true, Math.max(0, t - SEEK_LEAD)); if (player.view !== "tr") return; }
+    else showPlayerView("tr");
+    let best = null; box.querySelectorAll(":scope > p").forEach(p => { if (+p.dataset.t <= t + 1) best = p; });
+    if (best) { if (!player.hasVideo) best.scrollIntoView({ block: "center" }); best.classList.add("hl"); setTimeout(() => best.classList.remove("hl"), 2500); } };
   player.seek = seek;
   try {
     const doc = await api(url + "/transcript");
@@ -1284,6 +1290,34 @@ async function openPlayer(url, title, file, o = { video: true }) {
   } catch (e) { box.textContent = "Transcription indisponible : " + e.message; }
   loadPlayerReport(url);
 }
+// Page d'un enregistrement : feuille « Exporter » (exports du compte rendu, vidéo, partage, suppression)
+$("#playerShare").onclick = () => {
+  const d = player.rep || {}, rep = d.report, r = player.rec || {}, running = d.job?.state === "running";
+  $("#exTitle").textContent = player.title || "";
+  for (const id of ["#playerDocx", "#exDiff", "#exMdCr", "#exCopy"]) $(id).classList.toggle("hidden", !rep);
+  $("#exDiff").classList.toggle("hidden", !rep || (rep.version || 1) < 2);
+  $("#exDiff").href = player.url + "/report?fmt=docx&variant=diffusion&download=1";
+  $("#exMdCr").href = player.url + "/report?fmt=md&download=1";
+  $("#exGen").classList.toggle("hidden", !player.doc || running || d.live || r.can_edit === false);
+  $("#exGenLabel").textContent = rep ? "Régénérer le compte rendu" : "Générer le compte rendu";
+  $("#exShareRec").classList.toggle("hidden", !r.worker || r.can_edit === false);
+  $("#exRename").classList.toggle("hidden", !r.worker || r.can_edit === false);
+  $("#playerDel").classList.toggle("hidden", r.can_edit === false);
+  $("#dlgExport").showModal();
+};
+$("#exCopy").onclick = () => { const c = $("#playerCr").cloneNode(true); c.querySelector(".cr-bar")?.remove(); c.querySelector(".method")?.remove(); copyText(c.innerText); $("#dlgExport").close(); };
+$("#exGen").onclick = async () => {
+  if (player.rep?.report && !confirm("Régénérer le compte rendu ? (l'actuel sera remplacé)")) return;
+  $("#dlgExport").close();
+  try { await api(player.url + "/report", { method: "POST" }); showPlayerView("cr"); loadPlayerReport(player.url); } catch (e) { toast(e.message, 4000); }
+};
+$("#exShareRec").onclick = () => { $("#dlgExport").close(); if (player.rec) shareRecording(player.rec, player.title); };
+$("#exRename").onclick = async () => {
+  $("#dlgExport").close();
+  if (await renameRecording(player.url, player.rec?.meta?.title || player.title)) closePlayer();
+};
+for (const id of ["#playerDocx", "#exDiff", "#exMdCr", "#playerMd", "#playerDl", "#playerSlides", "#exAudio", "#playerDel"])
+  $(id).addEventListener("click", () => $("#dlgExport").close());
 function showPlayerView(v) {
   if (v) player.view = v;
   const cur = player.view;
@@ -1312,10 +1346,7 @@ function paintPlayerCr() {
   if (running) bar += `<span class="run">⏳ ${esc(job.step || "génération")}…</span>`;
   else if (job.state === "error") bar += `<span class="err">⚠ ${esc(job.error || "échec")}</span>`;
   else if (job.state === "skipped") bar += `<span class="meta">${esc(job.error || "")}</span>`;
-  if (!running && !d.live) bar += `<button class="cr-gen" title="Relance la rédaction multi-modèles (ex. après avoir renommé les intervenants : les noms se mettent déjà à jour tout seuls)">${d.report ? "↻ Régénérer" : "📋 Générer le compte rendu"}</button>`;
-  if (d.report) bar += `<a class="btn" href="${player.url}/report?fmt=docx&download=1">⬇ Word</a><a class="btn" href="${player.url}/report?fmt=md&download=1">⬇ Markdown</a>`
-    + ((d.report.version || 1) >= 2 ? `<a class="btn" href="${player.url}/report?fmt=docx&variant=diffusion&download=1" title="Sans les intervenants, les réserves ni la méthode : à envoyer aux participants">⬇ Word (diffusion)</a>` : "")
-    + `<button class="cr-copy">📋 Copier</button>`;
+  if (!running && !d.live && !d.report) bar += `<button class="cr-gen primary">Générer le compte rendu</button>`;
   bar += "</div>";
   let body = "";
   if (d.report) body = reportHtml(d.report, playerSpeakers(), d.meta, d.labels);
@@ -1341,14 +1372,21 @@ async function loadPlayerReport(url) {
     if (d.job?.state === "running") loadPlayerReport._t = setTimeout(() => player.url === url && loadPlayerReport(url), 4000);
   } catch (e) { if (player.url === url) $("#playerCr").innerHTML = `<p class="empty">Compte rendu indisponible : ${esc(e.message)}</p>`; }
 }
-function showVideo(on) {
+// at : position de départ en secondes (horodatage cliqué) ; sans at, reprise là où on en était.
+// play() est appelé tout de suite (geste de l'utilisateur, exigé par iOS) ; la position est posée
+// dès que la durée est connue (une vidéo pas encore chargée ignore currentTime).
+function showVideo(on, at) {
   const v = $("#player video"), pl = $("#player");
   if (!player.hasVideo) return;
   player.videoOn = on;
   if (on) {
-    if (!v.getAttribute("src")) { v.src = player.url; applySink(v); }
+    if (!v.getAttribute("src")) { v.preload = "metadata"; v.src = player.url; applySink(v); v.load(); }
+    if (at != null) {
+      const url = player.url, go = () => { if (player.url !== url) return; try { v.currentTime = Math.min(at, Math.max(0, (v.duration || at + 1) - 0.5)); } catch (e) { } };
+      if (v.readyState >= 1) go(); else v.addEventListener("loadedmetadata", go, { once: true });
+    }
     pl.classList.remove("novid"); v.play().catch(() => { });
-    pl.scrollTo({ top: 0, behavior: "smooth" });
+    if (at == null) pl.scrollTo({ top: 0, behavior: "smooth" });
   } else { v.pause(); pl.classList.add("novid"); }
   $("#playerPlay").textContent = on ? "⏸ Masquer la vidéo" : "▶ Lire la vidéo";
 }
@@ -1374,8 +1412,8 @@ $("#playerSlides").onclick = async () => {
     try {
       const r = (await api("/api/recordings")).find(x => x.worker === decodeURIComponent(w) && x.name === decodeURIComponent(f));
       const j = r?.slides_job || {};
-      if (j.state === "running") { b.textContent = `⏳ ${j.step || ""} · ${j.n || 0} diapositive${(j.n || 0) > 1 ? "s" : ""}`; return setTimeout(poll, 4000); }
-      b.disabled = false; b.textContent = "🖥 Lire les diapositives";
+      if (j.state === "running") { $("span", b).textContent = `${j.step || "Lecture"} · ${j.n || 0} diapositive${(j.n || 0) > 1 ? "s" : ""}`; return setTimeout(poll, 4000); }
+      b.disabled = false; $("span", b).textContent = "Lire les diapositives";
       if (j.state === "error") return toast("Lecture des diapositives : " + (j.error || "échec"), 6000);
       toast(j.n ? `${j.n} diapositive${j.n > 1 ? "s" : ""} lue${j.n > 1 ? "s" : ""} : elles sont dans la transcription. Régénérez le compte rendu pour qu'il en tienne compte.` : "Aucune diapositive ni document partagé trouvé dans cette vidéo.", 7000);
       const r2 = recItems.find(x => x.worker === decodeURIComponent(w) && x.name === decodeURIComponent(f)) || r;
@@ -1392,8 +1430,10 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !documen
 let timers = [];
 
 // ------------------------------------------------------------------ comptes
+const initials = (n) => String(n || "?").split(/[\s.@_-]+/).filter(Boolean).slice(0, 2).map(w => w[0].toUpperCase()).join("");
 function applyAccount() {
   $("#accountName").textContent = me.name || me.login;
+  $("#accountInitials").textContent = initials(me.name || me.login);
   $("#accountBtn").title = `Mon compte (${me.login}${me.admin ? ", administrateur" : ""})`;
   $("#usersBox").classList.toggle("hidden", !me.admin);
   $("#voiceBox").classList.toggle("hidden", !me.admin);
@@ -1412,13 +1452,23 @@ $("#secCopy").onclick = async () => { try { await navigator.clipboard.writeText(
 $("#dlgSecret").addEventListener("close", () => { $("#secValue").value = ""; });
 
 // Mon compte : nom, noms de l'assistant, mot de passe
+// Mon compte : feuille (profil, mot de passe, thème, audio, déconnexion)
 $("#accountBtn").onclick = () => {
+  $("#meInitials").textContent = initials(me.name || me.login);
+  $("#meName").textContent = me.name || me.login;
+  $("#meLogin").textContent = me.login + (me.admin ? " · administrateur" : "");
+  $("#dlgMe").showModal();
+};
+$("#mePw").onclick = () => { $("#dlgMe").close(); askPassword(false); };
+$("#meProfile").onclick = () => {
+  $("#dlgMe").close();
   $("#acLogin").textContent = `Identifiant : ${me.login}${me.admin ? " · administrateur" : ""}`;
   $("#acFull").value = me.name || "";
   const b = me.bot_names || {};
   $("#acBotTeams").value = b.teams || ""; $("#acBotZoom").value = b.zoom || ""; $("#acBotWeb").value = b.web || "";
   $("#dlgAccount").showModal();
 };
+for (const id of ["#audioBtn", "#logout"]) $(id).addEventListener("click", () => $("#dlgMe").close(), true);
 $("#acPw").onclick = () => { $("#dlgAccount").close(); askPassword(false); };
 $("#dlgAccount").addEventListener("close", async () => {
   if ($("#dlgAccount").returnValue !== "save") return;
@@ -1517,16 +1567,37 @@ $("#usersBox").addEventListener("toggle", () => { if ($("#usersBox").open) loadU
 
 // Empreintes vocales : consentements attestés sur l'honneur par un administrateur
 let consentTarget = null, consentText = "";
+const fmtMin = (sec) => sec >= 90 ? `${(sec / 60).toLocaleString("fr-FR", { maximumFractionDigits: 1 })} min` : `${Math.round(sec)} s`;
+function vpLine(name, vp) {
+  if (!vp) return "";
+  const job = vp.job, p = vp.people?.[name];
+  if (job?.state === "running" && job.names?.includes(name)) return `<small class="vp">⏳ empreinte vocale : calcul en cours…</small>`;
+  if (p) return `<small class="vp ok">🎙 empreinte vocale active : ${fmtMin(p.sec)} de voix sûre, ${p.meetings} réunion${p.meetings > 1 ? "s" : ""}`
+    + (p.sec < 60 ? " (trop peu pour reconnaître : une minute au moins)" : "") + `, calculée le ${new Date(p.built_at).toLocaleDateString("fr-FR")}</small>`;
+  return `<small class="vp">🎙 empreinte vocale : pas encore de passage sûr (réunion où cette personne parle avec sa propre vignette, ou nommée à la main) ; recalcul chaque nuit</small>`;
+}
+let vpPoll = null;
 async function loadConsents() {
   const box = $("#voiceList");
   try {
-    const d = await api("/api/voice-consents");
+    const [d, vp] = await Promise.all([api("/api/voice-consents"), api("/api/voiceprints").catch(() => null)]);
     consentText = d.attestation;
+    const st = $("#vpStatus"), job = vp?.job, n = Object.keys(vp?.people || {}).length;
+    const active = Object.values(vp?.people || {}).filter(p => p && p.sec >= 60).length;
+    st.innerHTML = !vp || !n ? "" : `<div class="row"><small>${job?.state === "running" ? "⏳ Calcul des empreintes en cours sur les assistants…"
+      : `${active} empreinte${active > 1 ? "s" : ""} active${active > 1 ? "s" : ""} sur ${n} personne${n > 1 ? "s" : ""} cochée${n > 1 ? "s" : ""}. Assistants : `
+        + Object.entries(vp.workers || {}).map(([w, s]) => `${esc(w)} ${esc(s)}`).join(", ")}</small>
+      <button type="button" class="ghost" id="vpBuild" ${job?.state === "running" ? "disabled" : ""}><svg class="i"><use href="#i-refresh"/></svg>Recalculer</button></div>`;
+    if ($("#vpBuild")) $("#vpBuild").onclick = async () => {
+      try { await api("/api/voiceprints/build", { method: "POST" }); toast("Calcul des empreintes lancé"); } catch (e) { toast(e.message); }
+      loadConsents(); };
+    clearTimeout(vpPoll);
+    if (job?.state === "running" && $("#voiceBox").open) vpPoll = setTimeout(loadConsents, 5000);
     box.innerHTML = d.items.length ? d.items.map(x => `<div class="user consent" data-id="${esc(x.id)}">
       <label class="ck"><input type="checkbox" ${x.consent ? "checked" : ""}> <b>${esc(x.name)}</b></label>
       <div class="who"><small>${x.consent ? `✅ consentement attesté le ${new Date(x.at).toLocaleString("fr-FR")} par ${esc(x.by_name || x.by)}`
         : x.at ? `retiré le ${new Date(x.at).toLocaleString("fr-FR")}` : "en attente du consentement"}</small>
-        ${x.note ? `<small>📝 ${esc(x.note)}</small>` : ""}</div>
+        ${x.note ? `<small>📝 ${esc(x.note)}</small>` : ""}${x.consent ? vpLine(x.name, vp) : ""}</div>
       ${x.consent ? "" : `<button class="ghost danger remove" title="Retirer de la liste">🗑</button>`}</div>`).join("")
       : "<small>Personne pour l'instant.</small>";
     box.querySelectorAll(".consent").forEach(row => {

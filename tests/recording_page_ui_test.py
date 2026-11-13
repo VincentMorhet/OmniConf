@@ -24,6 +24,29 @@ async def vstate(pg):
       return {shown: getComputedStyle(v).display !== 'none', src: !!v.getAttribute('src'), paused: v.paused, t: v.currentTime}; }""")
 
 
+async def seek_check(pg, box, w, where, nth=0, viewport_h=None):
+    """Clic sur un horodatage : vidéo affichée, lancée, à t − 3 s (marge pour entendre la phrase)."""
+    ts = pg.locator(f"{box} .ts.seek")
+    n = await ts.count()
+    if not n:
+        check(False, f"[{w}] horodatage ({where}) : aucun dans la page")
+        return
+    el = ts.nth(nth if nth >= 0 else n + nth)
+    t = await el.evaluate("e => +(e.dataset.t || e.closest('[data-t]')?.dataset.t || NaN)")
+    await el.scroll_into_view_if_needed(); await el.click()
+    try:
+        await pg.wait_for_function("() => { const v = document.querySelector('#player video'); return !v.paused && v.currentTime > 0 && v.readyState >= 2; }", timeout=15000)
+    except Exception:
+        pass
+    v = await vstate(pg)
+    want = max(0, t - 3)
+    check(v["shown"] and not v["paused"] and want - 0.5 <= v["t"] <= want + 2.5,
+          f"[{w}] horodatage {t:.0f} s ({where}) : vidéo lancée à {v['t']:.1f} s (attendu ≈ {want:.0f} s)")
+    if viewport_h:
+        bb = await pg.locator("#player video").bounding_box()
+        check(bb and bb["y"] >= -1 and bb["y"] + bb["height"] <= viewport_h, f"[{w}] la vidéo reste visible en haut ({bb and round(bb['y'])})")
+
+
 async def main():
     async with async_playwright() as p:
         b = await p.chromium.launch(channel="chrome", headless=True, args=["--ignore-certificate-errors", "--autoplay-policy=no-user-gesture-required"])
@@ -54,11 +77,15 @@ async def main():
             check(await pg.is_visible("#playerPlay"), f"[{w}] bouton « ▶ Lire la vidéo »")
             if w == 1280:
                 await pg.screenshot(path="recpage-cr.png")
-                # horodatage du compte rendu, vidéo fermée : saut dans la transcription, sans vidéo
-                ts = pg.locator("#playerCr .ts.seek").first
-                if await ts.count():
-                    await ts.click(); await pg.wait_for_timeout(800)
-                    check(await pg.is_visible("#playerTr") and not (await vstate(pg))["shown"], "horodatage : passage de la transcription, sans lancer la vidéo")
+                # horodatage du compte rendu, vidéo fermée : la vidéo s'ouvre et démarre 3 s avant ce temps
+                await seek_check(pg, "#playerCr", w, "compte rendu")
+                # second horodatage, vidéo ouverte : saut au nouveau temps
+                await seek_check(pg, "#playerCr", w, "compte rendu, vidéo déjà ouverte", nth=-1)
+                # horodatage de la transcription
+                await pg.click('#playerTabs .vt[data-v="tr"]')
+                await seek_check(pg, "#playerTr", w, "transcription", nth=3)
+                await pg.click('#playerTabs .vt[data-v="cr"]')
+                await pg.click("#playerPlay"); await pg.wait_for_timeout(500)   # masque la vidéo
                 await pg.click("#playerPlay"); await pg.wait_for_timeout(3000)
                 v = await vstate(pg)
                 check(v["shown"] and v["src"] and not v["paused"], f"« ▶ Lire la vidéo » : lecteur dans la page, lecture lancée ({v})")
@@ -80,6 +107,9 @@ async def main():
                 check(not (await vstate(pg))["shown"], "adresse directe : page ouverte, vidéo non lancée")
             else:
                 await pg.screenshot(path="recpage-phone.png")
+                # téléphone : horodatage plus bas dans le compte rendu → la vidéo démarre et reste visible en haut
+                await seek_check(pg, "#playerCr", w, "compte rendu (téléphone)", nth=-1, viewport_h=h)
+                await pg.screenshot(path="recpage-phone-seek.png")
                 sw = await pg.evaluate("document.querySelector('#player').scrollWidth")
                 check(sw <= w, f"[{w}] page sans défilement horizontal ({sw})")
             check(not errs, f"[{w}] aucune erreur JavaScript {errs[:2]}")

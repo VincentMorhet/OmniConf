@@ -22,6 +22,7 @@ busy() {   # occupé si l'assistant répond et n'est pas libre (sinon : arrêté
   local n=$1 f=/etc/webconf/containers/$1.env port tok
   port=$(sed -n 's/^AGENT_PORT=//p' "$f"); tok=$(sed -n 's/^AGENT_TOKEN=//p' "$f")
   docker exec "webconf-$n" pgrep -f offline.py >/dev/null 2>&1 && { echo "transcription après coup"; return 0; }
+  docker exec "webconf-$n" pgrep -f faststart >/dev/null 2>&1 && { echo "mise en forme de la vidéo"; return 0; }
   python3 - "$port" "$tok" <<'PY'
 import json, sys, urllib.request
 port, tok = sys.argv[1], sys.argv[2]
@@ -39,6 +40,8 @@ if s.get("recording"):
     why.append("enregistrement")
 if (s.get("transcript") or {}).get("active"):
     why.append("transcription")
+if (s.get("voiceprints_job") or {}).get("state") == "running":
+    why.append("empreintes vocales")
 try:
     for x in get("/recordings"):
         for k, lab in (("report_job", "compte rendu"), ("slides_job", "diapositives")):

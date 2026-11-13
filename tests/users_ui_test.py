@@ -41,7 +41,7 @@ async def main():
             await login(pg, ADMIN, PW)
             await pg.wait_for_selector("#app:not(.hidden)")
             check(await pg.is_visible("#accountBtn"), f"[{w}] administrateur connecté, bouton « Mon compte »")
-            await pg.goto(BASE + "/#rec"); await pg.wait_for_selector("#tab-rec:not(.hidden)")
+            await pg.goto(BASE + "/#reglages"); await pg.wait_for_selector("#tab-set:not(.hidden)")
             check(await pg.is_visible("#usersBox"), f"[{w}] encadré Utilisateurs visible pour l'administrateur")
             if w == 1280:
                 await pg.click("#usersBox summary")
@@ -56,6 +56,7 @@ async def main():
                 await pg.wait_for_selector("#usersList .user[data-login='t-eve']")
                 await pg.locator("#usersBox").screenshot(path="users-box.png")
                 # partage d'une réunion depuis le menu ⋯
+                await pg.goto(BASE + "/#rec"); await pg.wait_for_selector("#tab-rec:not(.hidden)"); await pg.wait_for_timeout(1500)
                 if await pg.locator("#recordings .ritem .more").count():
                     await pg.locator("#recordings .ritem .more").first.click()
                     await pg.locator("#recordings .ritem .share").first.click()
@@ -64,6 +65,8 @@ async def main():
                     await pg.locator("#dlgShare").screenshot(path="users-share.png")
                     await pg.click("#dlgShare button[value=cancel]")
             await pg.click("#accountBtn")
+            await pg.wait_for_selector("#dlgMe[open]")
+            await pg.click("#meProfile")
             await pg.wait_for_selector("#dlgAccount[open]")
             await pg.locator("#dlgAccount").screenshot(path=f"users-account-{w}.png")
             box = await pg.locator("#dlgAccount").bounding_box()
@@ -72,6 +75,7 @@ async def main():
             sw = await pg.evaluate("document.documentElement.scrollWidth")
             check(sw <= w, f"[{w}] pas de défilement horizontal ({sw})")
             if w == 1280:
+                await pg.click("#accountBtn"); await pg.wait_for_selector("#dlgMe[open]")
                 await pg.click("#logout")
                 await pg.wait_for_selector("#loginForm")
                 await login(pg, "t-eve", prov)
@@ -83,10 +87,11 @@ async def main():
                 await pg.click("#pwOk")
                 await pg.wait_for_selector("#dlgPw", state="hidden")
                 check(True, "mot de passe changé depuis l'IHM")
-                await pg.goto(BASE + "/#rec"); await pg.wait_for_selector("#tab-rec:not(.hidden)")
+                await pg.goto(BASE + "/#reglages"); await pg.wait_for_selector("#tab-set:not(.hidden)")
                 await pg.wait_for_timeout(1500)
                 check(await pg.is_hidden("#usersBox"), "Ève : pas d'encadré Utilisateurs")
                 check(await pg.is_hidden("#lexSave"), "Ève : lexique en lecture seule")
+                await pg.goto(BASE + "/#rec"); await pg.wait_for_timeout(1500)
                 n = await pg.locator("#recordings .ritem").count()
                 check(n == 0, f"Ève ne voit aucune réunion ({n})")
                 await pg.screenshot(path="users-eve.png")

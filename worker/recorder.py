@@ -6,9 +6,67 @@ import logging
 import os
 import re
 import signal
+import struct
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 log = logging.getLogger("recorder")
+
+
+def _top_atoms(path: Path, limit: int = 4) -> list[str]:
+    out, pos, size = [], 0, path.stat().st_size
+    with open(path, "rb") as f:
+        while pos + 8 <= size and len(out) < limit:
+            f.seek(pos)
+            h = f.read(16)
+            n, t = struct.unpack(">I4s", h[:8])
+            if n == 1:
+                n = struct.unpack(">Q", h[8:16])[0]
+            out.append(t.decode("latin-1"))
+            if n < 8:
+                break
+            pos += n
+    return out
+
+
+def _packets(path: Path) -> list[str] | None:
+    r = subprocess.run(["ffprobe", "-v", "error", "-count_packets", "-show_entries", "stream=codec_type,nb_read_packets",
+                        "-of", "csv=p=0", str(path)], capture_output=True, text=True, timeout=600)
+    return r.stdout.split() if r.returncode == 0 and r.stdout.strip() else None
+
+
+def faststart(path: Path) -> str:
+    """MP4 fragmenté (sûr pendant l'enregistrement : lisible même si ffmpeg est tué) → MP4 classique, index en tête.
+
+    Le navigateur connaît alors la durée tout de suite et saute à n'importe quel moment : sur une réunion de 1 h 23,
+    0,6 s au lieu de 34 s avant de pouvoir lire à partir d'un horodatage. Copie sans réencodage, vérifiée paquet
+    par paquet avant de remplacer le fichier (remplacement atomique, date du fichier conservée).
+    Renvoie « ok », « déjà » (rien à faire) ou la raison de l'échec (le fichier d'origine est alors gardé tel quel)."""
+    try:
+        atoms = _top_atoms(path)
+    except (OSError, struct.error) as e:
+        return f"illisible ({e})"
+    if "moov" in atoms and "moof" not in atoms and atoms.index("moov") < (atoms.index("mdat") if "mdat" in atoms else 99):
+        return "déjà"
+    tmp = path.with_name(path.name + ".faststart-tmp")
+    try:
+        r = subprocess.run(["ffmpeg", "-nostdin", "-y", "-loglevel", "error", "-i", str(path), "-map", "0", "-c", "copy",
+                            "-movflags", "+faststart", "-f", "mp4", str(tmp)], capture_output=True, text=True, timeout=1800)
+        if r.returncode != 0:
+            return "ffmpeg : " + (r.stderr.strip().splitlines() or ["?"])[-1][:200]
+        a, b = _packets(path), _packets(tmp)
+        if not a or a != b:
+            return f"vérification : paquets {a} ≠ {b}"
+        st = path.stat()
+        os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns))
+        os.replace(tmp, path)
+        return "ok"
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return f"erreur : {e}"
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _slug(s: str) -> str:
@@ -32,6 +90,9 @@ class Recorder:
         self.file: Path | None = None
         self.meta: dict = {}
         self.started_at: dt.datetime | None = None
+        self._finalizing: asyncio.Task | None = None
+        for t in self.dir.glob("*.faststart-tmp"):   # conversion interrompue (redémarrage) : l'original est intact
+            t.unlink(missing_ok=True)
 
     @property
     def active(self) -> bool:
@@ -71,7 +132,7 @@ class Recorder:
         self._write_meta()
         return name
 
-    async def stop(self):
+    async def stop(self, finalize: bool = True):
         if not self.active:
             return None
         self.proc.send_signal(signal.SIGINT)
@@ -84,7 +145,18 @@ class Recorder:
         self._write_meta()
         name = self.file.name
         self.proc = None
+        if finalize:   # en tâche de fond : ne retarde ni la sortie de la réunion ni la transcription
+            self._finalizing = asyncio.create_task(self._faststart(self.file))
         return name
+
+    async def _faststart(self, f: Path):
+        """Lecture à partir d'un horodatage : index en tête (quelques secondes, sans réencodage)."""
+        t0 = time.monotonic()
+        try:
+            res = await asyncio.to_thread(faststart, f)
+        except Exception as e:   # le fichier fragmenté reste lisible : rien n'est perdu
+            res = f"erreur : {e}"
+        log.info("faststart %s : %s (%.1f s)", f.name, res, time.monotonic() - t0)
 
     def _write_meta(self):
         if self.file:
@@ -206,3 +278,23 @@ class Recorder:
             if thumb.exists() and thumb.stat().st_size > 0:
                 return thumb
         return None
+
+
+if __name__ == "__main__":
+    # Conversion des enregistrements existants :
+    #   docker exec -u bot webconf-wN /opt/webconf/venv/bin/python /opt/webconf/worker/recorder.py --faststart [fichiers…]
+    # Sans fichier : tous les .mp4 du dossier des enregistrements, sauf ceux modifiés depuis moins de 2 min
+    # (enregistrement en cours).
+    if sys.argv[1:2] != ["--faststart"]:
+        sys.exit("usage : recorder.py --faststart [fichier.mp4 …]")
+    files = [Path(a) for a in sys.argv[2:]] or sorted(Path(os.environ.get("RECORD_DIR", "/srv/webconf/recordings")).glob("*.mp4"))
+    bad = 0
+    for f in files:
+        if not sys.argv[2:] and time.time() - f.stat().st_mtime < 120:
+            print(f"{f.name} : ignoré (modifié il y a moins de 2 min)", flush=True)
+            continue
+        t0 = time.monotonic()
+        res = faststart(f)
+        bad += res not in ("ok", "déjà")
+        print(f"{f.name} : {res} ({time.monotonic() - t0:.1f} s)", flush=True)
+    sys.exit(1 if bad else 0)

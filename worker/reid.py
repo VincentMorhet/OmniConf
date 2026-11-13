@@ -101,10 +101,13 @@ def average_linkage(S: np.ndarray, threshold: float) -> list[int]:
 
 
 def reidentify(doc: dict, media: Path, pcm: np.ndarray | None = None, ex=None, threshold: float | None = None,
-               cache: dict | None = None) -> dict:
+               cache: dict | None = None, prints: dict | None = None) -> dict:
     """Recalcule les voix de la transcription `doc` (modifié en place). Renvoie un résumé.
-    `cache` (facultatif) garde les empreintes d'un appel à l'autre (essais de seuils)."""
+    `cache` (facultatif) garde les empreintes d'un appel à l'autre (essais de seuils).
+    `prints` : empreintes de référence {nom: vecteur} (par défaut celles des personnes consentantes, voiceprints.py)."""
+    import voiceprints
     threshold = THRESHOLD if threshold is None else threshold
+    prints = voiceprints.usable() if prints is None else prints
     raw = doc.get("raw") or []
     old_spk = doc.get("speakers") or {}
     manual = {k: v.get("name") for k, v in old_spk.items() if v.get("source") == "manual" and v.get("name")}
@@ -172,16 +175,56 @@ def reidentify(doc: dict, media: Path, pcm: np.ndarray | None = None, ex=None, t
         if k not in assign:
             assign[k] = assign.get(k - 1, next(iter(groups)))
 
+    # 2 bis. empreintes de référence (personnes consentantes) : centre brut de chaque groupe (la signature du
+    # canal n'est pas retirée : les empreintes viennent d'autres réunions) ; groupes reconnus sous le même nom
+    # fusionnés (une personne coupée en plusieurs groupes)
+    recog = {}
+    # la personne qui parle au micro de l'assistant (canal « Moi ») n'est pas aussi dans le son de la réunion :
+    # une voix proche de la sienne y est un écho ou une autre personne
+    me_sec = sum(float(e.get("te") or e["t"]) - float(e["t"]) for e in raw if e.get("spk") == "ME" and e.get("text"))
+    me_key = voiceprints.key((doc.get("meta") or {}).get("me_name")) if me_sec >= 30 else ""
+    prints = {n: v for n, v in (prints or {}).items() if not me_key or voiceprints.key(n) != me_key}
+    if prints:
+        unit = {k: embs[k] / (np.linalg.norm(embs[k]) + 1e-9) for k in ok}
+        rcen, gsec = {}, Counter()
+        for k, g in assign.items():
+            gsec[g] += dur[k]
+            if k in unit and dur[k] >= LONG_SEC:
+                rcen.setdefault(g, []).append(unit[k])
+        recog = voiceprints.match({g: np.mean(v, axis=0) for g, v in rcen.items() if len(v) >= voiceprints.MIN_PHRASES},
+                                  gsec, prints)
+        first_g: dict[str, int] = {}
+        for g in sorted(recog, key=lambda g: -gsec[g]):
+            nm = recog[g][0]
+            if nm not in first_g:
+                first_g[nm] = g
+                continue
+            keep = first_g[nm]
+            for k in assign:
+                if assign[k] == g:
+                    assign[k] = keep
+            groups[keep] = groups.get(keep, []) + groups.pop(g, [])
+            recog.pop(g)
+
     # 3. noms : votes des noms affichés (pondérés par la durée) ; noms manuels prioritaires
     votes: dict[int, Counter] = {g: Counter() for g in groups}
     man: dict[int, Counter] = {g: Counter() for g in groups}
+    man_dur: dict[str, Counter] = {}
+    gtot = Counter()
     for k, g in assign.items():
         e = raw[idx[k]]
         votes.setdefault(g, Counter())
+        gtot[g] += dur[k]
         if e.get("ui"):
             votes[g][e["ui"]] += dur[k]
         if e["spk"] in manual:
-            man.setdefault(g, Counter())[manual[e["spk"]]] += dur[k]
+            man_dur.setdefault(e["spk"], Counter())[g] += dur[k]
+    # une voix renommée à la main pendant la réunion peut mêler plusieurs personnes (poste partagé) : son nom va
+    # au seul groupe qui contient l'essentiel de ses phrases (et dont elle forme la majorité), pas aux autres
+    for o, c in man_dur.items():
+        g, w = c.most_common(1)[0]
+        if w >= 0.5 * gtot[g]:
+            man.setdefault(g, Counter())[manual[o]] += w
     # nouvelles voix S1…, dans l'ordre d'apparition
     first = {}
     for k in sorted(assign, key=lambda k: spans[k][0]):
@@ -195,11 +238,14 @@ def reidentify(doc: dict, media: Path, pcm: np.ndarray | None = None, ex=None, t
         top = v.most_common(3)
         spread = (total > 0 and top and top[0][1] / total < NAME_SHARE
                   and sum(1 for _, w in top if w / total >= SPREAD_SHARE) >= 2)
+        pr = recog.get(g) if not name else None
         diar[new_id[g]] = {"n": sum(1 for k in assign if assign[k] == g), "votes": {a: round(w, 1) for a, w in v.items()},
-                           "name": name, "num": n, "no_tile": bool(spread and not name)}
+                           "name": name, "num": n, "no_tile": bool(spread and not name and not pr),
+                           **({"print": {"name": pr[0], "sim": pr[1], "margin": pr[2]}} if pr else {})}
         clusters.append({"id": new_id[g], "secs": round(sum(dur[k] for k in assign if assign[k] == g)),
                          "noms_affiches": [(a, round(w / total, 2)) for a, w in top] if total else [],
-                         "nom_manuel": name, "sans_vignette": bool(spread and not name)})
+                         "nom_manuel": name, "sans_vignette": bool(spread and not name and not pr),
+                         **({"empreinte": {"nom": pr[0], "similarite": pr[1], "ecart": pr[2]}} if pr else {})})
 
     # 4. réécriture : phrases, paragraphes (voix majoritaire de leurs phrases), état des voix
     mapping = {idx[k]: new_id[assign[k]] for k in assign}
@@ -232,15 +278,24 @@ def reidentify(doc: dict, media: Path, pcm: np.ndarray | None = None, ex=None, t
         top = v.most_common(1)[0] if v else None
         voted = top[0] if top and top[1] >= 2 and top[1] >= NAME_SHARE * total else None
         auto = voted or (f"Intervenant {st['num']} (sans vignette)" if st["no_tile"] else f"Intervenant {st['num']}")
+        pr = (st.get("print") or {}).get("name")
+        # vignette d'un autre pendant ses phrases (personne sur le poste d'un autre) : gardée pour la justification
+        tile = (voted if voted and voiceprints.key(voted) != voiceprints.key(pr) else None) if pr else None
+        if pr:
+            auto = pr
         base = st["name"] or auto
         seen[base] += 1
+        src = "manual" if st["name"] else "voiceprint" if pr else ("voice" if auto.startswith("Intervenant") else "ui")
         speakers[sid] = {"label": base if seen[base] == 1 else f"{base} ({seen[base]})", "auto": auto, "name": st["name"],
-                         "color": st["num"], "source": "manual" if st["name"] else ("voice" if auto.startswith("Intervenant") else "ui"),
-                         **({"no_tile": True} if st["no_tile"] else {})}
+                         "color": st["num"], "source": src,
+                         **({"no_tile": True} if st["no_tile"] else {}),
+                         **({"print_sim": st["print"]["sim"]} if pr and not st["name"] else {}),
+                         **({"tile": tile} if tile and not st["name"] else {})}
     if me:
         speakers["ME"] = me
     doc["speakers"] = speakers
     return {"version": VERSION, "at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
             "model": os.path.basename(MODEL), "threshold": threshold, "phrases": len(idx), "phrases_longues": len(longs),
             "incertaines": uncertain, "paragraphes_mixtes": mixed, "voix_avant": len([k for k in old_spk if k != "ME"]),
-            "voix_apres": len(order), "groupes": clusters}
+            "voix_apres": len(order), "groupes": clusters,
+            "empreintes": {"personnes": sorted(prints), "reconnues": {new_id[g]: r[0] for g, r in recog.items() if g in new_id}}}

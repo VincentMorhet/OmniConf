@@ -260,11 +260,14 @@ def speaker_table(doc: dict) -> str:
             continue
         src = v["source"]
         how = {"ui": "nom affiché par la plateforme de visio", "manual": "nom confirmé par l'utilisateur",
-               "voice": "nom inconnu, identifié uniquement par sa voix"}.get(src, "")
+               "voice": "nom inconnu, identifié uniquement par sa voix",
+               "voiceprint": "reconnu par son empreinte vocale de référence (consentement attesté) ; nom sûr"}.get(src, "")
+        if src == "voiceprint" and (doc.get("speakers") or {}).get(k, {}).get("tile"):
+            how += f" ; la vignette affichée pendant ses phrases était « {doc['speakers'][k]['tile']} » (poste d'un autre)"
         if v["voice"] > 1:
             how = (f"autre voix sur la connexion de {v['name']} : même personne ou autre personne de la salle ; "
                    f"attribution incertaine, nomme la personne si la transcription l'établit")
-        if v.get("no_tile") and src != "manual":
+        if v.get("no_tile") and src not in ("manual", "voiceprint"):
             seen = ", ".join(n for n, _ in Counter((doc.get("diarizer") or {}).get(k, {}).get("votes") or {}).most_common(3))
             how = (f"voix sans vignette à son nom (plusieurs noms affichés pendant ses phrases : {seen}) : personne "
                    f"sans doute sur le poste ou dans la salle d'un autre participant ; nomme-la si la transcription l'établit")
@@ -877,7 +880,7 @@ def shared_voices(doc: dict) -> list[dict]:
     info = speakers_info(doc)
     out = []
     for k, v in info.items():
-        if v.get("no_tile") and v["source"] != "manual" and v["words"] >= 50:
+        if v.get("no_tile") and v["source"] not in ("manual", "voiceprint") and v["words"] >= 50:
             votes = Counter((doc.get("diarizer") or {}).get(k, {}).get("votes") or {})
             tot = sum(votes.values()) or 1
             seen = ", ".join(f"{n} ({round(100 * w / tot)} %)" for n, w in votes.most_common(3))
@@ -1107,6 +1110,7 @@ def _source_line(report: dict, doc: dict) -> str:
     srcs = {v.get("source") for v in (doc.get("speakers") or {}).values()}
     plat = PLATFORM_FR.get(meta.get("platform"), "plateforme")
     how = ", ".join(x for x, k in ((f"noms affichés par {plat}", "ui"), ("voix reconnues", "voice"),
+                                   ("empreintes vocales (consentement attesté)", "voiceprint"),
                                    ("noms saisis à la main", "manual")) if k in srcs) or "voix"
     n_slides = len(doc.get("slides") or [])
     drafted = [s["modele"] for s in report.get("steps") or [] if s["etape"] == "rédaction" and s.get("ok")]

@@ -36,9 +36,9 @@ async def main():
             errs = []
             pg.on("pageerror", lambda e: errs.append(str(e)))
             pg.on("dialog", lambda d: asyncio.ensure_future(d.accept()))
-            await pg.goto(BASE + "/#rec")
+            await pg.goto(BASE + "/#reglages")
             await pg.fill("#loginId", ADMIN); await pg.fill("#pw", PW); await pg.click("#loginForm button")
-            await pg.wait_for_selector("#tab-rec:not(.hidden)")
+            await pg.wait_for_selector("#tab-set:not(.hidden)")
             check(await pg.is_visible("#voiceBox"), f"[{w}] encadré visible pour l'administrateur")
             await pg.click("#voiceBox summary")
             row = pg.locator("#voiceList .consent", has_text=NAME)
@@ -52,6 +52,10 @@ async def main():
                 await pg.click("#csOk")
                 await pg.wait_for_selector(f"#voiceList .consent:has-text('{NAME}') :text('consentement attesté')")
                 check(True, "consentement attesté (date et compte affichés)")
+                await pg.wait_for_selector(f"#voiceList .consent:has-text('{NAME}') small.vp", timeout=15000)
+                check(True, "état de l'empreinte vocale affiché pour la personne cochée")
+                vp = api.get("/api/voiceprints").json()
+                check(NAME in vp["people"] and "workers" in vp, f"API des empreintes : personne cochée listée ({vp.get('job', {}) and vp['job'].get('state')})")
                 await pg.locator("#voiceBox").screenshot(path="consent-box.png")
                 await row.locator("input[type=checkbox]").click()
                 await pg.wait_for_selector(f"#voiceList .consent:has-text('{NAME}') :text('retiré le')")
@@ -61,7 +65,8 @@ async def main():
             check(not errs, f"[{w}] aucune erreur JavaScript {errs[:2]}")
         await b.close()
     x = next(x for x in api.get("/api/voice-consents").json()["items"] if x["name"] == NAME)
-    check([h["action"] for h in x["history"]] == ["ajout", "consentement attesté", "consentement retiré : empreinte à effacer"],
+    acts = [h["action"] for h in x["history"]]
+    check(acts[:2] == ["ajout", "consentement attesté"] and len(acts) == 3 and acts[2].startswith("consentement retiré : empreinte effacée"),
           "historique complet (ajout, attestation, retrait)")
     check(api.delete(f"/api/voice-consents/{cid}").status_code == 200, "ligne supprimée")
     print(f"\n{ok} vérifications réussies, {fails} échecs")

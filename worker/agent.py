@@ -20,6 +20,7 @@ from pydantic import BaseModel
 import analyst
 import lexicon
 import reid
+import voiceprints
 from audio_bridge import AudioBridge
 from meetings import (PLATFORMS, SPEAKER_DEBUG_JS, Browser, active_speakers, clean_name, detect_platform, unwrap_url,
                       visible_participants)
@@ -123,7 +124,8 @@ async def status():
             "recording_file": recorder.file.name if recorder.active else None,
             "recording_since": recorder.started_at.isoformat() if recorder.active else None,
             "listeners": bridge.listeners, "transcript": transcriber.status(),
-            "vnc_port": VNC_PORT, "lexicon": lexicon.load().version or None}
+            "vnc_port": VNC_PORT, "lexicon": lexicon.load().version or None,
+            "voiceprints": voiceprints.version(), "voiceprints_job": {"state": vp_job.get("state")} if vp_job else None}
 
 
 class LexiconBody(BaseModel):
@@ -135,6 +137,76 @@ async def lexicon_get():
     lex = lexicon.load()
     return {"version": lex.version or None, "text": lex.text, "people": len(lex.people),
             "corrections": len(lex.corrections)}
+
+
+# ----------------------------------------------------------------------------- empreintes vocales de référence
+vp_job: dict = {}
+
+
+class PrintsBody(BaseModel):
+    prints: dict
+
+
+class ExtractReq(BaseModel):
+    names: list[str]
+    owners: dict[str, str] = {}
+
+
+@app.get("/voiceprints", dependencies=[Depends(auth)])
+async def voiceprints_get():
+    """Empreintes présentes sur l'assistant (noms et durées, sans les vecteurs)."""
+    return {"version": voiceprints.version(),
+            "people": {n: {"sec": p.get("sec"), "meetings": p.get("meetings"), "built_at": p.get("built_at")}
+                       for n, p in voiceprints.load().items()}}
+
+
+@app.put("/voiceprints", dependencies=[Depends(auth)])
+async def voiceprints_put(body: PrintsBody):
+    """Ensemble complet poussé par le contrôle (personnes consentantes seulement : les autres sont effacées)."""
+    v = voiceprints.save(body.prints)
+    log.info("empreintes vocales %s : %d personne(s)", v, len(voiceprints.load()))
+    return {"version": v, "people": sorted(voiceprints.load())}
+
+
+def _extract_low_priority(names, owners):
+    try:   # priorité basse (fil de calcul seul) : une réunion qui démarre sur l'assistant reste prioritaire
+        os.setpriority(os.PRIO_PROCESS, __import__("threading").get_native_id(), 15)
+    except OSError:
+        pass
+    return voiceprints.extract(recorder.dir, names, owners)
+
+
+async def _vp_extract(names, owners):
+    try:
+        vp_job.update(result=await asyncio.to_thread(_extract_low_priority, names, owners), state="done")
+    except Exception as e:
+        log.warning("empreintes : %s", e)
+        vp_job.update(state="error", error=str(e)[:300])
+    vp_job["ended"] = time.time()
+
+
+@app.post("/voiceprints/extract", dependencies=[Depends(auth)])
+async def voiceprints_extract(req: ExtractReq):
+    """Calcul (en tâche de fond) des empreintes des personnes demandées sur les enregistrements de l'assistant."""
+    if vp_job.get("state") == "running":
+        return {"state": "running"}
+    if state["state"] not in ("idle",) or recorder.active or transcriber.active:
+        raise HTTPException(409, "assistant occupé (réunion en cours)")
+    names = [n for n in req.names if n.strip()][:200]
+    vp_job.clear()
+    vp_job.update(state="running", started=time.time(), names=names)
+    asyncio.create_task(_vp_extract(names, req.owners))
+    return {"state": "running"}
+
+
+@app.get("/voiceprints/extract", dependencies=[Depends(auth)])
+async def voiceprints_extract_get():
+    """État du calcul ; le résultat (sommes d'empreintes) n'est rendu qu'une fois, puis oublié."""
+    out = {k: vp_job.get(k) for k in ("state", "error", "started", "ended", "names")}
+    if vp_job.get("state") == "done":
+        out["result"] = vp_job.pop("result", None)
+        vp_job["state"] = "fetched"
+    return out
 
 
 @app.put("/lexicon", dependencies=[Depends(auth)])
@@ -889,5 +961,5 @@ async def webrtc_offer(o: Offer):
 
 @app.on_event("shutdown")
 async def shutdown():
-    await recorder.stop()
+    await recorder.stop(finalize=False)   # pas de conversion pendant l'arrêt : le fichier fragmenté reste lisible
     await bridge.close_all()

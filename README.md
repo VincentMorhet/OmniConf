@@ -138,8 +138,12 @@ créé au premier démarrage avec `ADMIN_PASSWORD` (dans `/etc/webconf/control.e
    Fichiers : `/srv/webconf/recordings/*.mp4` sur chaque worker. Vidéo 1920x1200 (réglable : `SCREEN_SIZE`) à **2 images/s**, très
    compressée (H.264, environ 25 Mo/h) ; audio **AAC 192 kb/s, 48 kHz stéréo** (environ 85 Mo/h), soit environ 110 Mo/h au total.
    Réglables dans `worker.env` : `RECORD_FPS`, `RECORD_CRF`, `RECORD_AUDIO_BITRATE`, `SCREEN_SIZE`.
-   À côté de chaque MP4 : un `.json` (métadonnées) et un `.jpg` (miniature). Le MP4 est fragmenté : il
-   reste lisible même après un crash.
+   À côté de chaque MP4 : un `.json` (métadonnées) et un `.jpg` (miniature). Pendant l'enregistrement, le MP4
+   est fragmenté : il reste lisible même après un crash. À la fin, il est réécrit sans réencodage avec son
+   index en tête (`faststart`, vérifié paquet par paquet avant remplacement) : le navigateur peut alors lire à
+   partir de n'importe quel moment immédiatement (réunion de 1 h 23 : 0,6 s au lieu de 34 s). Cliquer un
+   horodatage (compte rendu, transcription, points d'étape) lance la vidéo 3 s avant ce moment. Conversion des
+   enregistrements existants : `docker exec -u bot webconf-wN /opt/webconf/venv/bin/python /opt/webconf/worker/recorder.py --faststart`.
 8. **Entrée ratée, terminée à la main** : si l'assistant n'arrive pas à rejoindre seul (la plateforme a
    changé sa page), il reste sur la page, en erreur, avec une capture de la page et la liste de ses boutons
    dans `recordings/debug/` (10 derniers échecs). Termine l'entrée via « Écran » : dès que l'assistant
@@ -193,6 +197,18 @@ poste. Avant chaque compte rendu, toute la réunion est donc reprise :
 
 La transcription d'avant est gardée (`*.transcript.avant-reid.json`). Réglages : `REID=0` pour désactiver,
 `REID_MODEL`, `REID_THRESHOLD`.
+
+**Empreintes vocales de référence** (`worker/voiceprints.py`), seulement pour les personnes dont le
+consentement est attesté (Réglages > Empreintes vocales). Le contrôle demande à chaque assistant libre de
+calculer, sur ses enregistrements, l'empreinte des personnes cochées à partir des phrases dont l'auteur est
+certain (sa vignette encadrée pendant que sa voix est nommée par sa vignette, un nom saisi à la main, ou son
+propre micro « Moi »), en fait la moyenne et la diffuse aux assistants (seuls des vecteurs de 192 nombres
+circulent, jamais le son). Recalcul chaque nuit et à chaque nouvelle personne cochée ; décocher efface
+l'empreinte du contrôle puis, au plus tard 2 minutes après, des assistants. À la ré-identification, un groupe
+de voix très proche d'une empreinte (similarité ≥ 0,82, avance ≥ 0,10 sur les autres) prend ce nom, même si
+une autre vignette était encadrée (une personne qui parle depuis le poste d'un autre) ; un nom saisi à la main
+l'emporte toujours. Calibrage sur 11 réunions (82 voix) : même personne d'une réunion à l'autre 0,88 à 0,96,
+personnes différentes 0,76 au plus. Réglages : `VOICEPRINT_MATCH`, `VOICEPRINT_MARGIN`.
 
 Choix du modèle (banc d'essai `tests/speaker_models_bench.py`, 6 réunions, 29 personnes, 777 phrases dont
 l'auteur est connu) :
