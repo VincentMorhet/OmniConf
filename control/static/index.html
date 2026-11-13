@@ -108,6 +108,8 @@
       <button id="fBack" class="ghost" title="Revenir à la vue normale de la réunion">←</button>
       <div class="ftitle"><b id="fTitle"></b><small id="fInfo"></small></div>
       <span id="fRec" class="rec hidden"></span>
+      <button id="fRecBtn" title="Démarrer ou arrêter l'enregistrement">⏺ Enregistrer</button>
+      <button id="fLeave" class="danger" title="Faire quitter la réunion à l'assistant">🚪 Quitter</button>
       <span id="fCtl" class="fctl"></span>
       <button id="fCc" class="on" title="Afficher / masquer les sous-titres">💬 Sous-titres</button>
       <button id="fHand" title="Prendre la main sur l'écran de l'assistant">🖐 Prendre la main</button>
@@ -258,10 +260,13 @@
   </article>
 </template>
 
-<div id="player" class="modal hidden">
+<div id="player" class="modal page hidden">
   <div class="modal-body">
+   <div class="pl-top">
     <div class="modal-head">
-      <b id="playerTitle"></b>
+      <button class="ghost back" title="Revenir aux enregistrements">←</button>
+      <div class="pl-title"><b id="playerTitle"></b><small id="playerInfo"></small></div>
+      <button id="playerPlay" class="primary hidden" title="Afficher le lecteur et lancer la vidéo">▶ Lire la vidéo</button>
       <button class="ghost" onclick="openAudioPanel()" title="Sortie audio">🎚</button>
       <a id="playerMd" class="btn hidden" download title="Transcription (Markdown)">📝 Texte</a>
       <a id="playerDocx" class="btn hidden" download title="Compte rendu (Word)">📋 Word</a>
@@ -270,7 +275,8 @@
       <button id="playerDel" class="danger" title="Supprimer cet enregistrement">🗑 Supprimer</button>
       <button class="ghost close" title="Fermer">✕</button>
     </div>
-    <video controls playsinline preload="metadata"></video>
+    <video controls playsinline preload="none"></video>
+   </div>
     <div id="playerTabs" class="vtabs hidden">
       <button class="vt on" data-v="tr">📝 Transcription</button>
       <button class="vt" data-v="cr">📋 Compte rendu</button>
@@ -339,6 +345,13 @@
     <div id="shList" class="checklist"></div>
     <label id="shOwnerRow" class="hidden">Propriétaire (administrateurs)<select id="shOwner"></select></label>
     <div class="row end"><button value="cancel" class="ghost">Annuler</button><button value="ok" class="primary">Enregistrer</button></div>
+  </form>
+</dialog>
+<dialog id="dlgConfirm" class="dlg">
+  <form method="dialog">
+    <h2 id="cfTitle"></h2>
+    <p id="cfText" class="hint"></p>
+    <div class="row end"><button value="cancel" class="ghost" id="cfNo">Annuler</button><button value="ok" id="cfYes" class="primary">OK</button></div>
   </form>
 </dialog>
 <dialog id="dlgSecret" class="dlg">

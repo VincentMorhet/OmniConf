@@ -57,21 +57,23 @@ $("#logout").onclick = async () => { await api("/api/logout", { method: "POST" }
 let cur = null;   // assistant affiché dans la vue « réunion »
 const view = () => fName ? "focus" : cur ? "meet" : !$("#tab-rec").classList.contains("hidden") ? "rec" : "home";
 function showTab(tab) {
-  let w = null;
-  if (tab.startsWith("m/")) { w = decodeURIComponent(tab.slice(2)); tab = cfg.workers.includes(w) ? "meet" : "home"; }
+  let w = null, recRoute = null;
+  if (tab.startsWith("enr/")) { recRoute = tab; tab = "rec"; }   // page d'un enregistrement (sur la liste)
+  else if (tab.startsWith("m/")) { w = decodeURIComponent(tab.slice(2)); tab = cfg.workers.includes(w) ? "meet" : "home"; }
   else if (tab.startsWith("suivre/")) { w = decodeURIComponent(tab.slice(7)); tab = cfg.workers.includes(w) ? "focus" : "home"; }
   if (!["home", "rec", "meet", "focus"].includes(tab)) tab = "home";
   if (tab !== "meet" && tab !== "focus") w = null;
   if (tab !== "focus" || fName !== w) exitFocus();
   document.querySelectorAll(".tab").forEach(x => x.classList.toggle("active", x.dataset.tab === (tab === "meet" ? "home" : tab)));
   ["home", "meet", "rec", "focus"].forEach(t => $("#tab-" + t).classList.toggle("hidden", tab !== t));
-  const want = tab === "meet" ? "m/" + encodeURIComponent(w) : tab === "focus" ? "suivre/" + encodeURIComponent(w) : tab;
+  const want = recRoute || (tab === "meet" ? "m/" + encodeURIComponent(w) : tab === "focus" ? "suivre/" + encodeURIComponent(w) : tab);
   if (location.hash !== "#" + want) history.replaceState(null, "", "#" + want);
+  if (recRoute) openRecRoute(recRoute); else if (player.url) closePlayer(true);
   setCur(w);
   if (tab === "focus") enterFocus(w);
   if (tab === "rec") loadRecordings();
   if (tab === "home") { refreshShots(); loadRecordings(); }
-  window.scrollTo(0, 0);
+  if (!recRoute) window.scrollTo(0, 0);
 }
 const openMeeting = (name) => { location.hash = "#m/" + encodeURIComponent(name); };
 // « Suivre en grand » : un onglet par assistant (réutilisé s'il est déjà ouvert)
@@ -103,7 +105,8 @@ $("#startForm").onsubmit = async (e) => {
   try {
     const r = await api("/api/meetings", { method: "POST", json: formMeeting() });
     toast(`L'assistant ${r.name} rejoint la réunion…`); $("#opts").open = false; $("#f-url").value = ""; $("#f-title").value = "";
-    nameEdited = false; prefillName(); await refresh(); openMeeting(r.name);
+    nameEdited = false; prefillName(); await refresh();
+    location.hash = "#suivre/" + encodeURIComponent(r.name);   // réunion lancée : vue en grand directement
   } catch (err) { toast("Erreur : " + err.message, 5000); }
   btn.disabled = false;
 };
@@ -170,9 +173,9 @@ function card(name) {
     catch (err) { toast("Erreur : " + err.message, 5000); }
   };
   $(".back", el).onclick = () => { location.hash = "#home"; };
-  $(".b-leave", el).onclick = () => confirm(`L'assistant ${name} quitte la réunion ?`) && act("leave")();
+  $(".b-leave", el).onclick = () => confirmLeave(name);
   $(".b-mute", el).onclick = act("mute");
-  $(".b-rec", el).onclick = () => act(lastStatus[name]?.recording ? "rec-stop" : "rec-start")();
+  $(".b-rec", el).onclick = () => toggleRecording(name);
   $(".b-screen", el).onclick = () => toggleVnc(name);
   $(".shot", el).onclick = () => toggleVnc(name, true);
   $(".b-full", el).onclick = () => { toggleVnc(name, false); window.open(vncUrl(name), "_blank"); };
@@ -529,6 +532,11 @@ function renderFocus(st) {
     : st.online ? "libre" : "hors ligne";
   $("#fRec").classList.toggle("hidden", !st.recording);
   if (st.recording) $("#fRec").textContent = "● REC " + fmtDur(st.recording_since);
+  const rb = $("#fRecBtn");
+  rb.textContent = st.recording ? "⏹ Arrêter l'enregistrement" : "⏺ Enregistrer";
+  rb.classList.toggle("recording", !!st.recording);
+  rb.disabled = !st.online || st.state === "taken" || (!busy && !st.recording);
+  $("#fLeave").disabled = !busy;
   const t = trState(st.name);
   $("#fEnded").classList.toggle("hidden", busy || !st.online || !t.ended);
   $("#fFinal").classList.toggle("hidden", !(st.transcript?.file || t.lastRec));
@@ -553,6 +561,41 @@ $("#fSide").onclick = () => {
 $("#fHand").onclick = () => { fHand = !fHand; if (fRfb) { fRfb.viewOnly = !fHand; if (fHand) fRfb.focus(); } syncFocusButtons(); };
 $("#fFull").onclick = () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen().catch(() => { });
 $("#fFinal").onclick = () => fName && openFinal(fName);
+$("#fRecBtn").onclick = () => fName && toggleRecording(fName);
+$("#fLeave").onclick = () => fName && confirmLeave(fName);
+
+// ------------------------------------------------------------------ confirmations (arrêt de l'enregistrement, départ)
+function askConfirm(title, text, okLabel, danger = false) {
+  const d = $("#dlgConfirm");
+  $("#cfTitle").textContent = title; $("#cfText").textContent = text;
+  $("#cfYes").textContent = okLabel; $("#cfYes").className = danger ? "danger" : "primary";
+  d.returnValue = "";
+  return new Promise(res => {
+    d.addEventListener("close", () => res(d.returnValue === "ok"), { once: true });
+    d.showModal(); $("#cfNo").focus();   // choix sûr par défaut : Entrée n'arrête rien par mégarde
+  });
+}
+async function workerAct(name, action) {
+  try { await api(`/api/workers/${name}/${action}`, { method: "POST", json: {} }); await refresh(); return true; }
+  catch (err) { toast("Erreur : " + err.message, 5000); return false; }
+}
+async function toggleRecording(name) {
+  const st = lastStatus[name];
+  if (!st?.recording) { if (await workerAct(name, "rec-start")) toast("Enregistrement démarré"); return; }
+  const ok = await askConfirm("Arrêter l'enregistrement ?",
+    `L'assistant reste dans la réunion, mais la suite ne sera plus enregistrée${st.transcript?.active ? " (la transcription continue)" : ""}. ` +
+    "Vous pourrez relancer un enregistrement : ce sera un fichier séparé.", "⏹ Arrêter l'enregistrement", true);
+  if (ok && await workerAct(name, "rec-stop")) toast("Enregistrement arrêté");
+}
+async function confirmLeave(name) {
+  const st = lastStatus[name] || {};
+  const what = [st.recording ? "l'enregistrement s'arrête" : "",
+    st.transcript?.active ? "la transcription s'arrête et le compte rendu final est rédigé" : ""].filter(Boolean);
+  const ok = await askConfirm("Quitter la réunion ?",
+    `L'assistant ${name} quitte « ${st.title || platLabel(st) || "la réunion"} »` + (what.length ? ` : ${what.join(", ")}.` : ".") +
+    " Il ne pourra pas revenir tout seul : il faudrait relancer la réunion.", "🚪 Quitter la réunion", true);
+  if (ok && await workerAct(name, "leave")) toast("L'assistant a quitté la réunion");
+}
 
 // ------------------------------------------------------------------ points d'étape et comptes rendus
 const parseT = (s) => { if (typeof s === "number") return s;
@@ -1019,8 +1062,25 @@ function renderRecordings() {
 }
 
 const recUrl = (r) => `/api/recordings/${encodeURIComponent(r.worker)}/${encodeURIComponent(r.name)}`;
-function playRec(r, tab) {
-  openPlayer(recUrl(r), r.meta?.title || r.name, r.name, { video: r.kind !== "transcript", transcript: r.transcript, report: r.report || !!r.report_job, tab });
+function playRec(r, tab) { openRec(r, { tab }); }
+// Page d'un enregistrement : compte rendu et transcription ; la vidéo ne démarre que sur demande
+let recOpenOpts = {}, recBack = "#rec";
+function openRec(r, o = {}) {
+  recOpenOpts = o;
+  const h = `#enr/${encodeURIComponent(r.worker)}/${encodeURIComponent(r.name)}`;
+  if (!location.hash.startsWith("#enr/")) recBack = location.hash || "#rec";
+  if (location.hash === h) openRecRoute(h.slice(1)); else location.hash = h;
+}
+async function openRecRoute(route) {
+  const parts = route.split("/"), w = decodeURIComponent(parts[1] || ""), f = decodeURIComponent(parts.slice(2).join("/"));
+  let r = recItems.find(x => x.worker === w && x.name === f);
+  if (!r) { await loadRecordings(); r = recItems.find(x => x.worker === w && x.name === f); }
+  const o = recOpenOpts; recOpenOpts = {};
+  if (!r) { toast("Enregistrement introuvable (supprimé, ou réservé à un autre utilisateur)", 4000); location.hash = "#rec"; return; }
+  const url = recUrl(r);
+  if (player.url === url) { if (o.tab) showPlayerView(o.tab); if (o.play) showVideo(true); return; }
+  openPlayer(url, r.meta?.title || r.name, r.name, { video: r.kind !== "transcript", transcript: r.transcript,
+    report: r.report || !!r.report_job, tab: o.tab, recording: r.recording, play: o.play, rec: r });
 }
 function recItem(r, started, opts = {}) {
   const url = `/api/recordings/${encodeURIComponent(r.worker)}/${encodeURIComponent(r.name)}`;
@@ -1057,11 +1117,12 @@ function recItem(r, started, opts = {}) {
   $(".rtitle", el).textContent = title; $(".rtitle", el).title = title;
   const img = $("img", el);
   if (img) { img.src = url + "/thumb" + (r.recording ? "?t=" + Date.now() : ""); img.onerror = () => img.remove(); }
-  const play = (tab) => openPlayer(url, title, r.name, { video, transcript: r.transcript, report: r.report || !!r.report_job, tab, recording: r.recording });
+  const play = (tab, video) => openRec(r, { tab, play: video });
   const menu = $(".rmenu", el);
   $(".more", el).onclick = (e) => { e.stopPropagation(); const open = menu.classList.contains("hidden"); closeMenus(); menu.classList.toggle("hidden", !open); };
   menu.addEventListener("click", () => closeMenus());
-  $(".thumb", el).onclick = () => play(); $(".play", el).onclick = () => play();
+  $(".thumb", el).onclick = () => play(); $(".rtitle", el).onclick = () => play();
+  $(".play", el).onclick = () => play(undefined, video);   // « ▶ Lire » : la page, vidéo lancée
   if ($(".cr", el)) $(".cr", el).onclick = () => play("cr");
   if ($(".share", el)) $(".share", el).onclick = () => shareRecording(r, title);
   if ($(".ren", el)) $(".ren", el).onclick = async () => {
@@ -1114,17 +1175,27 @@ async function openPlayer(url, title, file, o = { video: true }) {
   $("#playerMd").classList.toggle("hidden", !o.transcript);
   $("#playerMd").href = url + "/transcript?fmt=md&download=1";
   $("#playerDocx").classList.add("hidden"); $("#playerDocx").href = url + "/report?fmt=docx&download=1";
-  pl.classList.toggle("tronly", !o.video); pl.classList.toggle("withtr", !!o.transcript && o.video);
+  pl.classList.remove("tronly", "withtr");
   box.innerHTML = ""; $("#playerCr").innerHTML = ""; $("#playerAn").innerHTML = "";
   $("#playerSpk").innerHTML = "";
   $("#playerTabs").classList.toggle("hidden", !o.transcript);
+  player.view = o.transcript ? (o.tab || (o.report ? "cr" : "tr")) : null;   // le compte rendu d'abord, s'il existe
+  player.hasVideo = !!o.video; player.videoOn = false;
+  v.pause(); v.removeAttribute("src"); v.load(); pl.classList.add("novid");
+  $("#playerPlay").classList.toggle("hidden", !o.video); $("#playerPlay").textContent = "▶ Lire la vidéo";
+  const r = o.rec || {}, d = r.meta?.started_at ? new Date(r.meta.started_at) : r.mtime ? new Date(r.mtime * 1000) : null;
+  $("#playerInfo").textContent = [d ? d.toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" }) + " à "
+    + d.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }) : "", r.duration != null ? fmtSec(r.duration) : "",
+    r.worker ? "assistant " + r.worker : "", r.owner_name && !r.mine ? (r.can_edit ? "👤 " : "partagée par ") + r.owner_name : ""].filter(Boolean).join(" · ");
   showPlayerView();
-  pl.classList.remove("hidden");
-  if (o.video) { v.src = url; applySink(v).then(() => v.play().catch(() => { })); }
-  if (!o.transcript) return;
-  const seek = o.video ? (t) => { v.currentTime = Math.max(0, t - 1); v.play().catch(() => { }); }
-    : (t) => { showPlayerView("tr"); let best = null; box.querySelectorAll(":scope > p").forEach(p => { if (+p.dataset.t <= t + 1) best = p; });
-               if (best) { best.scrollIntoView({ block: "center" }); best.classList.add("hl"); setTimeout(() => best.classList.remove("hl"), 2500); } };
+  pl.classList.remove("hidden"); pl.scrollTop = 0;
+  if (o.play) showVideo(true);
+  if (!o.transcript) { box.classList.remove("hidden"); box.innerHTML = `<p class="empty">Pas de transcription pour cet enregistrement${o.video ? " : « ▶ Lire la vidéo » pour le regarder" : ""}.</p>`; return; }
+  // horodatage cliqué : dans la vidéo si elle est ouverte, sinon au passage de la transcription
+  const seek = (t) => {
+    if (player.videoOn) { v.currentTime = Math.max(0, t - 1); v.play().catch(() => { }); return; }
+    showPlayerView("tr"); let best = null; box.querySelectorAll(":scope > p").forEach(p => { if (+p.dataset.t <= t + 1) best = p; });
+    if (best) { best.scrollIntoView({ block: "center" }); best.classList.add("hl"); setTimeout(() => best.classList.remove("hl"), 2500); } };
   player.seek = seek;
   try {
     const doc = await api(url + "/transcript");
@@ -1205,12 +1276,26 @@ async function loadPlayerReport(url) {
     if (d.job?.state === "running") loadPlayerReport._t = setTimeout(() => player.url === url && loadPlayerReport(url), 4000);
   } catch (e) { if (player.url === url) $("#playerCr").innerHTML = `<p class="empty">Compte rendu indisponible : ${esc(e.message)}</p>`; }
 }
-function closePlayer() {
+function showVideo(on) {
+  const v = $("#player video"), pl = $("#player");
+  if (!player.hasVideo) return;
+  player.videoOn = on;
+  if (on) {
+    if (!v.getAttribute("src")) { v.src = player.url; applySink(v); }
+    pl.classList.remove("novid"); v.play().catch(() => { });
+    pl.scrollTo({ top: 0, behavior: "smooth" });
+  } else { v.pause(); pl.classList.add("novid"); }
+  $("#playerPlay").textContent = on ? "⏸ Masquer la vidéo" : "▶ Lire la vidéo";
+}
+$("#playerPlay").onclick = () => showVideo(!player.videoOn);
+$("#player .back").onclick = () => closePlayer();
+function closePlayer(fromNav = false) {
+  if (!fromNav && location.hash.startsWith("#enr/")) { location.hash = recBack || "#rec"; return; }   // la navigation ferme la page
   const v = $("#player video"); v.pause(); v.removeAttribute("src"); v.load(); $("#player").classList.add("hidden");
   $("#playerTr").innerHTML = ""; $("#playerSpk").innerHTML = ""; $("#playerCr").innerHTML = ""; $("#playerAn").innerHTML = "";
   player = { url: null }; clearTimeout(loadPlayerReport._t);
 }
-$("#player .close").onclick = closePlayer;
+$("#player .close").onclick = () => closePlayer();
 $("#playerDel").onclick = async () => { if (await deleteRecording(player.url, player.title)) closePlayer(); };
 // Réunion passée : lecture des diapositives à partir de la vidéo (modèle d'image d'OVH)
 $("#playerSlides").onclick = async () => {
@@ -1236,7 +1321,7 @@ $("#playerSlides").onclick = async () => {
   poll();
 };
 $("#player").onclick = (e) => { if (e.target.id === "player") closePlayer(); };
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeMenus(); closePlayer(); } });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !document.querySelector("dialog[open]")) { closeMenus(); if (player.url) closePlayer(); } });
 
 // ------------------------------------------------------------------ démarrage
 let timers = [];
