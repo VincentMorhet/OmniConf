@@ -199,16 +199,22 @@ La transcription d'avant est gardée (`*.transcript.avant-reid.json`). Réglages
 `REID_MODEL`, `REID_THRESHOLD`.
 
 **Empreintes vocales de référence** (`worker/voiceprints.py`), seulement pour les personnes dont le
-consentement est attesté (Réglages > Empreintes vocales). Le contrôle demande à chaque assistant libre de
-calculer, sur ses enregistrements, l'empreinte des personnes cochées à partir des phrases dont l'auteur est
-certain (sa vignette encadrée pendant que sa voix est nommée par sa vignette, un nom saisi à la main, ou son
-propre micro « Moi »), en fait la moyenne et la diffuse aux assistants (seuls des vecteurs de 192 nombres
-circulent, jamais le son). Recalcul chaque nuit et à chaque nouvelle personne cochée ; décocher efface
-l'empreinte du contrôle puis, au plus tard 2 minutes après, des assistants. À la ré-identification, un groupe
-de voix très proche d'une empreinte (similarité ≥ 0,82, avance ≥ 0,10 sur les autres) prend ce nom, même si
-une autre vignette était encadrée (une personne qui parle depuis le poste d'un autre) ; un nom saisi à la main
-l'emporte toujours. Calibrage sur 11 réunions (82 voix) : même personne d'une réunion à l'autre 0,88 à 0,96,
-personnes différentes 0,76 au plus. Réglages : `VOICEPRINT_MATCH`, `VOICEPRINT_MARGIN`.
+consentement est attesté (Réglages > Empreintes vocales), et seulement à partir de voix **écoutées et validées**.
+Le contrôle demande à chaque assistant libre de chercher, sur ses enregistrements, les phrases des personnes
+cochées dont l'auteur paraît certain (sa vignette encadrée pendant que sa voix est nommée par sa vignette, un nom
+saisi à la main, ou son propre micro « Moi »). Elles sont regroupées en « voix » (une par réunion et par
+origine), chacune avec 3 ou 4 extraits à écouter, dont le passage le moins ressemblant. Dans Réglages, un
+administrateur écoute chaque voix et répond « C'est bien cette personne » ou « Ce n'est pas cette personne » :
+l'empreinte est la moyenne des seules voix validées (une minute de voix au moins), recalculée à chaque décision
+et diffusée aux assistants. Le contrôle ne garde que des vecteurs de 192 nombres et les positions des extraits ;
+le son est lu à la demande sur l'assistant (`/recordings/<réunion>/audio`). Recherche chaque nuit et à chaque
+nouvelle personne cochée : les nouvelles voix attendent d'être écoutées. Décocher efface l'empreinte et les voix
+du contrôle puis, au plus tard 2 minutes après, des assistants. À la ré-identification, un groupe de voix très
+proche d'une empreinte (similarité ≥ 0,82, avance ≥ 0,10 sur les autres) prend ce nom, même si une autre
+vignette était encadrée (une personne qui parle depuis le poste d'un autre, ou une vignette mal détectée) ; un
+nom saisi à la main l'emporte toujours. Calibrage sur 11 réunions (82 voix) : même personne d'une réunion à
+l'autre 0,88 à 0,96, personnes différentes 0,76 au plus. Réglages : `VOICEPRINT_MATCH`, `VOICEPRINT_MARGIN`.
+Test de l'écran de validation : `tests/voice_review_ui_test.py` (données fictives, aucune diffusion).
 
 Choix du modèle (banc d'essai `tests/speaker_models_bench.py`, 6 réunions, 29 personnes, 777 phrases dont
 l'auteur est connu) :

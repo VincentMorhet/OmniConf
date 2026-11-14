@@ -10,6 +10,7 @@ import os
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import quote
 
 import httpx
 import websockets
@@ -813,12 +814,16 @@ async def consents_delete(cid: str, u: dict = Depends(require_admin)):
 
 
 # ----------------------------------------------------------------------------- empreintes vocales de référence
-# Calculées par les assistants sur leurs enregistrements (phrases dont l'auteur est certain), moyennées ici, puis
-# renvoyées à chaque assistant : seulement pour les personnes dont le consentement est attesté (et coché).
+# Les assistants cherchent sur leurs enregistrements les passages sûrs des personnes cochées, regroupés en « voix »
+# (une par réunion et par origine : micro « Moi », voix nommée à la main, vignette), chacune avec quelques extraits.
+# Un administrateur les écoute et valide (ou refuse) chaque voix : l'empreinte est la moyenne des seules voix
+# validées, puis elle est diffusée aux assistants. Personnes cochées seulement ; décocher efface tout.
 vp_state: dict = {"job": None}
 
 
 def vp_load() -> dict:
+    """{nom: {"groups": {voix: {worker, meeting, title, kind, label, sum, n, sec, dropped, clips, found_at}},
+    "review": {voix: {ok, at, by}}, "v", "sec", "n", "meetings", "kinds", "built_at"}} (empreinte : voix validées)."""
     try:
         return json.loads(VOICEPRINT_FILE.read_text())
     except (FileNotFoundError, ValueError):
@@ -844,10 +849,54 @@ def vp_forget(name: str) -> bool:
     return gone
 
 
+def vp_migrate() -> bool:
+    """Empreintes calculées avant la validation à l'écoute : retirées (elles seront refaites à partir des seules
+    voix validées). True si quelque chose a changé."""
+    d = vp_load()
+    old = [n for n, e in d.items() if "groups" not in e]
+    for n in old:
+        d[n] = {"groups": {}, "review": {}}
+    if old:
+        vp_save(d)
+        log.info("empreintes vocales sans validation retirées (%s) : voix à écouter et valider", ", ".join(old))
+    return bool(old)
+
+
+def vp_compute(e: dict) -> dict:
+    """Empreinte d'une personne : moyenne des voix validées à l'écoute (aucune voix validée : pas d'empreinte)."""
+    groups, review = e.get("groups") or {}, e.get("review") or {}
+    ok = [g for gid, g in groups.items() if (review.get(gid) or {}).get("ok") is True and g.get("sum")]
+    old_v, old_at = e.get("v"), e.get("built_at")
+    for k in ("v", "sec", "n", "meetings", "kinds", "built_at"):
+        e.pop(k, None)
+    if not ok:
+        return e
+    tot = [sum(x) for x in zip(*(g["sum"] for g in ok))]
+    norm = sum(x * x for x in tot) ** 0.5 or 1.0
+    v = [round(x / norm, 6) for x in tot]
+    kinds: dict[str, int] = {}
+    for g in ok:
+        kinds[g["kind"]] = kinds.get(g["kind"], 0) + g["n"]
+    e.update(v=v, n=sum(g["n"] for g in ok), sec=round(sum(g["sec"] for g in ok), 1),
+             meetings=len({g["meeting"] for g in ok}), kinds=kinds,
+             built_at=old_at if v == old_v and old_at else dt.datetime.now().astimezone().isoformat(timespec="seconds"))
+    return e
+
+
+def vp_summary(e: dict | None) -> dict:
+    """Ce que l'IHM affiche d'une personne (jamais les vecteurs)."""
+    e = e or {}
+    rv = e.get("review") or {}
+    st = [(rv.get(gid) or {}).get("ok") for gid in (e.get("groups") or {})]
+    return {**{k: e.get(k) for k in ("sec", "n", "meetings", "kinds", "built_at")},
+            "voices": len(st), "pending": st.count(None), "validated": st.count(True), "rejected": st.count(False)}
+
+
 def vp_payload() -> dict:
-    """Empreintes envoyées aux assistants : personnes cochées au moment de l'envoi, rien d'autre."""
+    """Empreintes envoyées aux assistants : personnes cochées au moment de l'envoi, voix validées, rien d'autre."""
     ok = set(vp_consented())
-    return {n: {k: p.get(k) for k in ("v", "sec", "n", "meetings", "built_at")} for n, p in vp_load().items() if n in ok}
+    return {n: {k: p.get(k) for k in ("v", "sec", "n", "meetings", "built_at")} for n, p in vp_load().items()
+            if n in ok and p.get("v")}
 
 
 def vp_version(payload: dict) -> str | None:
@@ -882,63 +931,67 @@ async def voiceprints_push(names=None) -> dict:
     return out
 
 
+def _vp_people(e: dict) -> str:
+    s = vp_summary(e)
+    txt = f"{s['voices']} voix trouvée(s), {s['pending']} à écouter"
+    return txt + (f" ; empreinte : {round((s['sec'] or 0) / 60, 1)} min de voix validée" if e.get("v") else " ; aucune voix validée")
+
+
 async def voiceprints_build(names: list[str], by: str):
-    """Demande le calcul à chaque assistant libre, fait la moyenne, enregistre puis diffuse."""
+    """Demande à chaque assistant libre les voix candidates, les enregistre (validations conservées), recalcule
+    l'empreinte à partir des voix validées et la diffuse."""
     job = vp_state["job"]
     owners = USERS.names()
+    d0 = vp_load()
+    refs = {n: d0[n]["v"] for n in names if (d0.get(n) or {}).get("v")}
 
     async def one(n):
+        exclude = {name: [gid.split("/", 1)[1] for gid, r in ((d0.get(name) or {}).get("review") or {}).items()
+                          if r.get("ok") is False and gid.startswith(n + "/")] for name in names}
         try:
-            r = await http.post(wurl(n) + "/voiceprints/extract", json={"names": names, "owners": owners}, timeout=15)
+            r = await http.post(wurl(n) + "/voiceprints/extract", timeout=15,
+                                json={"names": names, "owners": owners, "exclude": exclude, "refs": refs})
             if r.status_code >= 400:
                 job["workers"][n] = "occupé (réunion en cours)" if r.status_code == 409 else f"erreur {r.status_code}"
-                return None
-            job["workers"][n] = "calcul en cours"
+                return n, None
+            job["workers"][n] = "recherche en cours"
             for _ in range(720):                     # 1 h au plus
                 await asyncio.sleep(5)
                 g = (await http.get(wurl(n) + "/voiceprints/extract", timeout=15)).json()
                 if g.get("state") == "done":
                     job["workers"][n] = "terminé"
-                    return g.get("result") or {}
+                    return n, g.get("result") or {}
                 if g.get("state") in ("error", "fetched", None):
                     job["workers"][n] = f"erreur : {g.get('error') or g.get('state')}"
-                    return None
+                    return n, None
             job["workers"][n] = "trop long"
         except Exception as e:
             job["workers"][n] = f"injoignable ({str(e)[:60]})"
-        return None
-    results = await asyncio.gather(*(one(n) for n in WORKERS))
+        return n, None
+    results = dict(await asyncio.gather(*(one(n) for n in WORKERS)))
     ok = set(vp_consented())          # consentement retiré pendant le calcul : rien n'est gardé
-    d = vp_load()
+    d = vp_load()                     # validations faites pendant la recherche : conservées
     now = dt.datetime.now().astimezone().isoformat(timespec="seconds")
     for name in names:
         if name not in ok:
             d.pop(name, None)
             continue
-        tot, n, sec, meetings = None, 0, 0.0, set()
-        kinds: dict[str, int] = {}
-        for res in results:
-            r = (res or {}).get(name)
-            if not r or not r.get("n"):
+        e = d.setdefault(name, {})
+        e.setdefault("groups", {})
+        e.setdefault("review", {})
+        for w, res in results.items():
+            if res is None:           # assistant occupé ou injoignable : ses voix déjà connues sont gardées
                 continue
-            v = r["sum"]
-            tot = list(v) if tot is None else [a + b for a, b in zip(tot, v)]
-            n += r["n"]
-            sec += r.get("sec") or 0
-            meetings |= set(r.get("meetings") or {})
-            for k, c in (r.get("kinds") or {}).items():
-                kinds[k] = kinds.get(k, 0) + c
-        if tot is None:
-            job["people"][name] = "aucun passage sûr dans les enregistrements"
-            continue
-        norm = sum(x * x for x in tot) ** 0.5 or 1.0
-        d[name] = {"v": [x / norm for x in tot], "n": n, "sec": round(sec, 1), "meetings": len(meetings),
-                   "kinds": kinds, "built_at": now, "by": by}
-        job["people"][name] = f"{round(sec / 60, 1)} min de voix, {len(meetings)} réunion(s)"
+            e["groups"] = {gid: g for gid, g in e["groups"].items() if not gid.startswith(w + "/")}
+            for gid, g in ((res or {}).get(name) or {}).items():
+                if isinstance(g, dict) and g.get("sum") and "clips" in g:
+                    e["groups"][f"{w}/{gid}"] = {**g, "worker": w, "found_at": now}
+        vp_compute(e)
+        job["people"][name] = _vp_people(e)
     vp_save(d)
     job["push"] = await voiceprints_push()
     job.update(state="done", ended=now)
-    log.info("empreintes vocales calculées : %s", job["people"])
+    log.info("empreintes vocales (voix candidates) : %s", job["people"])
 
 
 def vp_start_build(names: list[str], by: str) -> dict:
@@ -954,13 +1007,18 @@ def vp_start_build(names: list[str], by: str) -> dict:
     return vp_state["job"]
 
 
+def vp_need(name: str):
+    if name not in set(vp_consented()):
+        raise HTTPException(404, "personne non cochée : pas d'empreinte vocale")
+
+
 @app.get("/api/voiceprints")
 async def voiceprints_status(u: dict = Depends(require_admin)):
-    """Empreintes des personnes cochées (durées, réunions ; jamais les vecteurs) et diffusion aux assistants."""
+    """Empreintes des personnes cochées (durées, réunions, voix à écouter ; jamais les vecteurs) et diffusion."""
     d, ok = vp_load(), vp_consented()
     st = await asyncio.gather(*(worker_status(n) for n in WORKERS))
     want = vp_version(vp_payload())
-    return {"people": {n: ({k: d[n].get(k) for k in ("sec", "n", "meetings", "kinds", "built_at")} if n in d else None) for n in ok},
+    return {"people": {n: vp_summary(d.get(n)) for n in ok},
             "workers": {x["name"]: ("injoignable" if not x.get("online") else "à jour" if x.get("voiceprints") == want
                                     else "en attente") for x in st},
             "job": vp_state["job"]}
@@ -969,6 +1027,64 @@ async def voiceprints_status(u: dict = Depends(require_admin)):
 @app.post("/api/voiceprints/build")
 async def voiceprints_rebuild(u: dict = Depends(require_admin)):
     return vp_start_build(vp_consented(), u["login"])
+
+
+@app.get("/api/voiceprints/voices")
+async def voiceprints_voices(name: str, u: dict = Depends(require_admin)):
+    """Voix candidates d'une personne cochée, avec leurs extraits à écouter et la décision prise."""
+    vp_need(name)
+    e = vp_load().get(name) or {}
+    rv, names = e.get("review") or {}, USERS.names()
+    out = []
+    for gid, g in (e.get("groups") or {}).items():
+        r = rv.get(gid) or {}
+        out.append({"id": gid, "worker": g.get("worker"), "meeting": g.get("meeting"), "title": g.get("title"),
+                    "kind": g.get("kind"), "label": g.get("label"), "n": g.get("n"), "sec": g.get("sec"),
+                    "dropped": g.get("dropped") or 0, "clips": g.get("clips") or [], "ok": r.get("ok"),
+                    "at": r.get("at"), "by": names.get(r.get("by") or "", r.get("by"))})
+    out.sort(key=lambda x: x["meeting"] or "", reverse=True)
+    out.sort(key=lambda x: x["ok"] is not None)          # à écouter d'abord
+    return {"name": name, "summary": vp_summary(e), "voices": out}
+
+
+class VoiceReview(BaseModel):
+    name: str
+    id: str
+    ok: bool | None = None        # True : c'est bien cette personne ; False : ce n'est pas elle ; None : à réécouter
+
+
+@app.post("/api/voiceprints/review")
+async def voiceprints_review(body: VoiceReview, u: dict = Depends(require_admin)):
+    """Décision prise à l'écoute d'une voix : l'empreinte est recalculée tout de suite et diffusée."""
+    vp_need(body.name)
+    d = vp_load()
+    e = d.get(body.name) or {}
+    if body.id not in (e.get("groups") or {}):
+        raise HTTPException(404, "voix inconnue (recherche refaite entre-temps ?)")
+    rv = e.setdefault("review", {})
+    if body.ok is None:
+        rv.pop(body.id, None)
+    else:
+        rv[body.id] = {"ok": body.ok, "at": dt.datetime.now().astimezone().isoformat(timespec="seconds"), "by": u["login"]}
+    vp_compute(e)
+    vp_save(d)
+    log.info("empreinte vocale de %s : voix %s %s par %s", body.name, body.id,
+             {True: "validée", False: "refusée", None: "remise à écouter"}[body.ok], u["login"])
+    return {"summary": vp_summary(e), "workers": await voiceprints_push()}
+
+
+@app.get("/api/voiceprints/clip")
+async def voiceprints_clip(name: str, id: str, i: int, u: dict = Depends(require_admin)):
+    """Extrait à écouter d'une voix candidate (MP3, lu à la demande sur l'assistant, jamais conservé ici)."""
+    vp_need(name)
+    g = ((vp_load().get(name) or {}).get("groups") or {}).get(id)
+    clips = (g or {}).get("clips") or []
+    if not g or not 0 <= i < len(clips) or g.get("worker") not in WORKERS:
+        raise HTTPException(404, "extrait inconnu")
+    c = clips[i]
+    r = await wcall(g["worker"], "GET", f"/recordings/{quote(g['meeting'] + '.mp4')}/audio", timeout=30,
+                    params={"start": max(0.0, float(c["t"]) - 0.3), "end": float(c["te"]) + 0.3, "fmt": "mp3"})
+    return Response(r.content, media_type="audio/mpeg", headers={"Cache-Control": "private, max-age=3600"})
 
 
 # ----------------------------------------------------------------------------- lexique
@@ -1062,6 +1178,8 @@ async def lexicon_put(body: LexiconBody, u: dict = Depends(require_admin)):
 async def startup():
     asyncio.create_task(scheduler())
     asyncio.create_task(lexicon_sync())
+    if vp_migrate():                  # anciennes empreintes retirées : voix candidates recherchées pour validation
+        vp_start_build(vp_consented(), "mise à jour")
 
 
 # ----------------------------------------------------------------------------- écran distant (noVNC)

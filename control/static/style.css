@@ -728,3 +728,34 @@ h3.day { font-size: 12.5px; letter-spacing: .06em; text-transform: uppercase; co
 .vp-status .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: space-between; margin: 6px 0 10px; }
 .consent small.vp { display: block; color: var(--mute); }
 .consent small.vp.ok { color: var(--ok, #16a34a); }
+/* voix à écouter et valider avant de calculer l'empreinte */
+#voiceList .vp-voices { flex: 1 1 100%; min-width: 0; margin: 2px 0 4px; }
+.vp-voices > summary { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; cursor: pointer; list-style: none;
+  color: var(--accent); font-size: 14px; min-height: 40px; }
+.vp-voices > summary::-webkit-details-marker { display: none; }
+.vp-voices > summary svg.i { width: 18px; height: 18px; }
+.vp-voices > summary small { color: var(--mute); font-size: 12.5px; }
+.vp-voices .hint { margin: 4px 0 8px; }
+.vv { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; margin: 8px 0; background: var(--card2); }
+.vv.todo { border-color: color-mix(in srgb, var(--warn) 55%, var(--line)); }
+.vv.ok { border-color: color-mix(in srgb, var(--ok) 50%, var(--line)); }
+.vv.no { opacity: .72; }
+.vv-h { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; font-size: 14px; }
+.vv-h span:not(.vv-st) { min-width: 0; overflow-wrap: anywhere; }
+.vv-st { margin-left: auto; font-size: 12px; padding: 1px 9px; border-radius: 999px; white-space: nowrap; }
+.vv-st.todo { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
+.vv-st.ok { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
+.vv-st.no { background: color-mix(in srgb, var(--bad) 14%, transparent); color: var(--bad); }
+.vv-m { font-size: 12.5px; color: var(--mute); margin: 3px 0 8px; overflow-wrap: anywhere; }
+.vv-clips { display: grid; gap: 6px; }
+#voiceList .vv-clips button.clip { display: flex; gap: 10px; align-items: flex-start; width: 100%; text-align: left; padding: 8px 10px;
+  min-height: 44px; border-radius: 10px; background: var(--field); border: 1px solid var(--line); color: var(--fg); font-size: 13px; line-height: 1.35; }
+.vv-clips .clip span { min-width: 0; overflow-wrap: anywhere; }
+.vv-clips .clip svg.i { flex: 0 0 22px; width: 22px; height: 22px; margin-top: 1px; color: var(--accent); }
+.vv-clips .clip.playing { border-color: var(--accent); }
+.vv-clips .clip.loading svg.i { opacity: .45; }
+#voiceList .vv-clips .clip.odd { border-style: dashed; }
+.vv-act { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+#voiceList .vv-act button { min-height: 42px; flex: 0 1 auto; }
+.vv-act small { color: var(--mute); font-size: 12px; }
+@media (max-width: 720px) { #voiceList .vv-act button { flex: 1 1 100%; } }

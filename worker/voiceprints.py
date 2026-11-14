@@ -1,15 +1,18 @@
 """Empreintes vocales de référence : seulement pour les personnes dont le consentement est attesté.
 
 Le registre des consentements est tenu par le contrôle (Réglages > Empreintes vocales). Le contrôle demande à chaque
-assistant de calculer, sur ses propres enregistrements, les empreintes des personnes cochées (`extract`), en fait
-la moyenne et renvoie à chaque assistant l'ensemble des empreintes (`save`). Décocher une personne : son empreinte
-est effacée du contrôle et, au plus tard 2 minutes après, de chaque assistant.
+assistant de chercher, sur ses propres enregistrements, les passages sûrs des personnes cochées (`extract`) : ils
+sont regroupés en « voix » (une par réunion et par origine), chacune avec quelques extraits à écouter. Une
+personne habilitée écoute et valide (ou refuse) chaque voix ; l'empreinte est la moyenne des seules voix validées.
+Le contrôle renvoie ensuite à chaque assistant l'ensemble des empreintes (`save`). Décocher une personne : son
+empreinte et ses voix sont effacées du contrôle et, au plus tard 2 minutes après, de chaque assistant.
 
-Phrases retenues pour l'empreinte d'une personne (auteur certain, 2,5 s au moins) :
+Passages sûrs d'une personne (2,5 s au moins) :
 - voix nommée d'après la vignette de la personne ET vignette de cette personne signalée pendant la phrase ;
 - voix nommée à la main avec ce nom ;
 - canal « Moi » (micro de l'utilisateur de l'assistant) des réunions lancées par le compte de cette personne.
-Seules des empreintes (vecteurs de 192 nombres) sortent de l'assistant, jamais le son.
+Seules des empreintes (vecteurs de 192 nombres) et des positions dans les vidéos sortent de l'assistant ; le son
+des extraits n'est lu qu'à la demande (écoute dans l'IHM), jamais conservé ailleurs.
 
 Reconnaissance (`match`, appelée par la ré-identification de fin de réunion) : le centre de chaque groupe de
 voix est comparé aux empreintes ; un groupe très proche d'une empreinte (et nettement plus que des autres)
@@ -44,6 +47,8 @@ MARGIN = float(os.environ.get("VOICEPRINT_MARGIN", "0.10"))   # avance minimale 
 MIN_PHRASES = 3           # phrases longues d'un groupe pour calculer son centre
 PHRASE_MIN = 0.50         # phrase gardée pour l'empreinte si assez proche des phrases sûres de la personne
 MIN_GROUP_SEC = 8.0       # groupe trop court : centre peu fiable, pas de reconnaissance
+CLIP_MAX = 12.0           # extrait à écouter : 12 s au plus
+KINDS_FR = {"moi": "micro de l'assistant (canal « Moi »)", "nommée": "voix nommée à la main", "vignette": "vignette"}
 _DUP = re.compile(r"\s\(\d+\)$")
 
 
@@ -100,8 +105,8 @@ def save(prints: dict) -> str | None:
 
 
 # ----------------------------------------------------------------------------- calcul sur les enregistrements
-def samples(doc: dict, targets: dict[str, str], owner_name: str | None) -> dict[str, list[tuple[float, float, str]]]:
-    """Phrases sûres de chaque personne visée dans une transcription : {nom: [(début, fin, nature)]}.
+def samples(doc: dict, targets: dict[str, str], owner_name: str | None) -> dict[str, list[tuple]]:
+    """Phrases sûres de chaque personne visée dans une transcription : {nom: [(début, fin, nature, texte, voix)]}.
     `targets` : {clé du nom: nom}."""
     sp = doc.get("speakers") or {}
     owner_k = key(owner_name)
@@ -113,11 +118,11 @@ def samples(doc: dict, targets: dict[str, str], owner_name: str | None) -> dict[
         if b - a < MIN_SEC:
             continue
         who = kind = None
+        s = sp.get(e["spk"]) or {}
         if e["spk"] == "ME":
             if owner_k in targets:
                 who, kind = targets[owner_k], "moi"
         else:
-            s = sp.get(e["spk"]) or {}
             if s.get("source") == "manual":
                 k = key(s.get("name") or s.get("label"))
                 if k in targets:
@@ -127,19 +132,58 @@ def samples(doc: dict, targets: dict[str, str], owner_name: str | None) -> dict[
                 if k in targets and key(e.get("ui")) == k:
                     who, kind = targets[k], "vignette"
         if who:
-            out.setdefault(who, []).append((a, b, kind))
+            out.setdefault(who, []).append((a, b, kind, (e.get("text") or "").strip(),
+                                            "Moi" if e["spk"] == "ME" else (s.get("label") or e["spk"])))
     for who in out:
         out[who] = sorted(out[who], key=lambda x: x[0] - x[1])[:MAX_PER_MEETING]
     return out
 
 
-def extract(rec_dir: Path, names: list[str], owners: dict[str, str] | None = None) -> dict:
-    """Sommes d'empreintes par personne sur les enregistrements de l'assistant (le contrôle en fait la moyenne).
-    {nom: {"sum": [...], "n": phrases, "sec": secondes, "meetings": {réunion: phrases}, "kinds": {nature: phrases}}}"""
+def _clips(rows: list[tuple]) -> list[dict]:
+    """Extraits à écouter d'une voix : 3 passages répartis dans la réunion (les plus ressemblants de chaque tiers,
+    4 à 12 s de préférence) et le passage gardé le moins ressemblant (pour repérer une voix mélangée).
+    rows : [(similarité, début, fin, texte)]."""
+    rows = sorted(rows, key=lambda r: r[1])
+    out, used = [], set()
+    third = max(1, -(-len(rows) // 3))
+    for i in range(0, len(rows), third):
+        part = rows[i:i + third]
+        good = [r for r in part if 4.0 <= r[2] - r[1]] or part
+        r = max(good, key=lambda r: (r[0], r[2] - r[1]))
+        used.add(r[1])
+        out.append(r)
+    odd = min(rows, key=lambda r: r[0])
+    if odd[1] not in used and odd[0] < 0.75:
+        out.append(odd + ("odd",))
+    return [{"t": round(r[1], 2), "te": round(min(r[2], r[1] + CLIP_MAX), 2), "text": r[3][:200], "sim": round(r[0], 2),
+             **({"odd": True} if len(r) > 4 else {})} for r in out]
+
+
+def _title(rec_dir: Path, stem: str, meta: dict) -> str | None:
+    """Titre du compte rendu s'il existe (le titre de la réunion n'est souvent que la plateforme)."""
+    try:
+        rr = json.loads((rec_dir / f"{stem}.report.json").read_text())
+        rr = rr.get("report") or rr
+        t = ((rr.get("cr") or {}).get("titre") or rr.get("titre") or "").strip()
+        if t:
+            return t[:120]
+    except (OSError, ValueError, AttributeError):
+        pass
+    return meta.get("title")
+
+
+def extract(rec_dir: Path, names: list[str], owners: dict[str, str] | None = None,
+            exclude: dict[str, list[str]] | None = None, refs: dict[str, list[float]] | None = None) -> dict:
+    """Voix candidates de chaque personne sur les enregistrements de l'assistant, une par réunion et par origine
+    (le contrôle les fait valider, puis fait la moyenne des voix validées) :
+    {nom: {"<réunion>|<origine>": {"meeting", "title", "kind", "label", "sum": [...], "n", "sec", "dropped",
+    "clips": [{"t", "te", "text", "sim", "odd"?}]}}}.
+    `exclude` : {nom: [voix refusées]} (écartées de la référence) ; `refs` : {nom: empreinte validée}."""
     import reid
     targets = {key(n): n for n in names if key(n)}
-    owners = owners or {}
-    found: dict[str, list] = {}       # nom -> [(empreinte, nature, réunion, durée)]
+    owners, exclude, refs = owners or {}, exclude or {}, refs or {}
+    found: dict[str, list] = {}       # nom -> [(empreinte, nature, réunion, durée, début, fin, texte)]
+    info: dict[str, dict] = {}        # réunion|nature -> titre, nom de la voix
     ex = None
     for t in sorted(rec_dir.glob("*.transcript.json")):
         stem = t.name[: -len(".transcript.json")]
@@ -158,26 +202,49 @@ def extract(rec_dir: Path, names: list[str], owners: dict[str, str] | None = Non
         ex = ex or reid._extractor()
         pcm = reid.load_pcm(media)
         for who, spans in todo.items():
-            embs = reid.embed_all(pcm, [(a, b) for a, b, _ in spans], ex)
-            found.setdefault(who, []).extend((_unit(v), kind, stem, min(b - a, reid.MAX_SEG_SEC))
-                                             for (a, b, kind), v in zip(spans, embs) if v is not None)
+            embs = reid.embed_all(pcm, [(a, b) for a, b, *_ in spans], ex)
+            for (a, b, kind, text, label), v in zip(spans, embs):
+                if v is None:
+                    continue
+                found.setdefault(who, []).append((_unit(v), kind, stem, min(b - a, reid.MAX_SEG_SEC), a, b, text))
+                g = info.setdefault(f"{stem}|{kind}", {"meeting": stem, "title": _title(rec_dir, stem, meta),
+                                                         "kind": kind, "labels": {}})
+                g["labels"][label] = g["labels"].get(label, 0) + 1
         log.info("empreintes : %s -> %s", stem, {w: len(s) for w, s in todo.items()})
     out: dict[str, dict] = {}
     for who, L in found.items():
         # phrases parasites écartées (voix nommée à la main qui mêlait plusieurs personnes, écho) : comparées à
-        # une empreinte provisoire faite des phrases les plus sûres (micro « Moi », vignette). Calibrage :
-        # au seuil 0,50, 96 % des phrases de la personne gardées, 2 % de celles des autres
-        sure = [u for u, kind, _, _ in L if kind in ("moi", "vignette")]
-        ref = _unit(np.mean(sure if len(sure) >= 10 else [u for u, *_ in L], axis=0))
-        keep = [x for x in L if float(x[0] @ ref) >= PHRASE_MIN]
-        if not keep:
-            continue
-        o = {"sum": [float(v) for v in np.sum([u for u, *_ in keep], axis=0)], "n": len(keep),
-             "sec": round(sum(d for *_, d in keep), 1), "meetings": {}, "kinds": {}, "dropped": len(L) - len(keep)}
-        for _, kind, stem, _ in keep:
-            o["meetings"][stem] = o["meetings"].get(stem, 0) + 1
-            o["kinds"][kind] = o["kinds"].get(kind, 0) + 1
-        out[who] = o
+        # l'empreinte validée si elle existe, sinon à une référence provisoire faite des phrases les plus sûres
+        # (micro « Moi », vignette) hors voix refusées. Calibrage : au seuil 0,50, 96 % des phrases de la personne
+        # gardées, 2 % de celles des autres
+        no = set(exclude.get(who) or [])
+        if refs.get(who) and len(refs[who]) >= 64:
+            ref = _unit(refs[who])
+        else:
+            pool = [x for x in L if f"{x[2]}|{x[1]}" not in no]
+            sure = [x[0] for x in pool if x[1] in ("moi", "vignette")]
+            ref = _unit(np.mean(sure if len(sure) >= 10 else [x[0] for x in pool] or [x[0] for x in L], axis=0))
+        groups: dict[str, dict] = {}
+        for u, kind, stem, d, a, b, text in L:
+            gid = f"{stem}|{kind}"
+            g = groups.setdefault(gid, {"keep": [], "dropped": 0})
+            sim = float(u @ ref)
+            if sim >= PHRASE_MIN:
+                g["keep"].append((u, d, sim, a, b, text))
+            else:
+                g["dropped"] += 1
+        res = {}
+        for gid, g in groups.items():
+            if not g["keep"]:
+                continue
+            i = info[gid]
+            res[gid] = {"meeting": i["meeting"], "title": i["title"], "kind": i["kind"],
+                        "label": max(i["labels"], key=i["labels"].get),
+                        "sum": [round(float(x), 6) for x in np.sum([k[0] for k in g["keep"]], axis=0)],
+                        "n": len(g["keep"]), "sec": round(sum(k[1] for k in g["keep"]), 1), "dropped": g["dropped"],
+                        "clips": _clips([(k[2], k[3], k[4], k[5]) for k in g["keep"]])}
+        if res:
+            out[who] = res
     return out
 
 

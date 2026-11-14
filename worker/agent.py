@@ -150,6 +150,8 @@ class PrintsBody(BaseModel):
 class ExtractReq(BaseModel):
     names: list[str]
     owners: dict[str, str] = {}
+    exclude: dict[str, list[str]] = {}      # voix refusées à l'écoute (par personne)
+    refs: dict[str, list[float]] = {}       # empreintes validées (référence pour écarter les phrases parasites)
 
 
 @app.get("/voiceprints", dependencies=[Depends(auth)])
@@ -168,17 +170,17 @@ async def voiceprints_put(body: PrintsBody):
     return {"version": v, "people": sorted(voiceprints.load())}
 
 
-def _extract_low_priority(names, owners):
+def _extract_low_priority(names, owners, exclude, refs):
     try:   # priorité basse (fil de calcul seul) : une réunion qui démarre sur l'assistant reste prioritaire
         os.setpriority(os.PRIO_PROCESS, __import__("threading").get_native_id(), 15)
     except OSError:
         pass
-    return voiceprints.extract(recorder.dir, names, owners)
+    return voiceprints.extract(recorder.dir, names, owners, exclude, refs)
 
 
-async def _vp_extract(names, owners):
+async def _vp_extract(names, owners, exclude, refs):
     try:
-        vp_job.update(result=await asyncio.to_thread(_extract_low_priority, names, owners), state="done")
+        vp_job.update(result=await asyncio.to_thread(_extract_low_priority, names, owners, exclude, refs), state="done")
     except Exception as e:
         log.warning("empreintes : %s", e)
         vp_job.update(state="error", error=str(e)[:300])
@@ -187,7 +189,8 @@ async def _vp_extract(names, owners):
 
 @app.post("/voiceprints/extract", dependencies=[Depends(auth)])
 async def voiceprints_extract(req: ExtractReq):
-    """Calcul (en tâche de fond) des empreintes des personnes demandées sur les enregistrements de l'assistant."""
+    """Recherche (en tâche de fond) des voix candidates des personnes demandées sur les enregistrements de
+    l'assistant : empreintes par voix et positions des extraits à écouter, pour validation dans l'IHM."""
     if vp_job.get("state") == "running":
         return {"state": "running"}
     if state["state"] not in ("idle",) or recorder.active or transcriber.active:
@@ -195,13 +198,13 @@ async def voiceprints_extract(req: ExtractReq):
     names = [n for n in req.names if n.strip()][:200]
     vp_job.clear()
     vp_job.update(state="running", started=time.time(), names=names)
-    asyncio.create_task(_vp_extract(names, req.owners))
+    asyncio.create_task(_vp_extract(names, req.owners, req.exclude, req.refs))
     return {"state": "running"}
 
 
 @app.get("/voiceprints/extract", dependencies=[Depends(auth)])
 async def voiceprints_extract_get():
-    """État du calcul ; le résultat (sommes d'empreintes) n'est rendu qu'une fois, puis oublié."""
+    """État du calcul ; le résultat (empreintes par voix, extraits) n'est rendu qu'une fois, puis oublié."""
     out = {k: vp_job.get(k) for k in ("state", "error", "started", "ended", "names")}
     if vp_job.get("state") == "done":
         out["result"] = vp_job.pop("result", None)

@@ -812,6 +812,7 @@ async function setSink(id) {
   localStorage.sinkId = id;
   for (const s of Object.values(sessions)) await applySink(s.audio);
   await applySink($("#player video"));
+  await applySink(vpAudio);
 }
 async function setMicDevice(id) {
   localStorage.micId = id;
@@ -1568,13 +1569,76 @@ $("#usersBox").addEventListener("toggle", () => { if ($("#usersBox").open) loadU
 // Empreintes vocales : consentements attestés sur l'honneur par un administrateur
 let consentTarget = null, consentText = "";
 const fmtMin = (sec) => sec >= 90 ? `${(sec / 60).toLocaleString("fr-FR", { maximumFractionDigits: 1 })} min` : `${Math.round(sec)} s`;
+const VP_KIND = { moi: "micro de l'assistant (canal « Moi »)", "nommée": "voix nommée à la main", vignette: "voix nommée d'après sa vignette" };
+const stemDate = (stem) => { const m = /^(\d{4})(\d\d)(\d\d)-(\d\d)(\d\d)/.exec(stem || ""); return m ? `${m[3]}/${m[2]}/${m[1]} ${m[4]}:${m[5]}` : stem || ""; };
 function vpLine(name, vp) {
   if (!vp) return "";
-  const job = vp.job, p = vp.people?.[name];
-  if (job?.state === "running" && job.names?.includes(name)) return `<small class="vp">⏳ empreinte vocale : calcul en cours…</small>`;
-  if (p) return `<small class="vp ok">🎙 empreinte vocale active : ${fmtMin(p.sec)} de voix sûre, ${p.meetings} réunion${p.meetings > 1 ? "s" : ""}`
-    + (p.sec < 60 ? " (trop peu pour reconnaître : une minute au moins)" : "") + `, calculée le ${new Date(p.built_at).toLocaleDateString("fr-FR")}</small>`;
-  return `<small class="vp">🎙 empreinte vocale : pas encore de passage sûr (réunion où cette personne parle avec sa propre vignette, ou nommée à la main) ; recalcul chaque nuit</small>`;
+  const job = vp.job, p = vp.people?.[name] || {};
+  const todo = p.pending ? ` · <b>${p.pending} voix à écouter</b>` : "";
+  let h;
+  if (p.sec) h = `<small class="vp ok">🎙 empreinte vocale active : ${fmtMin(p.sec)} de voix validée, ${p.meetings} réunion${p.meetings > 1 ? "s" : ""}`
+    + (p.sec < 60 ? " (trop peu pour reconnaître : une minute au moins)" : "") + `${todo}</small>`;
+  else if (p.voices) h = `<small class="vp">🎙 pas encore d'empreinte : aucune voix validée${todo}</small>`;
+  else h = `<small class="vp">🎙 empreinte vocale : pas encore de passage sûr (réunion où cette personne parle avec sa propre vignette, ou nommée à la main) ; recherche chaque nuit</small>`;
+  if (job?.state === "running" && job.names?.includes(name)) h += `<small class="vp">⏳ recherche des voix en cours…</small>`;
+  return h;
+}
+function vpVoices(name, vp) {
+  const p = vp?.people?.[name];
+  if (!p?.voices) return "";
+  return `<details class="vp-voices" data-name="${esc(name)}"><summary><svg class="i"><use href="#i-audio"/></svg>Écouter et valider les voix
+    <small>${p.voices} voix${p.pending ? ` · ${p.pending} à écouter` : ""}${p.validated ? ` · ${p.validated} validée${p.validated > 1 ? "s" : ""}` : ""}${p.rejected ? ` · ${p.rejected} refusée${p.rejected > 1 ? "s" : ""}` : ""}</small></summary>
+    <p class="hint">Chaque voix regroupe les passages d'une réunion attribués à ${esc(name)}. Écoutez les extraits : l'empreinte n'est
+      calculée qu'à partir des voix que vous validez. Une voix refusée n'est plus utilisée.</p><div class="vv-list"><small>Chargement…</small></div></details>`;
+}
+function voiceH(name, v) {
+  const cls = v.ok === true ? "ok" : v.ok === false ? "no" : "todo";
+  const st = { ok: "✓ validée", no: "✕ refusée", todo: "à écouter" }[cls];
+  return `<div class="vv ${cls}" data-id="${esc(v.id)}">
+    <div class="vv-h"><b>${esc(stemDate(v.meeting))}</b><span>${esc(v.title || "réunion sans titre")}</span><span class="vv-st ${cls}">${st}</span></div>
+    <div class="vv-m">${esc(VP_KIND[v.kind] || v.kind)}${v.kind !== "moi" && v.label ? ` « ${esc(v.label)} »` : ""} · ${v.n} passage${v.n > 1 ? "s" : ""}, ${fmtMin(v.sec)}${v.dropped ? ` · ${v.dropped} écarté${v.dropped > 1 ? "s" : ""} (trop différent${v.dropped > 1 ? "s" : ""})` : ""}</div>
+    <div class="vv-clips">${(v.clips || []).map((c, i) => `<button type="button" class="clip${c.odd ? " odd" : ""}" data-i="${i}">
+      <svg class="i"><use href="#i-play"/></svg><span><b>${fmtT(c.t)}</b>${c.odd ? " · le passage le moins ressemblant" : ""}<br>« ${esc(c.text)} »</span></button>`).join("")}</div>
+    <div class="vv-act"><button type="button" class="yes ${v.ok === true ? "primary" : ""}">C'est bien ${esc(name)}</button>
+      <button type="button" class="nope ${v.ok === false ? "danger" : ""}">Ce n'est pas cette personne</button>
+      ${v.ok != null && v.at ? `<small>${v.ok ? "validée" : "refusée"} le ${new Date(v.at).toLocaleDateString("fr-FR")}${v.by ? " par " + esc(v.by) : ""}</small>` : ""}</div></div>`;
+}
+// un seul lecteur pour les extraits (lecture lancée dans le geste de l'utilisateur, exigé par iOS)
+const vpAudio = new Audio(); vpAudio.preload = "none"; let vpBtn = null;
+const vpIcon = (b, on) => { const u = b && $("use", b); if (u) u.setAttribute("href", on ? "#i-pause" : "#i-play"); };
+function vpStop() { if (vpBtn) { vpBtn.classList.remove("playing", "loading"); vpIcon(vpBtn, false); } vpBtn = null; }
+vpAudio.onplaying = () => vpBtn?.classList.remove("loading");
+vpAudio.onended = vpAudio.onpause = vpStop;
+vpAudio.onerror = () => { if (vpBtn) toast("Extrait illisible (assistant injoignable ?)"); vpStop(); };
+function playClip(btn, url) {
+  if (vpBtn === btn && !vpAudio.paused) { vpAudio.pause(); return; }
+  vpStop(); vpBtn = btn; btn.classList.add("playing", "loading"); vpIcon(btn, true);
+  vpAudio.src = url; applySink(vpAudio);
+  vpAudio.play().catch(e => { if (e.name !== "AbortError") toast("Lecture impossible : " + e.message); vpStop(); });
+}
+const vpOpen = new Set(), vpCache = {};
+function renderVoices(list, name, d) {
+  list.innerHTML = d.voices.length ? d.voices.map(v => voiceH(name, v)).join("") : "<small>Aucune voix trouvée.</small>";
+  list.querySelectorAll(".vv").forEach(el => {
+    const v = d.voices.find(x => x.id === el.dataset.id);
+    el.querySelectorAll(".clip").forEach(b => b.onclick = () =>
+      playClip(b, `/api/voiceprints/clip?name=${encodeURIComponent(name)}&id=${encodeURIComponent(v.id)}&i=${b.dataset.i}`));
+    const decide = async (ok) => {
+      const want = v.ok === ok ? null : ok;      // nouveau clic sur le choix déjà fait : voix remise à écouter
+      try {
+        await api("/api/voiceprints/review", { method: "POST", json: { name, id: v.id, ok: want } });
+        toast(want === true ? "Voix validée : empreinte recalculée" : want === false ? "Voix refusée : elle n'est plus utilisée" : "Voix remise à écouter");
+      } catch (e) { toast(e.message); }
+      loadConsents();
+    };
+    $(".yes", el).onclick = () => decide(true); $(".nope", el).onclick = () => decide(false);
+  });
+}
+async function loadVoices(det, name) {
+  const list = $(".vv-list", det);
+  if (vpCache[name]) renderVoices(list, name, vpCache[name]);
+  try { vpCache[name] = await api(`/api/voiceprints/voices?name=${encodeURIComponent(name)}`); renderVoices(list, name, vpCache[name]); }
+  catch (e) { list.innerHTML = `<small>Erreur : ${esc(e.message)}</small>`; }
 }
 let vpPoll = null;
 async function loadConsents() {
@@ -1584,12 +1648,14 @@ async function loadConsents() {
     consentText = d.attestation;
     const st = $("#vpStatus"), job = vp?.job, n = Object.keys(vp?.people || {}).length;
     const active = Object.values(vp?.people || {}).filter(p => p && p.sec >= 60).length;
-    st.innerHTML = !vp || !n ? "" : `<div class="row"><small>${job?.state === "running" ? "⏳ Calcul des empreintes en cours sur les assistants…"
-      : `${active} empreinte${active > 1 ? "s" : ""} active${active > 1 ? "s" : ""} sur ${n} personne${n > 1 ? "s" : ""} cochée${n > 1 ? "s" : ""}. Assistants : `
+    const pending = Object.values(vp?.people || {}).reduce((a, p) => a + (p?.pending || 0), 0);
+    st.innerHTML = !vp || !n ? "" : `<div class="row"><small>${job?.state === "running" ? "⏳ Recherche des voix en cours sur les assistants…"
+      : `${active} empreinte${active > 1 ? "s" : ""} active${active > 1 ? "s" : ""} sur ${n} personne${n > 1 ? "s" : ""} cochée${n > 1 ? "s" : ""}`
+        + (pending ? `, <b>${pending} voix à écouter</b>` : "") + `. Une empreinte n'est faite que des voix validées à l'écoute. Assistants : `
         + Object.entries(vp.workers || {}).map(([w, s]) => `${esc(w)} ${esc(s)}`).join(", ")}</small>
-      <button type="button" class="ghost" id="vpBuild" ${job?.state === "running" ? "disabled" : ""}><svg class="i"><use href="#i-refresh"/></svg>Recalculer</button></div>`;
+      <button type="button" class="ghost" id="vpBuild" title="Chercher les voix des personnes cochées dans les enregistrements (fait aussi chaque nuit)" ${job?.state === "running" ? "disabled" : ""}><svg class="i"><use href="#i-refresh"/></svg>Chercher les voix</button></div>`;
     if ($("#vpBuild")) $("#vpBuild").onclick = async () => {
-      try { await api("/api/voiceprints/build", { method: "POST" }); toast("Calcul des empreintes lancé"); } catch (e) { toast(e.message); }
+      try { await api("/api/voiceprints/build", { method: "POST" }); toast("Recherche des voix lancée"); } catch (e) { toast(e.message); }
       loadConsents(); };
     clearTimeout(vpPoll);
     if (job?.state === "running" && $("#voiceBox").open) vpPoll = setTimeout(loadConsents, 5000);
@@ -1598,8 +1664,13 @@ async function loadConsents() {
       <div class="who"><small>${x.consent ? `✅ consentement attesté le ${new Date(x.at).toLocaleString("fr-FR")} par ${esc(x.by_name || x.by)}`
         : x.at ? `retiré le ${new Date(x.at).toLocaleString("fr-FR")}` : "en attente du consentement"}</small>
         ${x.note ? `<small>📝 ${esc(x.note)}</small>` : ""}${x.consent ? vpLine(x.name, vp) : ""}</div>
-      ${x.consent ? "" : `<button class="ghost danger remove" title="Retirer de la liste">🗑</button>`}</div>`).join("")
+      ${x.consent ? "" : `<button class="ghost danger remove" title="Retirer de la liste">🗑</button>`}${x.consent ? vpVoices(x.name, vp) : ""}</div>`).join("")
       : "<small>Personne pour l'instant.</small>";
+    box.querySelectorAll(".vp-voices").forEach(det => {
+      const name = det.dataset.name;
+      det.addEventListener("toggle", () => { if (det.open) { vpOpen.add(name); loadVoices(det, name); } else vpOpen.delete(name); });
+      if (vpOpen.has(name)) det.open = true;
+    });
     box.querySelectorAll(".consent").forEach(row => {
       const x = d.items.find(i => i.id === row.dataset.id), cb = $("input[type=checkbox]", row);
       cb.onchange = async () => {
