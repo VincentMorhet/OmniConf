@@ -759,7 +759,20 @@ h3.day { font-size: 12.5px; letter-spacing: .06em; text-transform: uppercase; co
 .vv-clips .clip.playing { border-color: var(--accent); }
 .vv-clips .clip.loading svg.i { opacity: .45; }
 #voiceList .vv-clips .clip.odd { border-style: dashed; }
+.vv-clips .clip-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: stretch; }
+#voiceList .vv-clips .clip-row > button.clip { flex: 1 1 0; min-width: 0; width: auto; }
+#voiceList .vv-clips .clip-row > button.cx { flex: 0 0 44px; min-height: 44px; padding: 0; border-radius: 10px; display: inline-flex;
+  align-items: center; justify-content: center; background: var(--field); border: 1px solid var(--line); color: var(--bad); }
+.vv-clips .clip-row > button.cx svg.i { width: 18px; height: 18px; }
+.vv-clips .clip-row.refused > button.clip { opacity: .6; }
+.vv-clips .clip-row.refused > button.clip span { text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--bad) 60%, transparent); }
+.vv-clips .clip-ref { flex: 1 1 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 0 2px 4px; }
+.vv-clips .clip-ref small { color: var(--bad); font-size: 12.5px; }
+#voiceList .vv-clips .clip-ref button { min-height: 36px; padding: 4px 10px; }
+.vv-clips .clip-ref select, .vv-act select { width: auto; max-width: 100%; min-height: 40px; }
+.vv-tip { margin: 8px 0 0; font-size: 12px; color: var(--mute); }
+.vv.manual { border-style: dashed; }
 .vv-act { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
 #voiceList .vv-act button { min-height: 42px; flex: 0 1 auto; }
 .vv-act small { color: var(--mute); font-size: 12px; }
-@media (max-width: 720px) { #voiceList .vv-act button { flex: 1 1 100%; } }
+@media (max-width: 720px) { #voiceList .vv-act button, .vv-act select { flex: 1 1 100%; } }

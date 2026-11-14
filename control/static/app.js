@@ -1581,6 +1581,7 @@ function vpLine(name, vp) {
   else if (p.voices) h = `<small class="vp">🎙 pas encore d'empreinte : aucune voix validée${todo}</small>`;
   else h = `<small class="vp">🎙 empreinte vocale : pas encore de passage sûr (réunion où cette personne parle avec sa propre vignette, ou nommée à la main) ; recherche chaque nuit</small>`;
   if (job?.state === "running" && job.names?.includes(name)) h += `<small class="vp">⏳ recherche des voix en cours…</small>`;
+  else if (vp.scheduled?.includes(name)) h += `<small class="vp">⏳ extraits refusés : nouvelle recherche dans une minute</small>`;
   return h;
 }
 function vpVoices(name, vp) {
@@ -1589,49 +1590,92 @@ function vpVoices(name, vp) {
   return `<details class="vp-voices" data-name="${esc(name)}"><summary><svg class="i"><use href="#i-audio"/></svg>Écouter et valider les voix
     <small>${p.voices} voix${p.pending ? ` · ${p.pending} à écouter` : ""}${p.validated ? ` · ${p.validated} validée${p.validated > 1 ? "s" : ""}` : ""}${p.rejected ? ` · ${p.rejected} refusée${p.rejected > 1 ? "s" : ""}` : ""}</small></summary>
     <p class="hint">Chaque voix regroupe les passages d'une réunion attribués à ${esc(name)}. Écoutez les extraits : l'empreinte n'est
-      calculée qu'à partir des voix que vous validez. Une voix refusée n'est plus utilisée.</p><div class="vv-list"><small>Chargement…</small></div></details>`;
+      calculée qu'à partir des voix que vous validez. Un extrait qui n'est pas ${esc(name)} se refuse seul (✕) ; une voix
+      ou un extrait peut aussi être attribué à une autre personne cochée (« C'est… »).</p><div class="vv-list"><small>Chargement…</small></div></details>`;
+}
+let vpPeople = [];      // personnes cochées (seules à pouvoir recevoir une voix)
+const toOpts = (name, label) => `<option value="">${label}</option>` + vpPeople.filter(n => n !== name).map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join("");
+function clipH(name, v, c) {
+  const url = `/api/voiceprints/clip?name=${encodeURIComponent(name)}&id=${encodeURIComponent(v.id)}&t=${c.t}`;
+  const others = vpPeople.some(n => n !== name);
+  return `<div class="clip-row${c.refused ? " refused" : ""}" data-t="${c.t}">
+    <button type="button" class="clip${c.odd ? " odd" : ""}" data-url="${esc(url)}"><svg class="i"><use href="#i-play"/></svg>
+      <span><b>${fmtT(c.t)}</b>${c.odd ? " · le passage le moins ressemblant" : ""}<br>« ${esc(c.text || "")} »</span></button>
+    ${v.manual || v.ok === false ? "" : c.refused ? "" : `<button type="button" class="cx" title="Ce passage n'est pas ${esc(name)}" aria-label="Ce passage n'est pas ${esc(name)}"><svg class="i"><use href="#i-x"/></svg></button>`}
+    ${c.refused ? `<div class="clip-ref"><small>✕ pas ${esc(name)}${c.to ? ` · attribué à <b>${esc(c.to)}</b>` : c.gone ? " · retiré de la voix, avec les passages qui lui ressemblaient" : " · retiré de l'empreinte"}</small>
+      <button type="button" class="ghost cx-undo">Rétablir</button>
+      ${!c.to && c.attributable && others ? `<select class="cx-to" aria-label="Attribuer ce passage à">${toOpts(name, "C'est…")}</select>` : ""}</div>` : ""}</div>`;
 }
 function voiceH(name, v) {
   const cls = v.ok === true ? "ok" : v.ok === false ? "no" : "todo";
-  const st = { ok: "✓ validée", no: "✕ refusée", todo: "à écouter" }[cls];
-  return `<div class="vv ${cls}" data-id="${esc(v.id)}">
+  const st = { ok: "✓ validée", no: v.to ? "✕ attribuée à " + esc(v.to) : "✕ refusée", todo: "à écouter" }[cls];
+  const refused = (v.clips || []).filter(c => c.refused).length;
+  const origin = v.manual ? `attribuée par vous depuis les voix de « ${esc(v.from || "")} » · ${esc(VP_KIND[v.kind] || v.kind || "")}`
+    : `${esc(VP_KIND[v.kind] || v.kind)}${v.kind !== "moi" && v.label ? ` « ${esc(v.label)} »` : ""}`;
+  return `<div class="vv ${cls}${v.manual ? " manual" : ""}" data-id="${esc(v.id)}">
     <div class="vv-h"><b>${esc(stemDate(v.meeting))}</b><span>${esc(v.title || "réunion sans titre")}</span><span class="vv-st ${cls}">${st}</span></div>
-    <div class="vv-m">${esc(VP_KIND[v.kind] || v.kind)}${v.kind !== "moi" && v.label ? ` « ${esc(v.label)} »` : ""} · ${v.n} passage${v.n > 1 ? "s" : ""}, ${fmtMin(v.sec)}${v.dropped ? ` · ${v.dropped} écarté${v.dropped > 1 ? "s" : ""} (trop différent${v.dropped > 1 ? "s" : ""})` : ""}</div>
-    <div class="vv-clips">${(v.clips || []).map((c, i) => `<button type="button" class="clip${c.odd ? " odd" : ""}" data-i="${i}">
-      <svg class="i"><use href="#i-play"/></svg><span><b>${fmtT(c.t)}</b>${c.odd ? " · le passage le moins ressemblant" : ""}<br>« ${esc(c.text)} »</span></button>`).join("")}</div>
-    <div class="vv-act"><button type="button" class="yes ${v.ok === true ? "primary" : ""}">C'est bien ${esc(name)}</button>
-      <button type="button" class="nope ${v.ok === false ? "danger" : ""}">Ce n'est pas cette personne</button>
-      ${v.ok != null && v.at ? `<small>${v.ok ? "validée" : "refusée"} le ${new Date(v.at).toLocaleDateString("fr-FR")}${v.by ? " par " + esc(v.by) : ""}</small>` : ""}</div></div>`;
+    <div class="vv-m">${origin} · ${v.n} passage${v.n > 1 ? "s" : ""}, ${fmtMin(v.sec)}${v.dropped ? ` · ${v.dropped} écarté${v.dropped > 1 ? "s" : ""} (trop différent${v.dropped > 1 ? "s" : ""})` : ""}${v.dropped_neg ? ` · ${v.dropped_neg} retiré${v.dropped_neg > 1 ? "s" : ""} (semblable${v.dropped_neg > 1 ? "s" : ""} à un extrait refusé)` : ""}${refused ? ` · ${refused} extrait${refused > 1 ? "s" : ""} refusé${refused > 1 ? "s" : ""}` : ""}</div>
+    <div class="vv-clips">${(v.clips || []).map(c => clipH(name, v, c)).join("")}</div>
+    ${v.manual ? `<div class="vv-act"><button type="button" class="nope danger">Retirer cette voix</button>
+      ${v.at ? `<small>attribuée le ${new Date(v.at).toLocaleDateString("fr-FR")}${v.by ? " par " + esc(v.by) : ""}</small>` : ""}</div>`
+    : v.to ? `<div class="vv-act"><button type="button" class="nope">Remettre à écouter</button>
+      <small>attribuée à ${esc(v.to)}${v.at ? ` le ${new Date(v.at).toLocaleDateString("fr-FR")}` : ""} : en cas d'erreur, retirez-la aussi dans les voix de ${esc(v.to)}</small></div>`
+    : `<div class="vv-act"><button type="button" class="yes ${v.ok === true ? "primary" : ""}">C'est bien ${esc(name)}</button>
+      <button type="button" class="nope ${v.ok === false && !v.to ? "danger" : ""}">Ce n'est pas cette personne</button>
+      ${vpPeople.some(n => n !== name) && !v.to ? `<select class="vv-to" aria-label="Attribuer toute cette voix à">${toOpts(name, "C'est quelqu'un d'autre…")}</select>` : ""}
+      ${v.ok != null && v.at ? `<small>${v.to ? "attribuée" : v.ok ? "validée" : "refusée"} le ${new Date(v.at).toLocaleDateString("fr-FR")}${v.by ? " par " + esc(v.by) : ""}</small>` : ""}</div>`}
+    ${!v.manual && v.ok !== false ? `<p class="vv-tip">Un extrait n'est pas ${esc(name)} ? Touchez ✕ à sa droite : il est retiré, puis la voix est recalculée sans les passages qui lui ressemblent.</p>` : ""}</div>`;
 }
 // un seul lecteur pour les extraits (lecture lancée dans le geste de l'utilisateur, exigé par iOS)
-const vpAudio = new Audio(); vpAudio.preload = "none"; let vpBtn = null;
+const vpAudio = new Audio(); vpAudio.preload = "none"; let vpBtn = null, vpUrl = "";
 const vpIcon = (b, on) => { const u = b && $("use", b); if (u) u.setAttribute("href", on ? "#i-pause" : "#i-play"); };
-function vpStop() { if (vpBtn) { vpBtn.classList.remove("playing", "loading"); vpIcon(vpBtn, false); } vpBtn = null; }
+function vpStop() { if (vpBtn) { vpBtn.classList.remove("playing", "loading"); vpIcon(vpBtn, false); } vpBtn = null; vpUrl = ""; }
 vpAudio.onplaying = () => vpBtn?.classList.remove("loading");
 vpAudio.onended = vpAudio.onpause = vpStop;
 vpAudio.onerror = () => { if (vpBtn) toast("Extrait illisible (assistant injoignable ?)"); vpStop(); };
 function playClip(btn, url) {
   if (vpBtn === btn && !vpAudio.paused) { vpAudio.pause(); return; }
-  vpStop(); vpBtn = btn; btn.classList.add("playing", "loading"); vpIcon(btn, true);
+  vpStop(); vpBtn = btn; vpUrl = url; btn.classList.add("playing", "loading"); vpIcon(btn, true);
   vpAudio.src = url; applySink(vpAudio);
   vpAudio.play().catch(e => { if (e.name !== "AbortError") toast("Lecture impossible : " + e.message); vpStop(); });
 }
 const vpOpen = new Set(), vpCache = {};
 function renderVoices(list, name, d) {
   list.innerHTML = d.voices.length ? d.voices.map(v => voiceH(name, v)).join("") : "<small>Aucune voix trouvée.</small>";
+  const post = async (path, json, msg) => {
+    try { await api(path, { method: "POST", json }); toast(msg); } catch (e) { toast(e.message); }
+    loadConsents();
+  };
   list.querySelectorAll(".vv").forEach(el => {
     const v = d.voices.find(x => x.id === el.dataset.id);
-    el.querySelectorAll(".clip").forEach(b => b.onclick = () =>
-      playClip(b, `/api/voiceprints/clip?name=${encodeURIComponent(name)}&id=${encodeURIComponent(v.id)}&i=${b.dataset.i}`));
+    el.querySelectorAll(".clip").forEach(b => {
+      b.onclick = () => playClip(b, b.dataset.url);
+      if (vpUrl && b.dataset.url === vpUrl && !vpAudio.paused) { vpBtn = b; b.classList.add("playing"); vpIcon(b, true); }
+    });
+    el.querySelectorAll(".clip-row").forEach(row => {
+      const t = +row.dataset.t;
+      if ($(".cx", row)) $(".cx", row).onclick = () => post("/api/voiceprints/clip-review", { name, id: v.id, t, ok: false },
+        "Extrait refusé : retiré de l'empreinte ; la voix sera recalculée dans une minute sans les passages qui lui ressemblent");
+      if ($(".cx-undo", row)) $(".cx-undo", row).onclick = () => post("/api/voiceprints/clip-review", { name, id: v.id, t, ok: null }, "Extrait rétabli");
+      if ($(".cx-to", row)) $(".cx-to", row).onchange = (e) => {
+        const to = e.target.value; if (!to) return;
+        if (!confirm(`Attribuer ce passage à ${to} ? Il comptera dans l'empreinte de ${to}.`)) { e.target.value = ""; return; }
+        post("/api/voiceprints/attribute", { name, id: v.id, t, to }, `Passage attribué à ${to}`);
+      };
+    });
     const decide = async (ok) => {
-      const want = v.ok === ok ? null : ok;      // nouveau clic sur le choix déjà fait : voix remise à écouter
-      try {
-        await api("/api/voiceprints/review", { method: "POST", json: { name, id: v.id, ok: want } });
-        toast(want === true ? "Voix validée : empreinte recalculée" : want === false ? "Voix refusée : elle n'est plus utilisée" : "Voix remise à écouter");
-      } catch (e) { toast(e.message); }
-      loadConsents();
+      const want = v.manual ? false : v.ok === ok ? null : ok;   // nouveau clic sur le choix déjà fait : voix remise à écouter
+      if (v.manual && !confirm(`Retirer cette voix de l'empreinte de ${name} ?`)) return;
+      post("/api/voiceprints/review", { name, id: v.id, ok: want },
+        v.manual ? "Voix retirée" : want === true ? "Voix validée : empreinte recalculée" : want === false ? "Voix refusée : elle n'est plus utilisée" : "Voix remise à écouter");
     };
-    $(".yes", el).onclick = () => decide(true); $(".nope", el).onclick = () => decide(false);
+    if ($(".yes", el)) $(".yes", el).onclick = () => decide(true);
+    if ($(".nope", el)) $(".nope", el).onclick = () => decide(false);
+    if ($(".vv-to", el)) $(".vv-to", el).onchange = (e) => {
+      const to = e.target.value; if (!to) return;
+      if (!confirm(`Attribuer toute cette voix à ${to} ? Elle sera refusée pour ${name} et comptera dans l'empreinte de ${to}.`)) { e.target.value = ""; return; }
+      post("/api/voiceprints/attribute", { name, id: v.id, to }, `Voix attribuée à ${to}`);
+    };
   });
 }
 async function loadVoices(det, name) {
@@ -1645,7 +1689,7 @@ async function loadConsents() {
   const box = $("#voiceList");
   try {
     const [d, vp] = await Promise.all([api("/api/voice-consents"), api("/api/voiceprints").catch(() => null)]);
-    consentText = d.attestation;
+    consentText = d.attestation; vpPeople = Object.keys(vp?.people || {});
     const st = $("#vpStatus"), job = vp?.job, n = Object.keys(vp?.people || {}).length;
     const active = Object.values(vp?.people || {}).filter(p => p && p.sec >= 60).length;
     const pending = Object.values(vp?.people || {}).reduce((a, p) => a + (p?.pending || 0), 0);
@@ -1658,7 +1702,7 @@ async function loadConsents() {
       try { await api("/api/voiceprints/build", { method: "POST" }); toast("Recherche des voix lancée"); } catch (e) { toast(e.message); }
       loadConsents(); };
     clearTimeout(vpPoll);
-    if (job?.state === "running" && $("#voiceBox").open) vpPoll = setTimeout(loadConsents, 5000);
+    if ((job?.state === "running" || vp?.scheduled?.length) && $("#voiceBox").open) vpPoll = setTimeout(loadConsents, 5000);
     box.innerHTML = d.items.length ? d.items.map(x => `<div class="user consent" data-id="${esc(x.id)}">
       <label class="ck"><input type="checkbox" ${x.consent ? "checked" : ""}> <b>${esc(x.name)}</b></label>
       <div class="who"><small>${x.consent ? `✅ consentement attesté le ${new Date(x.at).toLocaleString("fr-FR")} par ${esc(x.by_name || x.by)}`

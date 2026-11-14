@@ -48,6 +48,7 @@ MIN_PHRASES = 3           # phrases longues d'un groupe pour calculer son centre
 PHRASE_MIN = 0.50         # phrase gardée pour l'empreinte si assez proche des phrases sûres de la personne
 MIN_GROUP_SEC = 8.0       # groupe trop court : centre peu fiable, pas de reconnaissance
 CLIP_MAX = 12.0           # extrait à écouter : 12 s au plus
+NEG_MIN = 0.50            # phrase retirée si elle ressemble à un extrait refusé (≥ 0,50) plus qu'à la personne
 KINDS_FR = {"moi": "micro de l'assistant (canal « Moi »)", "nommée": "voix nommée à la main", "vignette": "vignette"}
 _DUP = re.compile(r"\s\(\d+\)$")
 
@@ -139,24 +140,26 @@ def samples(doc: dict, targets: dict[str, str], owner_name: str | None) -> dict[
     return out
 
 
-def _clips(rows: list[tuple]) -> list[dict]:
+def _clips(rows: list[dict]) -> list[dict]:
     """Extraits à écouter d'une voix : 3 passages répartis dans la réunion (les plus ressemblants de chaque tiers,
-    4 à 12 s de préférence) et le passage gardé le moins ressemblant (pour repérer une voix mélangée).
-    rows : [(similarité, début, fin, texte)]."""
-    rows = sorted(rows, key=lambda r: r[1])
+    4 à 12 s de préférence) et le passage gardé le moins ressemblant (pour repérer une voix mélangée). Chaque
+    extrait garde son empreinte (« v ») : un extrait refusé à l'écoute est retiré de l'empreinte sans attendre.
+    rows : [{"sim", "a", "b", "text", "u", "d"}]."""
+    rows = sorted(rows, key=lambda r: r["a"])
     out, used = [], set()
     third = max(1, -(-len(rows) // 3))
     for i in range(0, len(rows), third):
         part = rows[i:i + third]
-        good = [r for r in part if 4.0 <= r[2] - r[1]] or part
-        r = max(good, key=lambda r: (r[0], r[2] - r[1]))
-        used.add(r[1])
+        good = [r for r in part if 4.0 <= r["b"] - r["a"]] or part
+        r = max(good, key=lambda r: (r["sim"], r["b"] - r["a"]))
+        used.add(r["a"])
         out.append(r)
-    odd = min(rows, key=lambda r: r[0])
-    if odd[1] not in used and odd[0] < 0.75:
-        out.append(odd + ("odd",))
-    return [{"t": round(r[1], 2), "te": round(min(r[2], r[1] + CLIP_MAX), 2), "text": r[3][:200], "sim": round(r[0], 2),
-             **({"odd": True} if len(r) > 4 else {})} for r in out]
+    odd = min(rows, key=lambda r: r["sim"])
+    if odd["a"] not in used and odd["sim"] < 0.75:
+        out.append({**odd, "odd": True})
+    return [{"t": round(r["a"], 2), "te": round(min(r["b"], r["a"] + CLIP_MAX), 2), "text": r["text"][:200],
+             "sim": round(r["sim"], 2), "d": round(r["d"], 2), "v": [round(float(x), 5) for x in r["u"]],
+             **({"odd": True} if r.get("odd") else {})} for r in out]
 
 
 def _title(rec_dir: Path, stem: str, meta: dict) -> str | None:
@@ -173,15 +176,18 @@ def _title(rec_dir: Path, stem: str, meta: dict) -> str | None:
 
 
 def extract(rec_dir: Path, names: list[str], owners: dict[str, str] | None = None,
-            exclude: dict[str, list[str]] | None = None, refs: dict[str, list[float]] | None = None) -> dict:
+            exclude: dict[str, list[str]] | None = None, refs: dict[str, list[float]] | None = None,
+            negatives: dict[str, list] | None = None) -> dict:
     """Voix candidates de chaque personne sur les enregistrements de l'assistant, une par réunion et par origine
     (le contrôle les fait valider, puis fait la moyenne des voix validées) :
     {nom: {"<réunion>|<origine>": {"meeting", "title", "kind", "label", "sum": [...], "n", "sec", "dropped",
-    "clips": [{"t", "te", "text", "sim", "odd"?}]}}}.
-    `exclude` : {nom: [voix refusées]} (écartées de la référence) ; `refs` : {nom: empreinte validée}."""
+    "dropped_neg", "clips": [{"t", "te", "text", "sim", "d", "v", "odd"?}]}}}.
+    `exclude` : {nom: [voix refusées]} (écartées de la référence) ; `refs` : {nom: empreinte validée} ;
+    `negatives` : {nom: [[réunion, début]]} extraits refusés à l'écoute : ces phrases, et toutes celles qui leur
+    ressemblent plus qu'à la personne, sont retirées de ses voix."""
     import reid
     targets = {key(n): n for n in names if key(n)}
-    owners, exclude, refs = owners or {}, exclude or {}, refs or {}
+    owners, exclude, refs, negatives = owners or {}, exclude or {}, refs or {}, negatives or {}
     found: dict[str, list] = {}       # nom -> [(empreinte, nature, réunion, durée, début, fin, texte)]
     info: dict[str, dict] = {}        # réunion|nature -> titre, nom de la voix
     ex = None
@@ -218,19 +224,25 @@ def extract(rec_dir: Path, names: list[str], owners: dict[str, str] | None = Non
         # (micro « Moi », vignette) hors voix refusées. Calibrage : au seuil 0,50, 96 % des phrases de la personne
         # gardées, 2 % de celles des autres
         no = set(exclude.get(who) or [])
+        negs = [(str(x[0]), float(x[1])) for x in (negatives.get(who) or []) if isinstance(x, (list, tuple)) and len(x) == 2]
+        is_neg = [any(stem == ns and abs(a - nt) < 0.05 for ns, nt in negs) for _, _, stem, _, a, _, _ in L]
+        N = np.array([x[0] for x, n in zip(L, is_neg) if n]) if any(is_neg) else None
         if refs.get(who) and len(refs[who]) >= 64:
             ref = _unit(refs[who])
         else:
-            pool = [x for x in L if f"{x[2]}|{x[1]}" not in no]
+            pool = [x for x, n in zip(L, is_neg) if f"{x[2]}|{x[1]}" not in no and not n]
             sure = [x[0] for x in pool if x[1] in ("moi", "vignette")]
             ref = _unit(np.mean(sure if len(sure) >= 10 else [x[0] for x in pool] or [x[0] for x in L], axis=0))
         groups: dict[str, dict] = {}
         for u, kind, stem, d, a, b, text in L:
             gid = f"{stem}|{kind}"
-            g = groups.setdefault(gid, {"keep": [], "dropped": 0})
+            g = groups.setdefault(gid, {"keep": [], "dropped": 0, "dropped_neg": 0})
             sim = float(u @ ref)
-            if sim >= PHRASE_MIN:
-                g["keep"].append((u, d, sim, a, b, text))
+            near_neg = float(np.max(N @ u)) if N is not None else -1.0
+            if near_neg >= NEG_MIN and near_neg > sim:     # semblable à un extrait refusé plus qu'à la personne
+                g["dropped_neg"] += 1
+            elif sim >= PHRASE_MIN:
+                g["keep"].append({"u": u, "d": d, "sim": sim, "a": a, "b": b, "text": text})
             else:
                 g["dropped"] += 1
         res = {}
@@ -240,9 +252,9 @@ def extract(rec_dir: Path, names: list[str], owners: dict[str, str] | None = Non
             i = info[gid]
             res[gid] = {"meeting": i["meeting"], "title": i["title"], "kind": i["kind"],
                         "label": max(i["labels"], key=i["labels"].get),
-                        "sum": [round(float(x), 6) for x in np.sum([k[0] for k in g["keep"]], axis=0)],
-                        "n": len(g["keep"]), "sec": round(sum(k[1] for k in g["keep"]), 1), "dropped": g["dropped"],
-                        "clips": _clips([(k[2], k[3], k[4], k[5]) for k in g["keep"]])}
+                        "sum": [round(float(x), 6) for x in np.sum([k["u"] for k in g["keep"]], axis=0)],
+                        "n": len(g["keep"]), "sec": round(sum(k["d"] for k in g["keep"]), 1), "dropped": g["dropped"],
+                        "dropped_neg": g["dropped_neg"], "clips": _clips(g["keep"])}
         if res:
             out[who] = res
     return out

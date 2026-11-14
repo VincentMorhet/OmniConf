@@ -822,8 +822,10 @@ vp_state: dict = {"job": None}
 
 
 def vp_load() -> dict:
-    """{nom: {"groups": {voix: {worker, meeting, title, kind, label, sum, n, sec, dropped, clips, found_at}},
-    "review": {voix: {ok, at, by}}, "v", "sec", "n", "meetings", "kinds", "built_at"}} (empreinte : voix validées)."""
+    """{nom: {"groups": {voix: {worker, meeting, title, kind, label, sum, n, sec, dropped, clips, found_at,
+    manual?, from?}}, "review": {voix: {ok, at, by, to?}}, "clip_review": {"<voix>@<début>": {gid, t, te, text, at,
+    by, to?}}, "v", "sec", "n", "meetings", "kinds", "built_at"}} (empreinte : voix validées, extraits refusés retirés ;
+    voix « manual » : attribuées à la main depuis la liste d'une autre personne)."""
     try:
         return json.loads(VOICEPRINT_FILE.read_text())
     except (FileNotFoundError, ValueError):
@@ -864,8 +866,17 @@ def vp_migrate() -> bool:
 
 def vp_compute(e: dict) -> dict:
     """Empreinte d'une personne : moyenne des voix validées à l'écoute (aucune voix validée : pas d'empreinte)."""
-    groups, review = e.get("groups") or {}, e.get("review") or {}
-    ok = [g for gid, g in groups.items() if (review.get(gid) or {}).get("ok") is True and g.get("sum")]
+    groups, review, cr = e.get("groups") or {}, e.get("review") or {}, e.get("clip_review") or {}
+    ok = []
+    for gid, g in groups.items():
+        if (review.get(gid) or {}).get("ok") is not True or not g.get("sum"):
+            continue
+        sm, n, sec = list(g["sum"]), g["n"], g["sec"]
+        for c in g.get("clips") or []:          # extrait refusé à l'écoute : retiré tout de suite
+            if f"{gid}@{c['t']}" in cr and c.get("v") and not g.get("manual"):
+                sm, n, sec = [a - b for a, b in zip(sm, c["v"])], n - 1, sec - float(c.get("d") or c["te"] - c["t"])
+        if n > 0:
+            ok.append({**g, "sum": sm, "n": n, "sec": max(0.0, sec)})
     old_v, old_at = e.get("v"), e.get("built_at")
     for k in ("v", "sec", "n", "meetings", "kinds", "built_at"):
         e.pop(k, None)
@@ -948,9 +959,13 @@ async def voiceprints_build(names: list[str], by: str):
     async def one(n):
         exclude = {name: [gid.split("/", 1)[1] for gid, r in ((d0.get(name) or {}).get("review") or {}).items()
                           if r.get("ok") is False and gid.startswith(n + "/")] for name in names}
+        negatives = {name: [[c["gid"].split("/", 1)[1].rsplit("|", 1)[0], c["t"]]
+                            for c in ((d0.get(name) or {}).get("clip_review") or {}).values()
+                            if c.get("gid", "").startswith(n + "/")] for name in names}
         try:
             r = await http.post(wurl(n) + "/voiceprints/extract", timeout=15,
-                                json={"names": names, "owners": owners, "exclude": exclude, "refs": refs})
+                                json={"names": names, "owners": owners, "exclude": exclude, "refs": refs,
+                                      "negatives": negatives})
             if r.status_code >= 400:
                 job["workers"][n] = "occupé (réunion en cours)" if r.status_code == 409 else f"erreur {r.status_code}"
                 return n, None
@@ -982,7 +997,7 @@ async def voiceprints_build(names: list[str], by: str):
         for w, res in results.items():
             if res is None:           # assistant occupé ou injoignable : ses voix déjà connues sont gardées
                 continue
-            e["groups"] = {gid: g for gid, g in e["groups"].items() if not gid.startswith(w + "/")}
+            e["groups"] = {gid: g for gid, g in e["groups"].items() if g.get("manual") or not gid.startswith(w + "/")}
             for gid, g in ((res or {}).get(name) or {}).items():
                 if isinstance(g, dict) and g.get("sum") and "clips" in g:
                     e["groups"][f"{w}/{gid}"] = {**g, "worker": w, "found_at": now}
@@ -1007,6 +1022,22 @@ def vp_start_build(names: list[str], by: str) -> dict:
     return vp_state["job"]
 
 
+def vp_schedule(names: list[str], by: str, delay: float = 60):
+    """Nouvelle recherche des voix peu après des extraits refusés ou rétablis (plusieurs clics regroupés) : les
+    passages qui ressemblent à un extrait refusé sont retirés, de nouveaux extraits proposés."""
+    vp_state.setdefault("pending", set()).update(names)
+    t = vp_state.get("timer")
+    if t and not t.done():
+        t.cancel()
+
+    async def later():
+        await asyncio.sleep(delay)
+        while vp_state["job"] and vp_state["job"].get("state") == "running":
+            await asyncio.sleep(10)
+        vp_start_build(sorted(vp_state.pop("pending", set())), by)
+    vp_state["timer"] = asyncio.create_task(later())
+
+
 def vp_need(name: str):
     if name not in set(vp_consented()):
         raise HTTPException(404, "personne non cochée : pas d'empreinte vocale")
@@ -1018,7 +1049,7 @@ async def voiceprints_status(u: dict = Depends(require_admin)):
     d, ok = vp_load(), vp_consented()
     st = await asyncio.gather(*(worker_status(n) for n in WORKERS))
     want = vp_version(vp_payload())
-    return {"people": {n: vp_summary(d.get(n)) for n in ok},
+    return {"people": {n: vp_summary(d.get(n)) for n in ok}, "scheduled": sorted(vp_state.get("pending") or []),
             "workers": {x["name"]: ("injoignable" if not x.get("online") else "à jour" if x.get("voiceprints") == want
                                     else "en attente") for x in st},
             "job": vp_state["job"]}
@@ -1034,16 +1065,25 @@ async def voiceprints_voices(name: str, u: dict = Depends(require_admin)):
     """Voix candidates d'une personne cochée, avec leurs extraits à écouter et la décision prise."""
     vp_need(name)
     e = vp_load().get(name) or {}
-    rv, names = e.get("review") or {}, USERS.names()
+    rv, cr, names = e.get("review") or {}, e.get("clip_review") or {}, USERS.names()
     out = []
     for gid, g in (e.get("groups") or {}).items():
         r = rv.get(gid) or {}
+        clips, seen = [], set()
+        for c in g.get("clips") or []:
+            k = f"{gid}@{c['t']}"
+            seen.add(k)
+            clips.append({**{x: c.get(x) for x in ("t", "te", "text", "sim", "odd")}, "refused": k in cr,
+                          "to": (cr.get(k) or {}).get("to"), "attributable": bool(c.get("v"))})
+        for k, c in cr.items():                  # refusé puis retiré de la voix par la recherche suivante
+            if c.get("gid") == gid and k not in seen:
+                clips.append({"t": c["t"], "te": c["te"], "text": c.get("text"), "refused": True, "gone": True, "to": c.get("to")})
         out.append({"id": gid, "worker": g.get("worker"), "meeting": g.get("meeting"), "title": g.get("title"),
                     "kind": g.get("kind"), "label": g.get("label"), "n": g.get("n"), "sec": g.get("sec"),
-                    "dropped": g.get("dropped") or 0, "clips": g.get("clips") or [], "ok": r.get("ok"),
+                    "dropped": g.get("dropped") or 0, "dropped_neg": g.get("dropped_neg") or 0, "clips": clips,
+                    "manual": bool(g.get("manual")), "from": g.get("from"), "ok": r.get("ok"), "to": r.get("to"),
                     "at": r.get("at"), "by": names.get(r.get("by") or "", r.get("by"))})
-    out.sort(key=lambda x: x["meeting"] or "", reverse=True)
-    out.sort(key=lambda x: x["ok"] is not None)          # à écouter d'abord
+    out.sort(key=lambda x: (x["meeting"] or "", x["id"]), reverse=True)   # ordre fixe : rien ne bouge sous le doigt
     return {"name": name, "summary": vp_summary(e), "voices": out}
 
 
@@ -1062,7 +1102,10 @@ async def voiceprints_review(body: VoiceReview, u: dict = Depends(require_admin)
     if body.id not in (e.get("groups") or {}):
         raise HTTPException(404, "voix inconnue (recherche refaite entre-temps ?)")
     rv = e.setdefault("review", {})
-    if body.ok is None:
+    if body.ok is False and e["groups"][body.id].get("manual"):
+        e["groups"].pop(body.id)
+        rv.pop(body.id, None)
+    elif body.ok is None:
         rv.pop(body.id, None)
     else:
         rv[body.id] = {"ok": body.ok, "at": dt.datetime.now().astimezone().isoformat(timespec="seconds"), "by": u["login"]}
@@ -1073,18 +1116,118 @@ async def voiceprints_review(body: VoiceReview, u: dict = Depends(require_admin)
     return {"summary": vp_summary(e), "workers": await voiceprints_push()}
 
 
+def _vp_clip(e: dict, gid: str, t: float) -> dict | None:
+    for c in ((e.get("groups") or {}).get(gid) or {}).get("clips") or []:
+        if abs(float(c["t"]) - t) < 0.01:
+            return c
+    c = (e.get("clip_review") or {}).get(f"{gid}@{round(t, 2)}")
+    return c if c and c.get("gid") == gid else None
+
+
 @app.get("/api/voiceprints/clip")
-async def voiceprints_clip(name: str, id: str, i: int, u: dict = Depends(require_admin)):
+async def voiceprints_clip(name: str, id: str, t: float, u: dict = Depends(require_admin)):
     """Extrait à écouter d'une voix candidate (MP3, lu à la demande sur l'assistant, jamais conservé ici)."""
     vp_need(name)
-    g = ((vp_load().get(name) or {}).get("groups") or {}).get(id)
-    clips = (g or {}).get("clips") or []
-    if not g or not 0 <= i < len(clips) or g.get("worker") not in WORKERS:
+    e = vp_load().get(name) or {}
+    g = (e.get("groups") or {}).get(id) or {}
+    c = _vp_clip(e, id, t)
+    w, meeting = g.get("worker") or id.split("/", 1)[0], g.get("meeting") or id.split("/", 1)[-1].rsplit("|", 1)[0]
+    if not c or w not in WORKERS:
         raise HTTPException(404, "extrait inconnu")
-    c = clips[i]
-    r = await wcall(g["worker"], "GET", f"/recordings/{quote(g['meeting'] + '.mp4')}/audio", timeout=30,
+    r = await wcall(w, "GET", f"/recordings/{quote(meeting + '.mp4')}/audio", timeout=30,
                     params={"start": max(0.0, float(c["t"]) - 0.3), "end": float(c["te"]) + 0.3, "fmt": "mp3"})
     return Response(r.content, media_type="audio/mpeg", headers={"Cache-Control": "private, max-age=3600"})
+
+
+class ClipReview(BaseModel):
+    name: str
+    id: str
+    t: float
+    ok: bool | None = None        # False : ce passage n'est pas cette personne ; None : rétabli
+
+
+@app.post("/api/voiceprints/clip-review")
+async def voiceprints_clip_review(body: ClipReview, u: dict = Depends(require_admin)):
+    """Extrait refusé (ou rétabli) à l'écoute : retiré de l'empreinte tout de suite ; une minute après, une nouvelle
+    recherche retire de la voix les passages qui lui ressemblent et propose d'autres extraits."""
+    vp_need(body.name)
+    d = vp_load()
+    e = d.get(body.name) or {}
+    c = _vp_clip(e, body.id, body.t)
+    if not c:
+        raise HTTPException(404, "extrait inconnu (recherche refaite entre-temps ?)")
+    cr = e.setdefault("clip_review", {})
+    k = f"{body.id}@{c['t']}"
+    if body.ok is False:
+        cr[k] = {"gid": body.id, "t": c["t"], "te": c["te"], "text": (c.get("text") or "")[:200],
+                 "at": dt.datetime.now().astimezone().isoformat(timespec="seconds"), "by": u["login"]}
+    else:
+        cr.pop(k, None)
+    vp_compute(e)
+    vp_save(d)
+    log.info("empreinte vocale de %s : extrait %s %s par %s", body.name, k, "refusé" if body.ok is False else "rétabli", u["login"])
+    if not (e.get("groups") or {}).get(body.id, {}).get("manual"):
+        vp_schedule([body.name], u["login"])
+    return {"summary": vp_summary(e), "workers": await voiceprints_push()}
+
+
+class VoiceAttribute(BaseModel):
+    name: str                     # personne sous laquelle la voix a été trouvée
+    id: str
+    t: float | None = None        # un seul extrait ; absent : toute la voix
+    to: str                       # personne de la liste (cochée) à qui elle appartient en réalité
+
+
+@app.post("/api/voiceprints/attribute")
+async def voiceprints_attribute(body: VoiceAttribute, u: dict = Depends(require_admin)):
+    """Voix (ou extrait) reconnue à l'écoute comme celle d'une autre personne de la liste : refusée pour la première,
+    ajoutée (validée) à l'empreinte de l'autre. Seulement vers une personne dont le consentement est attesté."""
+    vp_need(body.name)
+    if body.to == body.name:
+        raise HTTPException(400, "même personne")
+    if body.to not in set(vp_consented()):
+        raise HTTPException(400, f"{body.to} : consentement non attesté, aucune voix ne peut lui être attribuée")
+    d = vp_load()
+    src = d.get(body.name) or {}
+    g = (src.get("groups") or {}).get(body.id)
+    if not g or g.get("manual"):
+        raise HTTPException(404, "voix inconnue (recherche refaite entre-temps ?)")
+    now = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    cr = src.setdefault("clip_review", {})
+    if body.t is not None:
+        c = _vp_clip(src, body.id, body.t)
+        if not c or not c.get("v"):
+            raise HTTPException(409, "extrait sans empreinte : relancez « Chercher les voix », puis recommencez")
+        tid = f"{body.id}@{c['t']}"
+        new = {**{k: g.get(k) for k in ("worker", "meeting", "title", "label")}, "kind": g.get("kind"), "manual": True,
+               "from": body.name, "sum": list(c["v"]), "n": 1, "sec": float(c.get("d") or c["te"] - c["t"]), "dropped": 0,
+               "clips": [c], "found_at": now}
+        cr[tid] = {"gid": body.id, "t": c["t"], "te": c["te"], "text": (c.get("text") or "")[:200], "at": now,
+                   "by": u["login"], "to": body.to}
+    else:
+        tid = f"{body.id}@voix"
+        sm, n, sec, clips = list(g["sum"]), g["n"], g["sec"], []
+        for c in g.get("clips") or []:          # extraits déjà refusés : pas transmis
+            if f"{body.id}@{c['t']}" in cr:
+                if c.get("v"):
+                    sm, n, sec = [a - b for a, b in zip(sm, c["v"])], n - 1, sec - float(c.get("d") or c["te"] - c["t"])
+            else:
+                clips.append(c)
+        if n <= 0:
+            raise HTTPException(400, "plus aucun passage dans cette voix")
+        new = {**{k: g.get(k) for k in ("worker", "meeting", "title", "label", "kind")}, "manual": True, "from": body.name,
+               "sum": sm, "n": n, "sec": round(max(0.0, sec), 1), "dropped": 0, "clips": clips, "found_at": now}
+        src.setdefault("review", {})[body.id] = {"ok": False, "at": now, "by": u["login"], "to": body.to}
+    dst = d.setdefault(body.to, {})
+    dst.setdefault("groups", {})[tid] = new
+    dst.setdefault("review", {})[tid] = {"ok": True, "at": now, "by": u["login"]}
+    vp_compute(src)
+    vp_compute(dst)
+    vp_save(d)
+    log.info("empreinte vocale : %s (%s) attribué à %s par %s", tid, body.name, body.to, u["login"])
+    if body.t is not None:
+        vp_schedule([body.name], u["login"])
+    return {"summary": vp_summary(src), "to": vp_summary(dst), "workers": await voiceprints_push()}
 
 
 # ----------------------------------------------------------------------------- lexique

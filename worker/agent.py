@@ -152,6 +152,7 @@ class ExtractReq(BaseModel):
     owners: dict[str, str] = {}
     exclude: dict[str, list[str]] = {}      # voix refusées à l'écoute (par personne)
     refs: dict[str, list[float]] = {}       # empreintes validées (référence pour écarter les phrases parasites)
+    negatives: dict[str, list] = {}         # extraits refusés à l'écoute : [[réunion, début]] par personne
 
 
 @app.get("/voiceprints", dependencies=[Depends(auth)])
@@ -170,17 +171,17 @@ async def voiceprints_put(body: PrintsBody):
     return {"version": v, "people": sorted(voiceprints.load())}
 
 
-def _extract_low_priority(names, owners, exclude, refs):
+def _extract_low_priority(names, owners, exclude, refs, negatives):
     try:   # priorité basse (fil de calcul seul) : une réunion qui démarre sur l'assistant reste prioritaire
         os.setpriority(os.PRIO_PROCESS, __import__("threading").get_native_id(), 15)
     except OSError:
         pass
-    return voiceprints.extract(recorder.dir, names, owners, exclude, refs)
+    return voiceprints.extract(recorder.dir, names, owners, exclude, refs, negatives)
 
 
-async def _vp_extract(names, owners, exclude, refs):
+async def _vp_extract(names, owners, exclude, refs, negatives):
     try:
-        vp_job.update(result=await asyncio.to_thread(_extract_low_priority, names, owners, exclude, refs), state="done")
+        vp_job.update(result=await asyncio.to_thread(_extract_low_priority, names, owners, exclude, refs, negatives), state="done")
     except Exception as e:
         log.warning("empreintes : %s", e)
         vp_job.update(state="error", error=str(e)[:300])
@@ -198,7 +199,7 @@ async def voiceprints_extract(req: ExtractReq):
     names = [n for n in req.names if n.strip()][:200]
     vp_job.clear()
     vp_job.update(state="running", started=time.time(), names=names)
-    asyncio.create_task(_vp_extract(names, req.owners, req.exclude, req.refs))
+    asyncio.create_task(_vp_extract(names, req.owners, req.exclude, req.refs, req.negatives))
     return {"state": "running"}
 
 
