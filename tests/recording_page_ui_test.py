@@ -47,6 +47,14 @@ async def seek_check(pg, box, w, where, nth=0, viewport_h=None):
         check(bb and bb["y"] >= -1 and bb["y"] + bb["height"] <= viewport_h, f"[{w}] la vidéo reste visible en haut ({bb and round(bb['y'])})")
 
 
+async def clip_check(pg, sel, w, what):
+    """Rien ne dépasse à droite de l'écran, même rogné sans barre de défilement (colonne de grille trop large)."""
+    over = await pg.evaluate("""(sel) => { const W = document.documentElement.clientWidth;
+      return [...document.querySelectorAll(sel + ' *')].filter(e => { const r = e.getBoundingClientRect(); return r.width && r.right > W + 1; })
+        .slice(0, 3).map(e => `${e.tagName.toLowerCase()}.${[...e.classList].join('.')}#${e.id} → ${Math.round(e.getBoundingClientRect().right)} px`); }""", sel)
+    check(not over, f"[{w}] {what} : rien ne dépasse à droite {over}")
+
+
 async def main():
     async with async_playwright() as p:
         b = await p.chromium.launch(channel="chrome", headless=True, args=["--ignore-certificate-errors", "--autoplay-policy=no-user-gesture-required"])
@@ -58,6 +66,7 @@ async def main():
             await pg.fill("#loginId", ADMIN); await pg.fill("#pw", PW); await pg.click("#loginForm button")
             await pg.wait_for_selector("#app:not(.hidden)")
             await pg.goto(BASE + "/#rec"); await pg.wait_for_selector("#recordings .ritem")
+            await clip_check(pg, "#tab-rec", w, "liste des enregistrements")
             items = await pg.evaluate("recItems.map(r => ({name: r.name, worker: r.worker, report: !!r.report, video: r.kind !== 'transcript'}))")
             idx = next((i for i, r in enumerate(items) if r["report"] and r["video"]), None)
             check(idx is not None, f"[{w}] un enregistrement vidéo avec compte rendu ({len(items)} au total)")
