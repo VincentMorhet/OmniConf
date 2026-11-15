@@ -3,3 +3,4 @@ uvicorn[standard]==0.32.*
 httpx==0.27.*
 websockets>=12,<14
 itsdangerous>=2.1
+cryptography>=42

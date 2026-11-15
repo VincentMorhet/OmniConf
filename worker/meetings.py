@@ -89,6 +89,10 @@ def _btn(*names: str) -> list[str]:
     return [f"role=button[name=/{rx}/i]", f'button:text-matches("{rx}", "i")']
 
 
+ZOOM_DOMAIN = re.compile(r"(^|\.)zoom\.(us|com)$")
+ZOOM_ORIGINS = ("https://zoom.us", "https://app.zoom.us", "https://zoom.com", "https://app.zoom.com")
+
+
 class Browser:
     def __init__(self, profile_dir: str, display_size: str, channel: str | None, kiosk: bool = True):
         self.profile_dir = profile_dir
@@ -151,6 +155,10 @@ class Browser:
         await self.ctx.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
         self.ctx.on("close", lambda *_: setattr(self, "ctx", None))
+        try:      # navigateur relancé (redémarrage, plantage pendant une réunion) : aucune session Zoom n'y reste
+            await self.ctx.clear_cookies(domain=ZOOM_DOMAIN)
+        except Exception as e:
+            log.warning("cookies Zoom au démarrage : %s", e)
 
     async def goto(self, url: str):
         page = await self.page()
@@ -163,6 +171,56 @@ class Browser:
                 await (await self.page()).goto("about:blank")
             except Exception:
                 pass
+
+    # -- session Zoom d'un utilisateur : chargée pour une réunion, retirée ensuite (jamais journalisée)
+    async def zoom_cookies(self) -> list[dict]:
+        return [c for c in await self.ctx.cookies() if ZOOM_DOMAIN.search(c.get("domain") or "")]
+
+    async def zoom_load(self, cookies: list[dict]) -> int:
+        await self.zoom_clear()
+        ok = []
+        for c in cookies or []:
+            if not isinstance(c, dict) or not c.get("name") or not ZOOM_DOMAIN.search(str(c.get("domain") or "")):
+                continue
+            x = {k: c[k] for k in ("name", "value", "domain", "path", "httpOnly", "secure", "sameSite") if k in c}
+            if isinstance(c.get("expires"), (int, float)) and c["expires"] > 0:
+                x["expires"] = c["expires"]
+            x.setdefault("path", "/")
+            ok.append(x)
+        if ok:
+            await self.ctx.add_cookies(ok)
+        return len(ok)
+
+    async def zoom_clear(self):
+        """Retire du navigateur toute trace de session Zoom (cookies, stockage des pages Zoom)."""
+        if not self.ctx:
+            return
+        try:
+            await self.ctx.clear_cookies(domain=ZOOM_DOMAIN)
+        except Exception as e:
+            log.warning("cookies Zoom : %s", e)
+        try:
+            cdp = await self.ctx.new_cdp_session(await self.page())
+            for o in ZOOM_ORIGINS:
+                await cdp.send("Storage.clearDataForOrigin",
+                               {"origin": o, "storageTypes": "local_storage,indexeddb,cache_storage,service_workers"})
+            await cdp.detach()
+        except Exception as e:
+            log.debug("stockage Zoom : %s", e)
+
+    async def zoom_signed_in(self) -> bool:
+        """Session Zoom ouverte ? Page de profil ouverte dans un onglet à part puis refermée ; seule la redirection
+        (vers la page de connexion, ou pas) est regardée."""
+        await self.page()
+        pg = await self.ctx.new_page()
+        try:
+            await pg.goto("https://zoom.us/profile", wait_until="domcontentloaded", timeout=30000)
+            await pg.wait_for_timeout(2500)
+            url = pg.url
+        finally:
+            await pg.close()
+        u = urlparse(url)
+        return (u.hostname or "").endswith("zoom.us") and "/profile" in u.path and not re.search(r"signin|login|sso", url, re.I)
 
 
 # --------------------------------------------------------------------------- Teams
@@ -233,6 +291,10 @@ class AccountBusy(RuntimeError):
     """Le compte Zoom de l'utilisateur est déjà utilisé ailleurs : l'assistant ne prend pas sa place."""
 
 
+class SessionExpired(AccountBusy):
+    """Session Zoom de l'utilisateur expirée, alors qu'il a demandé d'entrer avec son compte."""
+
+
 class Zoom:
     LEAVE = ["button[aria-label*='Leave' i]", "button.footer__leave-btn", *_btn("^Leave$", "^Quitter$")]
     WAITING = ["text=/host will let you in|waiting for the host|l'hôte va vous admettre|attendre l'hôte/i"]
@@ -246,7 +308,7 @@ class Zoom:
 
     @staticmethod
     async def join(page: Page, url: str, name: str, set_state, passcode: str | None = None, as_me: bool = False):
-        """as_me : entrée avec le compte Zoom connecté dans le navigateur de l'assistant (son nom, son avatar)."""
+        """as_me : entrée avec le compte Zoom de l'utilisateur, sa session chargée dans le navigateur (nom, avatar)."""
         await page.goto(zoom_web_url(url, passcode), wait_until="domcontentloaded", timeout=45000)
         await _click(page, ["#onetrust-accept-btn-handler", *_btn("Accept Cookies", "Accepter")], timeout=5)
         # invité : champ du nom ; compte connecté : le nom du compte, parfois sans champ à remplir

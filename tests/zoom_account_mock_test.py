@@ -2,7 +2,8 @@
 
 Aucune vraie réunion, aucun compte : on vérifie qu'en invité le nom est saisi comme avant, qu'avec le compte connecté
 le nom du compte est gardé (champ grisé, prérempli ou absent), et que si Zoom propose « compagnon » ou « transférer »
-(compte déjà dans la réunion sur un autre appareil), l'assistant ne clique sur rien et s'arrête.
+(compte déjà dans la réunion sur un autre appareil), l'assistant ne clique sur rien et s'arrête. Puis la session d'un
+utilisateur (cookies inventés) : chargée seule, retirée sans toucher au reste, effacée à la relance du navigateur.
 
     python tests/zoom_account_mock_test.py        # environnement d'un assistant (Playwright + Chrome)
 """
@@ -82,6 +83,33 @@ async def main():
         r = await run("grise", False)
         check(r[0] == "erreur" and "champ nom" in r[1], f"invité sans champ nom modifiable : erreur comme avant ({r})")
         await b.close()
+
+        # session Zoom d'un utilisateur : chargée pour la réunion, seule (rien d'un autre site), puis retirée
+        prof = tempfile.mkdtemp(prefix="zoom-profil-")
+        br = meetings.Browser(prof, "1280x720", "chrome", kiosk=False)
+        br._pw = p
+        br.ctx = await p.chromium.launch_persistent_context(prof, headless=True, channel="chrome")
+        await br.ctx.add_cookies([{"name": "autre_site", "value": "x", "domain": ".example.com", "path": "/"}])
+        n = await br.zoom_load([
+            {"name": "_zm_essai", "value": "v1", "domain": ".zoom.us", "path": "/", "expires": -1, "secure": True, "sameSite": "Lax"},
+            {"name": "intrus", "value": "x", "domain": ".example.org", "path": "/"},
+            {"name": "app_essai", "value": "v2", "domain": "app.zoom.us", "path": "/", "expires": 4102444800}])
+        names = {c["name"] for c in await br.zoom_cookies()}
+        check(n == 2 and names == {"_zm_essai", "app_essai"}, f"session chargée : seulement des cookies Zoom ({n}, {sorted(names)})")
+        check(not await br.zoom_signed_in(), "faux cookie : Zoom ne reconnaît pas de session (page de profil -> connexion)")
+        await br.zoom_clear()
+        rest = {c["name"] for c in await br.ctx.cookies()}
+        check(not await br.zoom_cookies() and "autre_site" in rest, f"session retirée, le reste du navigateur intact ({sorted(rest)})")
+        await br.ctx.close()
+        br.ctx = await p.chromium.launch_persistent_context(prof, headless=True, channel="chrome")
+        await br.ctx.add_cookies([{"name": "_zm_reste", "value": "v", "domain": ".zoom.us", "path": "/", "expires": 4102444800}])
+        await br.ctx.close()
+        br.ctx = None
+        orig = p.chromium.launch_persistent_context
+        p.chromium.launch_persistent_context = lambda d, **kw: orig(d, headless=True, channel="chrome")
+        await br._launch()                   # relance (redémarrage, plantage) : aucune session Zoom ne reste
+        check(not await br.zoom_cookies(), "navigateur relancé : cookies Zoom d'avant effacés")
+        await br.ctx.close()
     print(f"{ok} vérifications réussies, {fails} échec(s)")
     sys.exit(1 if fails else 0)
 

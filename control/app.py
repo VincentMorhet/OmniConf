@@ -68,7 +68,8 @@ LEXICON_FILE = DATA / "lexicon.md"
 CONSENT_FILE = DATA / "voice_consents.json"   # consentements aux empreintes vocales (attestés par un administrateur)
 VOICEPRINT_FILE = DATA / "voiceprints.json"   # empreintes de référence (personnes consentantes seulement)
 VOICE_Q_FILE = DATA / "voice_questions.json"  # « Est-ce X ? » : voix douteuses à confirmer, et réponses données
-RESERVED_FILE = DATA / "worker_reserved.json"  # assistants réservés à un compte (session Zoom de la personne gardée)
+SESSIONS_FILE = DATA / "sessions.json"        # sessions Zoom des comptes (chiffrées), chargées le temps d'une réunion
+SESSIONS_KEY = DATA / "sessions.key"          # clé de chiffrement de ces sessions (mode 600)
 USERS = Users(DATA / "users.json", admin_password=PASSWORD, admin_login=os.environ.get("ADMIN_LOGIN"),
               admin_name=os.environ.get("ADMIN_NAME"),
               bot_names=json.loads(os.environ["DEFAULT_NAMES"]) if os.environ.get("DEFAULT_NAMES") else None)   # lexique de l'installation (noms, corrections, sigles, registre), poussé aux workers
@@ -240,6 +241,7 @@ async def users_delete(login: str, u: dict = Depends(require_admin)):
         raise HTTPException(404, "compte inconnu")
     except ValueError as e:
         raise HTTPException(400, str(e))
+    sess_forget(login)                # sa session Zoom aussi
     log.info("compte %s supprimé par %s (ses réunions restent, visibles des administrateurs)", login, u["login"])
     return {"ok": True}
 
@@ -278,26 +280,11 @@ async def worker_status(name: str) -> dict:
 
 
 # ----------------------------------------------------------------------------- droits sur les assistants
-def reserved() -> dict[str, str]:
-    """{assistant: compte} : assistants réservés à une personne (son navigateur garde sa session Zoom, « comme si
-    c'était elle ») ; personne d'autre, administrateurs compris, ne peut s'en servir ni voir son écran."""
-    try:
-        d = json.loads(RESERVED_FILE.read_text())
-    except (FileNotFoundError, ValueError):
-        return {}
-    return {w: l for w, l in d.items() if w in WORKERS and isinstance(l, str)}
-
-
-def my_reserved(u: dict) -> list[str]:
-    return [w for w, l in reserved().items() if l == u["login"]]
-
-
 def can_use_worker(u: dict, st: dict) -> bool:
-    """Assistant libre, ou utilisé par ce compte (les administrateurs ont accès à tout) ; un assistant réservé :
-    seulement par la personne à qui il est réservé."""
-    r = reserved().get(st.get("name") or "")
-    if r:
-        return r == u["login"]
+    """Assistant libre, ou utilisé par ce compte (les administrateurs ont accès à tout) ; un assistant qui porte la
+    session Zoom d'une personne : seulement elle, administrateurs compris."""
+    if st.get("session_of"):
+        return st["session_of"] == u["login"]
     return is_admin(u) or not st.get("owner") or st.get("owner") == u["login"]
 
 
@@ -310,9 +297,6 @@ def can_read_live(u: dict, st: dict) -> bool:
 
 async def worker_for(name: str, u: dict, live: bool = False) -> dict:
     st = await worker_status(wurl(name) and name)
-    r = reserved().get(name)
-    if r and r != u["login"]:
-        raise HTTPException(403, f"assistant réservé à {USERS.names().get(r, r)} (son compte Zoom)")
     if not (can_read_live(u, st) if live else can_use_worker(u, st)):
         raise HTTPException(403, "assistant utilisé par un autre utilisateur")
     return st
@@ -320,11 +304,10 @@ async def worker_for(name: str, u: dict, live: bool = False) -> dict:
 
 def public_status(u: dict, st: dict) -> dict:
     """État d'un assistant tel que ce compte peut le voir."""
-    r = reserved().get(st["name"])
     if not can_use_worker(u, st):
         return {"name": st["name"], "online": st.get("online"), "state": "taken", "other": True,
-                "since": st.get("since"), **({"reserved_for": USERS.names().get(r, r)} if r else {})}
-    out = {**st, "mine": bool(st.get("owner")) and st.get("owner") == u["login"], **({"reserved": True} if r else {})}
+                "since": st.get("since")}
+    out = {**st, "mine": bool(st.get("owner")) and st.get("owner") == u["login"]}
     if is_admin(u) and st.get("owner"):
         out["owner_name"] = USERS.names().get(st["owner"], st["owner"])
     if not can_read_live(u, st):    # dernière transcription d'un autre compte : rien n'en est montré
@@ -337,7 +320,7 @@ def public_status(u: dict, st: dict) -> dict:
 async def config(u: dict = CU):
     return {"iceServers": ICE, "workers": list(WORKERS), "defaultDuration": DEFAULT_DURATION,
             "defaultNames": {p: bot_name(u, p, DEFAULT_NAMES) for p in ("zoom", "teams", "web")},
-            "zoomWorkers": my_reserved(u),
+            "zoomSession": sess_info(u["login"]),
             "user": me_public(u)}
 
 
@@ -357,62 +340,115 @@ class StartMeeting(BaseModel):
     transcribe: bool = True
     worker: str | None = None  # None/"auto" = premier worker libre
     calendar: dict | None = None  # événement d'agenda (eid Google / id Exchange, organisateur, invités), facultatif
-    as_me: bool | None = None  # Zoom avec son compte (assistant réservé) : True exigé, False invité, None si possible
+    as_me: bool | None = None  # Zoom avec son compte (sa session) : True exigé, False invité, None si possible
 
 
-async def zoom_session(w: str) -> bool | None:
-    """Session Zoom ouverte sur cet assistant ? None : impossible de le vérifier (assistant en réunion, injoignable)."""
+# Sessions Zoom : chaque compte se connecte une fois à Zoom dans l'écran d'un assistant ; ses cookies Zoom sont gardés
+# ici, chiffrés, puis chargés dans l'assistant qui part pour une de ses réunions Zoom et retirés à la fin (rafraîchis
+# par Zoom entre-temps). Une seule réunion à la fois avec sa session ; pendant ce temps, lui seul a accès à l'assistant.
+def _fernet():
+    from cryptography.fernet import Fernet
+    if not SESSIONS_KEY.exists():
+        tmp = SESSIONS_KEY.with_suffix(".tmp")
+        tmp.write_bytes(Fernet.generate_key())
+        os.chmod(tmp, 0o600)
+        tmp.replace(SESSIONS_KEY)
+    return Fernet(SESSIONS_KEY.read_bytes().strip())
+
+
+def _sess_all() -> dict:
     try:
-        r = await http.get(wurl(w) + "/zoom/session", timeout=45)
-        ok = r.json().get("signed_in") if r.status_code < 400 else None
-    except Exception:
-        ok = None
-    if ok is not None:
-        _zoom_seen[w] = {"signed_in": ok, "at": dt.datetime.now().astimezone().isoformat(timespec="seconds")}
-    return ok
-_zoom_seen: dict[str, dict] = {}
+        return json.loads(SESSIONS_FILE.read_text())
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def _sess_write(d: dict):
+    tmp = SESSIONS_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(d))
+    os.chmod(tmp, 0o600)
+    tmp.replace(SESSIONS_FILE)
+
+
+def sess_info(login: str) -> dict | None:
+    """Ce que l'IHM peut savoir d'une session (jamais les cookies)."""
+    z = (_sess_all().get(login) or {}).get("zoom")
+    return {k: z.get(k) for k in ("saved_at", "used_at", "expired", "expired_at")} if z else None
+
+
+def sess_get(login: str) -> list | None:
+    z = (_sess_all().get(login) or {}).get("zoom")
+    if not z or z.get("expired"):
+        return None
+    try:
+        return json.loads(_fernet().decrypt(z["enc"].encode()))
+    except Exception as e:
+        log.warning("session Zoom de %s illisible : %s", login, type(e).__name__)
+        return None
+
+
+def sess_put(login: str, cookies: list, refreshed: bool = False):
+    d = _sess_all()
+    old = (d.get(login) or {}).get("zoom") or {}
+    now = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    d.setdefault(login, {})["zoom"] = {"enc": _fernet().encrypt(json.dumps(cookies).encode()).decode(),
+                                       "saved_at": old.get("saved_at") if refreshed else now,
+                                       "used_at": now if refreshed else old.get("used_at"), "expired": False}
+    _sess_write(d)
+
+
+def sess_expire(login: str):
+    d = _sess_all()
+    z = (d.get(login) or {}).get("zoom")
+    if z:
+        z.update(expired=True, expired_at=dt.datetime.now().astimezone().isoformat(timespec="seconds"), enc="")
+        _sess_write(d)
+
+
+def sess_forget(login: str) -> bool:
+    d = _sess_all()
+    gone = d.pop(login, None) is not None
+    if gone:
+        _sess_write(d)
+    return gone
 
 
 async def start_meeting(m: StartMeeting, u: dict) -> dict:
     m.url = unwrap_url(m.url)
     platform = m.platform or detect_platform(m.url)
-    res, mine = reserved(), my_reserved(u)
-    as_me = platform == "zoom" and bool(mine) and m.as_me is not False
+    sts = await asyncio.gather(*(worker_status(n) for n in WORKERS))
+    cookies = sess_get(u["login"]) if platform == "zoom" and m.as_me is not False else None
     note = None
+    if platform == "zoom" and m.as_me is True and not cookies:
+        raise HTTPException(409, "pas de session Zoom enregistrée (ou expirée) : Réglages > Votre compte Zoom > « Se connecter"
+                                 " à Zoom », ou décochez « avec mon compte »")
+    busy = next((st["name"] for st in sts if st.get("session_of") == u["login"]), None)
+    if cookies and busy:              # une seule réunion à la fois avec sa session (limites d'appareils de Zoom)
+        if m.as_me:
+            raise HTTPException(409, f"votre session Zoom est déjà utilisée par l'assistant {busy} : une réunion à la "
+                                     "fois avec votre compte ; décochez « avec mon compte » pour celle-ci")
+        cookies, note = None, f"votre session Zoom est déjà utilisée par l'assistant {busy} : entrée en invité"
     target = m.worker if m.worker and m.worker != "auto" else None
     if target:
         await worker_for(target, u)
-        as_me = platform == "zoom" and target in mine     # son navigateur a la session : entrée avec le compte
     else:
-        sts = await asyncio.gather(*(worker_status(n) for n in WORKERS))
-        free = lambda st: st.get("online") and st["state"] in ("idle", "manual", "error") and can_use_worker(u, st)
-        if as_me:
-            target = next((st["name"] for st in sts if st["name"] in mine and free(st)), None)
-            if not target and m.as_me:
-                raise HTTPException(409, f"votre assistant Zoom ({', '.join(mine)}) est occupé : décochez « avec mon compte"
-                                         " Zoom » pour envoyer un autre assistant en invité")
-            if not target:
-                as_me, note = False, "votre assistant Zoom est occupé : un autre assistant entre en invité"
-            elif m.as_me is None and await zoom_session(target) is False:     # réunion planifiée : pas d'échec
-                target, as_me, note = None, False, f"session Zoom fermée sur {target} : un autre assistant entre en invité"
-        if not target:
-            # d'abord un assistant libre, sinon un des siens resté ouvert (navigation, erreur) ; ses assistants réservés
-            # en dernier, et jamais pour Zoom en invité (leur navigateur entrerait avec son compte)
-            order = sorted(sts, key=lambda x: (x["name"] in res, x.get("state") != "idle"))
-            target = next((st["name"] for st in order if free(st) and not (platform == "zoom" and st["name"] in res)), None)
+        # d'abord un assistant libre, sinon un des siens resté ouvert (navigation, erreur)
+        for st in sorted(sts, key=lambda x: x.get("state") != "idle"):
+            if st.get("online") and st["state"] in ("idle", "manual", "error") and can_use_worker(u, st):
+                target = st["name"]
+                break
     if not target:
         raise HTTPException(409, "aucun assistant libre")
-    if as_me and m.as_me is not None and await zoom_session(target) is False:
-        raise HTTPException(409, f"votre session Zoom sur l'assistant {target} n'est plus ouverte : reconnectez-vous "
-                                 "(Réglages > Votre compte Zoom), ou décochez « avec mon compte Zoom »")
     body = m.model_dump(exclude={"worker"})
-    body["as_me"] = as_me
     body["platform"] = platform
+    body.update(as_me=bool(cookies), as_me_required=m.as_me is True, session=cookies)
     body["display_name"] = m.display_name or bot_name(u, platform, DEFAULT_NAMES)
     body["owner"], body["me_name"] = u["login"], u.get("name")
     body["duration_min"] = m.duration_min or DEFAULT_DURATION
     r = await wcall(target, "POST", "/meeting/join", json=body)
-    return {**r.json(), "name": target, "as_me": as_me, **({"note": note} if note else {})}
+    if cookies:
+        log.info("réunion Zoom de %s sur %s avec sa session", u["login"], target)
+    return {**r.json(), "name": target, "as_me": bool(cookies), **({"note": note} if note else {})}
 
 
 @app.post("/api/meetings")
@@ -493,64 +529,80 @@ async def recording_speaker_rename(name: str, file: str, body: SpeakerName, u: d
     return (await wcall(name, "PATCH", f"/recordings/{file}/speakers", json=body.model_dump())).json()
 
 
-# ----------------------------------------------------------------------------- compte Zoom (assistant réservé)
+# ----------------------------------------------------------------------------- compte Zoom (session de chacun)
+async def _capture_worker(u: dict) -> str | None:
+    sts = await asyncio.gather(*(worker_status(n) for n in WORKERS))
+    return next((st["name"] for st in sts if st.get("session_of") == u["login"] and st.get("session_kind") == "capture"), None)
+
+
 @app.get("/api/zoom-account")
-async def zoom_account(check: bool = False, u: dict = CU):
-    """Assistants réservés à ce compte et état de la session Zoom (vérifiée à la demande, sinon dernier état connu) ;
-    pour un administrateur, aussi la liste des réservations."""
-    mine = my_reserved(u)
-    out = []
-    for w in mine:
-        if check:
-            await zoom_session(w)
-        out.append({"name": w, **(_zoom_seen.get(w) or {})})
-    names = USERS.names()
-    return {"workers": out, "all_workers": list(WORKERS),
-            **({"reserved": {w: {"login": l, "name": names.get(l, l)} for w, l in reserved().items()},
-                "users": [{"login": l, "name": n} for l, n in names.items()]} if is_admin(u) else {})}
+async def zoom_account(u: dict = CU):
+    """Session Zoom de ce compte (dates, jamais les cookies) et connexion en cours éventuelle."""
+    return {"session": sess_info(u["login"]), "capture": await _capture_worker(u)}
 
 
 @app.post("/api/zoom-account/signin")
 async def zoom_signin(u: dict = CU):
-    """Ouvre la page de connexion Zoom sur l'assistant réservé à ce compte : la personne s'y connecte elle-même via
-    l'écran distant (le mot de passe ne passe pas par OmniConf) ; la session reste dans ce navigateur."""
-    mine = my_reserved(u)
-    if not mine:
-        raise HTTPException(404, "aucun assistant ne vous est réservé")
-    st = await worker_for(mine[0], u)
-    if st.get("state") in ("joining", "lobby", "in_meeting", "leaving"):
-        raise HTTPException(409, f"l'assistant {mine[0]} est en réunion")
-    await wcall(mine[0], "POST", "/browser/open", json={"url": "https://zoom.us/signin", "owner": u["login"],
-                                                        "me_name": u.get("name")}, timeout=60)
-    _zoom_seen.pop(mine[0], None)
-    return {"name": mine[0]}
+    """Ouvre la page de connexion Zoom sur un assistant libre : la personne s'y connecte elle-même par l'écran distant
+    (le mot de passe ne passe pas par OmniConf ; elle seule a accès à cet assistant pendant ce temps)."""
+    w = await _capture_worker(u)
+    if not w:
+        sts = await asyncio.gather(*(worker_status(n) for n in WORKERS))
+        w = next((st["name"] for st in sts if st.get("online") and st["state"] == "idle" and can_use_worker(u, st)), None)
+    if not w:
+        raise HTTPException(409, "aucun assistant libre pour se connecter à Zoom")
+    await wcall(w, "POST", "/zoom/capture/start", json={"owner": u["login"], "me_name": u.get("name")}, timeout=60)
+    return {"name": w}
 
 
-class Reserve(BaseModel):
-    login: str | None = None      # None : l'assistant redevient partagé
+@app.post("/api/zoom-account/finish")
+async def zoom_finish(u: dict = CU):
+    """Connexion terminée : la session est reprise de l'assistant (puis retirée de son navigateur) et gardée chiffrée."""
+    w = await _capture_worker(u)
+    if not w:
+        raise HTTPException(404, "pas de connexion Zoom en cours")
+    r = (await wcall(w, "POST", "/zoom/capture/finish", json={"owner": u["login"]}, timeout=60)).json()
+    if not r.get("signed_in") or not r.get("cookies"):
+        raise HTTPException(409, "pas encore connecté à Zoom dans l'écran de l'assistant")
+    sess_put(u["login"], r["cookies"])
+    log.info("session Zoom de %s enregistrée (%d cookies)", u["login"], len(r["cookies"]))
+    return {"session": sess_info(u["login"])}
 
 
-@app.put("/api/workers/{name}/reserve")
-async def worker_reserve(name: str, body: Reserve, u: dict = Depends(require_admin)):
-    """Réserver un assistant à un compte, ou le rendre partagé (administrateur). Pour le partager, la session Zoom de
-    la personne doit d'abord être fermée sur cet assistant : sinon les réunions Zoom des autres y entreraient avec son
-    compte."""
-    wurl(name)
-    if body.login and body.login not in USERS.names():
-        raise HTTPException(404, "compte inconnu")
-    d = reserved()
-    if d.get(name) and d[name] != body.login and await zoom_session(name) is not False:
-        raise HTTPException(409, f"session Zoom encore ouverte (ou impossible à vérifier) sur l'assistant {name} : "
-                                 "déconnectez-vous d'abord de Zoom sur cet assistant")
-    if body.login:
-        d[name] = body.login
-    else:
-        d.pop(name, None)
-    tmp = RESERVED_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(d))
-    tmp.replace(RESERVED_FILE)
-    log.info("assistant %s : %s par %s", name, f"réservé à {body.login}" if body.login else "partagé", u["login"])
-    return {"reserved": d}
+@app.post("/api/zoom-account/cancel")
+async def zoom_cancel(u: dict = CU):
+    w = await _capture_worker(u)
+    if w:
+        await wcall(w, "POST", "/zoom/capture/cancel", json={"owner": u["login"]}, timeout=60)
+    return {"ok": True}
+
+
+@app.delete("/api/zoom-account")
+async def zoom_forget(u: dict = CU):
+    """Oublier sa session Zoom (elle reste ouverte chez Zoom : « Se déconnecter de tous les appareils » pour la couper)."""
+    sess_forget(u["login"])
+    log.info("session Zoom de %s oubliée", u["login"])
+    return {"ok": True}
+
+
+async def sessions_collect():
+    """Sessions rendues par les assistants en fin de réunion (rafraîchies par Zoom), ou expirées pendant la réunion."""
+    for st in await asyncio.gather(*(worker_status(n) for n in WORKERS)):
+        if not st.get("session_out"):
+            continue
+        try:
+            o = (await wcall(st["name"], "GET", "/zoom/session/out", timeout=10)).json()
+        except Exception:
+            continue
+        who = o.get("owner")
+        if not who or who not in USERS.names():
+            continue
+        if o.get("cookies"):
+            sess_put(who, o["cookies"], refreshed=o.get("kind") == "meeting")
+            log.info("session Zoom de %s rendue par %s (%s)", who, st["name"], o.get("kind"))
+        elif o.get("kind") == "meeting":           # déconnecté par Zoom pendant la réunion
+            sess_expire(who)
+            log.info("session Zoom de %s expirée (rendue par %s)", who, st["name"])
 
 
 @app.get("/api/workers/{name}/screenshot")
@@ -1552,6 +1604,10 @@ async def lexicon_sync():
             await lexicon_push()
         except Exception as e:  # pragma: no cover
             log.warning("lexique : %s", e)
+        try:
+            await sessions_collect()
+        except Exception as e:  # pragma: no cover
+            log.warning("sessions Zoom : %s", e)
         try:
             await voiceprints_push()
             now = dt.datetime.now().astimezone()

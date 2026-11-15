@@ -39,17 +39,19 @@ créé au premier démarrage avec `ADMIN_PASSWORD` (dans `/etc/webconf/control.e
   réunions d'avant les comptes n'ont pas de propriétaire : seuls les administrateurs les voient.
 - **Assistants** : ils sont communs. Un assistant en réunion n'est accessible qu'à celui qui l'a lancé (et aux
   administrateurs) ; les autres le voient « occupé », sans titre ni écran ni transcription.
-- **Assistant réservé (compte Zoom, « comme si c'était moi »)** : un administrateur réserve un assistant à un compte
-  (Réglages > Votre compte Zoom ; `/var/lib/webconf/worker_reserved.json`). La personne s'y connecte elle-même à
-  Zoom par l'écran distant (« Se connecter à Zoom ») ; la session reste dans le profil Chrome de cet assistant. Ses
-  réunions Zoom y entrent avec son compte (son nom, son avatar ; case « Zoom : entrer avec mon compte » au
-  lancement, décochée : un autre assistant en invité). Personne d'autre, administrateurs compris, ne peut s'en
-  servir ni voir son écran ; il ne sert jamais aux réunions Zoom en invité. La session est vérifiée avant chaque
-  entrée (page de profil Zoom ouverte puis refermée, aucun cookie lu) : fermée, l'entrée est refusée (réunion
-  planifiée : un autre assistant en invité). Si Zoom signale le compte déjà dans la réunion sur un autre appareil
-  (« compagnon », « transférer »), l'assistant ne clique sur rien et sort. Un assistant ne redevient partagé
-  qu'une fois la session Zoom fermée. Tests : `tests/zoom_account_mock_test.py` (pages Zoom factices) et
-  `tests/zoom_account_test.py` (assistants simulés).
+- **Votre compte Zoom (« comme si c'était moi »)** : chacun se connecte une fois à Zoom dans l'écran d'un assistant
+  libre (Réglages > Votre compte Zoom > « Se connecter à Zoom », puis « J'ai terminé ») ; le mot de passe ne passe pas
+  par OmniConf. Ses cookies Zoom sont repris de l'assistant (puis retirés de son navigateur) et gardés chiffrés par
+  le contrôle (`/var/lib/webconf/sessions.json`, clé `sessions.key`, mode 600). Pour une de ses réunions Zoom, ils
+  sont chargés dans l'assistant qui part (case « Zoom : entrer avec mon compte » ; décochée : en invité), qui entre
+  avec son nom et son avatar, puis retirés à la fin ; la session rafraîchie par Zoom est rendue au contrôle (déconnecté
+  par Zoom : session marquée expirée). Une seule réunion à la fois avec sa session ; pendant ce temps, lui seul a
+  accès à cet assistant (administrateurs compris). Session vérifiée à l'entrée (page de profil Zoom, seule la
+  redirection est regardée) ; expirée : entrée refusée (réunion planifiée : en invité). Si Zoom signale le compte déjà
+  dans la réunion sur un autre appareil (« compagnon », « transférer »), l'assistant ne clique sur rien et sort. Les
+  cookies Zoom sont effacés à chaque relance du navigateur et avant chaque entrée en invité. Tests :
+  `tests/zoom_account_mock_test.py` (pages Zoom factices, cookies inventés) et `tests/zoom_session_test.py`
+  (assistants simulés).
 - **👤 Mon compte** : nom dans les comptes rendus (« Pour … »), nom de l'assistant par plateforme (par
   défaut ce nom ; sinon `DEFAULT_NAMES`), mot de passe.
 - **Jetons MCP** : chaque jeton appartient à un compte et ne donne accès qu'à ses réunions. Les jetons
@@ -80,8 +82,9 @@ créé au premier démarrage avec `ADMIN_PASSWORD` (dans `/etc/webconf/control.e
      autres : bouton micro de la page).
    - **🖥 Écran** : prise en main du navigateur du worker (noVNC), utile pour la salle d'attente, un
      captcha, un écran qui a changé, partager l'écran…
-   - **🔑 Ouvrir…** : ouvre une URL, par exemple pour **se connecter une fois** à un compte Teams/Zoom.
-     Le profil Chrome est persistant, la session est conservée (sinon le bot rejoint en invité).
+   - **🔑 Ouvrir…** : ouvre une URL, par exemple pour **se connecter une fois** à un compte Teams.
+     Le profil Chrome est persistant, la session est conservée (sinon le bot rejoint en invité). Zoom : voir
+     « Votre compte Zoom » (la session de chacun n'est chargée que pour ses réunions).
    - **Quitter** : quitte la réunion et arrête l'enregistrement. Le bot quitte aussi tout seul quand la
      réunion se termine, ou à la fin de la durée max.
 4. **📝 Transcription en direct** (case « Transcrire », cochée par défaut) : le panneau s'ouvre sur la

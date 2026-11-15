@@ -22,7 +22,7 @@ import lexicon
 import reid
 import voiceprints
 from audio_bridge import AudioBridge
-from meetings import (PLATFORMS, SPEAKER_DEBUG_JS, AccountBusy, Browser, active_speakers, clean_name, detect_platform, unwrap_url,
+from meetings import (PLATFORMS, SPEAKER_DEBUG_JS, AccountBusy, Browser, SessionExpired, active_speakers, clean_name, detect_platform, unwrap_url,
                       visible_participants)
 from recorder import Recorder, _slug
 import slides as slides_mod
@@ -49,6 +49,7 @@ transcriber = Transcriber(os.environ.get("RECORD_DIR", "/srv/webconf/recordings"
 state = {"state": "idle", "platform": None, "url": None, "title": None, "since": None, "error": None,
          "auto_leave_at": None,
          "owner": None,        # compte OmniConf qui utilise l'assistant (None : libre)
+         "session_of": None,   # compte dont la session Zoom est chargée dans le navigateur (lui seul y a accès)
          "last_owner": None,   # dernier utilisateur : la dernière transcription en mémoire lui appartient
          "me_name": None}      # nom de cet utilisateur dans les comptes rendus
 join_task: asyncio.Task | None = None
@@ -88,7 +89,13 @@ class JoinReq(BaseModel):
     calendar: dict | None = None     # événement d'agenda (eid Google / id Exchange, organisateur, invités), facultatif
     owner: str | None = None         # compte OmniConf qui lance la réunion (propriétaire des fichiers)
     me_name: str | None = None       # son nom dans les comptes rendus
-    as_me: bool = False              # Zoom : entrer avec le compte connecté dans ce navigateur (assistant réservé)
+    as_me: bool = False              # Zoom : entrer avec le compte de l'utilisateur (sa session, ci-dessous)
+    as_me_required: bool = False     # session expirée : True -> pas d'entrée ; False -> entrée en invité
+    session: list[dict] | None = None  # cookies Zoom de l'utilisateur, chargés le temps de la réunion (jamais journalisés)
+
+    def __repr__(self):              # la session n'apparaît dans aucun journal
+        return f"JoinReq(url={self.url!r}, platform={self.platform!r}, owner={self.owner!r}, as_me={self.as_me})"
+    __str__ = __repr__
 
 
 class OpenReq(BaseModel):
@@ -126,7 +133,8 @@ async def status():
             "recording_since": recorder.started_at.isoformat() if recorder.active else None,
             "listeners": bridge.listeners, "transcript": transcriber.status(),
             "vnc_port": VNC_PORT, "lexicon": lexicon.load().version or None,
-            "voiceprints": voiceprints.version(), "voiceprints_job": {"state": vp_job.get("state")} if vp_job else None}
+            "voiceprints": voiceprints.version(), "voiceprints_job": {"state": vp_job.get("state")} if vp_job else None,
+            "session_out": bool(session_out)}
 
 
 class LexiconBody(BaseModel):
@@ -230,6 +238,7 @@ async def lexicon_put(body: LexiconBody):
 
 async def _run_join(req: JoinReq, platform: str):
     global last_join
+    zoom_note = None
     try:
         async with browser.lock:
             page = await browser.page()
@@ -242,7 +251,21 @@ async def _run_join(req: JoinReq, platform: str):
             if impl is None:  # autre plateforme : on ouvre la page, finir à la main via l'écran distant
                 await page.goto(req.url, wait_until="domcontentloaded", timeout=45000)
             elif platform == "zoom":
-                recognized = await impl.join(page, req.url, name, set_state, req.passcode, as_me=req.as_me)
+                as_me = False
+                if req.as_me and req.session:          # session Zoom de l'utilisateur, le temps de la réunion
+                    await browser.zoom_load(req.session)
+                    state.update(session_of=req.owner, session_kind="meeting")
+                    as_me = await browser.zoom_signed_in()
+                    if not as_me:
+                        await _zoom_release(export=False)
+                        _session_report(req.owner, "meeting", None)
+                        if req.as_me_required:
+                            raise SessionExpired("votre session Zoom a expiré : reconnectez-vous (Réglages > Votre compte"
+                                                 " Zoom), ou décochez « avec mon compte »")
+                        zoom_note = "session Zoom expirée : entrée en invité"
+                else:
+                    await browser.zoom_clear()          # jamais la session d'un autre
+                recognized = await impl.join(page, req.url, name, set_state, req.passcode, as_me=as_me)
             elif platform == "web":
                 recognized = await impl.join(page, req.url, name, set_state, req.passcode)
             else:
@@ -252,12 +275,13 @@ async def _run_join(req: JoinReq, platform: str):
             note = "entrée automatique non confirmée : vérifiez via « Écran » (enregistrement lancé)"
         elif impl is None:
             note = "page ouverte : rejoignez à la main via « Écran » (enregistrement lancé)"
-        await _after_join(req, platform, note)
+        await _after_join(req, platform, note or zoom_note)
     except asyncio.CancelledError:
         raise
-    except AccountBusy as e:          # compte de l'utilisateur utilisé ailleurs : on sort sans rien toucher
+    except AccountBusy as e:          # compte utilisé ailleurs, ou session expirée : on sort sans rien toucher
         log.warning("entrée Zoom avec le compte de l'utilisateur : %s", e)
         await browser.blank()
+        await _zoom_release(export=False)
         set_state("error", error=str(e)[:300])
     except Exception as e:
         log.exception("join failed")
@@ -525,6 +549,7 @@ async def _leave(click: bool = True):
         except Exception:
             pass
     await browser.blank()
+    await _zoom_release()
     set_state("idle", platform=None, url=None, title=None, auto_leave_at=None, error=None, note=None, owner=None)
 
 
@@ -548,39 +573,106 @@ async def mute():
 
 @app.post("/browser/open", dependencies=[Depends(auth)])
 async def open_url(req: OpenReq):
-    """Ouvre une URL (ex: se connecter à un compte Teams/Zoom une fois, la session est conservée)."""
+    """Ouvre une URL (ex: se connecter une fois à un compte Teams, la session est conservée ; Zoom : Réglages >
+    Votre compte Zoom, la session de chacun n'est chargée que pour ses réunions)."""
     if state["state"] in ("joining", "lobby", "in_meeting"):
         raise HTTPException(409, "réunion en cours")
+    if state.get("session_of") and state["session_of"] != req.owner:
+        raise HTTPException(409, "session Zoom d'un autre compte chargée")
     await browser.goto(req.url)
     _take(req.owner, req.me_name)
     set_state("manual", platform=None, url=req.url)
     return await status()
 
 
-@app.get("/zoom/session", dependencies=[Depends(auth)])
-async def zoom_session():
-    """Une session Zoom est-elle ouverte dans le navigateur de l'assistant ? La page de profil est ouverte dans un
-    onglet à part puis refermée (jamais pendant une réunion) ; aucun cookie n'est lu ni renvoyé, seulement oui/non."""
+session_out: dict = {}    # session Zoom rendue en fin de réunion (rafraîchie par Zoom), en attente du contrôle
+
+
+def _session_report(owner: str | None, kind: str, cookies: list | None):
+    session_out.clear()
+    if owner:
+        session_out.update(owner=owner, kind=kind, cookies=cookies, expired=cookies is None,
+                           at=dt.datetime.now().astimezone().isoformat(timespec="seconds"))
+
+
+async def _zoom_release(export: bool = True):
+    """Fin d'une réunion (ou d'une connexion) avec la session Zoom d'un utilisateur : la session, telle que Zoom l'a
+    rafraîchie, est rendue au contrôle (`/zoom/session/out`), puis retirée du navigateur."""
+    who, kind = state.get("session_of"), state.get("session_kind") or "meeting"
+    if not who:
+        return
+    try:
+        if export:
+            signed = await browser.zoom_signed_in()
+            _session_report(who, kind, await browser.zoom_cookies() if signed else None)
+    except Exception as e:
+        log.warning("session Zoom en fin de réunion : %s", e)
+    finally:
+        await browser.zoom_clear()
+        state.update(session_of=None, session_kind=None)
+        log.info("session Zoom de %s retirée du navigateur", who)
+
+
+class CaptureReq(BaseModel):
+    owner: str
+    me_name: str | None = None
+
+
+@app.post("/zoom/capture/start", dependencies=[Depends(auth)])
+async def zoom_capture_start(req: CaptureReq):
+    """Page de connexion Zoom ouverte pour un utilisateur, qui s'y connecte lui-même par l'écran distant (lui seul y
+    a accès) ; « finish » rend sa session au contrôle et la retire du navigateur."""
     if state["state"] in ("joining", "lobby", "in_meeting", "leaving") or recorder.active:
         raise HTTPException(409, "assistant en réunion")
+    if state.get("session_of") and state["session_of"] != req.owner:
+        raise HTTPException(409, "session Zoom d'un autre compte chargée")
     async with browser.lock:
-        await browser.page()
-        pg = await browser.ctx.new_page()
-        try:
-            await pg.goto("https://zoom.us/profile", wait_until="domcontentloaded", timeout=30000)
-            await pg.wait_for_timeout(2500)          # redirection éventuelle vers la page de connexion
-            url = pg.url
-        finally:
-            await pg.close()
-    u = urlparse(url)
-    signed = (u.hostname or "").endswith("zoom.us") and "/profile" in u.path and not re.search(r"signin|login|sso", url, re.I)
-    log.info("session Zoom : %s", "ouverte" if signed else "fermée")
-    return {"signed_in": signed, "checked_at": dt.datetime.now().astimezone().isoformat(timespec="seconds")}
+        await browser.zoom_clear()
+        state.update(session_of=req.owner, session_kind="capture")
+        await browser.goto("https://zoom.us/signin")
+    _take(req.owner, req.me_name)
+    set_state("manual", platform=None, url="https://zoom.us/signin", error=None)
+    return await status()
+
+
+@app.post("/zoom/capture/finish", dependencies=[Depends(auth)])
+async def zoom_capture_finish(req: CaptureReq):
+    if state.get("session_of") != req.owner or state.get("session_kind") != "capture":
+        raise HTTPException(409, "pas de connexion Zoom en cours pour ce compte sur cet assistant")
+    async with browser.lock:
+        if not await browser.zoom_signed_in():
+            return {"signed_in": False}
+        cookies = await browser.zoom_cookies()
+        await browser.zoom_clear()
+        state.update(session_of=None, session_kind=None)
+        await browser.blank()
+    set_state("idle", platform=None, url=None, error=None, owner=None)
+    log.info("session Zoom de %s rendue au contrôle et retirée du navigateur", req.owner)
+    return {"signed_in": True, "cookies": cookies}
+
+
+@app.post("/zoom/capture/cancel", dependencies=[Depends(auth)])
+async def zoom_capture_cancel(req: CaptureReq):
+    if state.get("session_of") != req.owner or state.get("session_kind") != "capture":
+        raise HTTPException(409, "pas de connexion Zoom en cours pour ce compte sur cet assistant")
+    await _zoom_release(export=False)
+    await browser.blank()
+    set_state("idle", platform=None, url=None, error=None, owner=None)
+    return await status()
+
+
+@app.get("/zoom/session/out", dependencies=[Depends(auth)])
+async def zoom_session_out():
+    """Session rendue en fin de réunion (une seule fois, puis oubliée)."""
+    out = dict(session_out)
+    session_out.clear()
+    return out
 
 
 @app.post("/browser/reset", dependencies=[Depends(auth)])
 async def reset():
     await browser.blank()
+    await _zoom_release()
     if state["state"] in ("manual", "error"):
         set_state("idle", platform=None, url=None, error=None, owner=None)
     return await status()

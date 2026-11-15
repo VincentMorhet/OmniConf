@@ -246,8 +246,8 @@ function render(st) {
     if (st.listeners) info.push(`🎧 ${st.listeners} à l'écoute`);
     if (st.auto_leave_at) info.push("départ auto à " + new Date(st.auto_leave_at).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }));
     if (st.owner_name && !st.mine) info.push("👤 " + esc(st.owner_name));
-  } else info.push(!st.online ? "hors ligne" : taken ? (st.reserved_for ? "réservé à " + esc(st.reserved_for) : "utilisé par un autre utilisateur") : "libre");
-  if (st.reserved) info.push("🔒 votre compte Zoom");
+  } else info.push(!st.online ? "hors ligne" : taken ? "utilisé par un autre utilisateur" : "libre");
+  if (st.session_of && !taken) info.push(st.session_kind === "capture" ? "🔒 connexion à Zoom en cours" : "🔒 avec votre compte Zoom");
   $(".winfo", el).innerHTML = info.join(" · ");
   $(".winfo", el).title = st.url || "";
   let note = "";
@@ -1443,8 +1443,7 @@ function applyAccount() {
   $("#accountBtn").title = `Mon compte (${me.login}${me.admin ? ", administrateur" : ""})`;
   $("#usersBox").classList.toggle("hidden", !me.admin);
   $("#voiceBox").classList.toggle("hidden", !me.admin);
-  $("#zoomBox").classList.toggle("hidden", !me.admin && !cfg.zoomWorkers?.length);
-  $("#asMeRow").classList.toggle("hidden", !cfg.zoomWorkers?.length);
+  $("#asMeRow").classList.toggle("hidden", !cfg.zoomSession || cfg.zoomSession.expired);
   $("#lexText").readOnly = !me.admin;
   $("#lexSave").classList.toggle("hidden", !me.admin);
 }
@@ -1829,45 +1828,41 @@ async function loadConsents() {
 }
 $("#voiceBox").addEventListener("toggle", () => { if ($("#voiceBox").open) loadConsents(); });
 
-// Compte Zoom : assistant réservé qui garde la session Zoom de la personne (« comme si c'était moi »)
-async function loadZoom(check = false) {
+// Compte Zoom : session de chacun, gardée chiffrée et chargée le temps de ses réunions (« comme si c'était moi »)
+const fmtWhen = (x) => x ? new Date(x).toLocaleString("fr-FR", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "";
+async function loadZoom() {
   let d;
-  try { d = await api("/api/zoom-account" + (check ? "?check=1" : "")); } catch (e) { $("#zoomMine").textContent = "Erreur : " + e.message; return; }
-  const sess = (w) => w.signed_in === true ? `✅ session Zoom ouverte <small>(vérifiée le ${new Date(w.at).toLocaleString("fr-FR")})</small>`
-    : w.signed_in === false ? `❌ pas de session Zoom ouverte <small>(vérifiée le ${new Date(w.at).toLocaleString("fr-FR")})</small>`
-    : "session Zoom pas encore vérifiée";
-  $("#zoomMine").innerHTML = d.workers.length ? d.workers.map(w => `<div class="zoom-w" data-w="${esc(w.name)}">
-      <p>L'assistant <b>${esc(w.name)}</b> vous est réservé · ${sess(w)}</p>
-      <div class="row"><button type="button" class="primary z-in">Se connecter à Zoom</button>
-        <button type="button" class="ghost z-check">Vérifier la session</button></div>
-      <p class="hint">« Se connecter » ouvre la page de connexion Zoom dans l'écran de l'assistant : connectez-vous (cochez
-        « Rester connecté »), puis « Quitter la réunion » pour le libérer. Pour couper la session : déconnectez-vous dans
-        cet écran, ou « Se déconnecter de tous les appareils » dans votre profil Zoom.</p></div>`).join("")
-    : "<p class=\"hint\">Aucun assistant ne vous est réservé" + (me.admin ? " : réservez-en un ci-dessous." : " (demandez-le à un administrateur).") + "</p>";
-  $("#zoomMine").querySelectorAll(".zoom-w").forEach(el => {
-    const w = el.dataset.w;
-    $(".z-in", el).onclick = async () => {
-      try { await api("/api/zoom-account/signin", { method: "POST" }); } catch (e) { return toast(e.message, 5000); }
-      toast("Connectez-vous à Zoom dans l'écran de l'assistant, puis « Quitter la réunion »", 6000);
-      openMeeting(w); setTimeout(() => toggleVnc(w, true), 400);
-    };
-    $(".z-check", el).onclick = async (e) => { e.target.disabled = true; e.target.textContent = "Vérification…"; await loadZoom(true); };
-  });
-  const box = $("#zoomAdmin");
-  if (!d.reserved) { box.innerHTML = ""; return; }
-  box.innerHTML = `<p class="hint">Administrateur : assistants réservés. Pour rendre un assistant partagé, la session Zoom doit
-    d'abord y être fermée.</p>` + d.all_workers.map(w => `<div class="row zoom-res" data-w="${esc(w)}"><b>${esc(w)}</b>
-    <select aria-label="Réservé à"><option value="">— partagé —</option>${d.users.map(x => `<option value="${esc(x.login)}"
-      ${d.reserved[w]?.login === x.login ? "selected" : ""}>réservé à ${esc(x.name)}</option>`).join("")}</select></div>`).join("");
-  box.querySelectorAll(".zoom-res").forEach(row => {
-    const sel = $("select", row), w = row.dataset.w, was = sel.value;
-    sel.onchange = async () => {
-      if (sel.value && !confirm(`Réserver l'assistant ${w} ? Il n'entrera plus dans les réunions des autres comptes.`)) { sel.value = was; return; }
-      try { await api(`/api/workers/${w}/reserve`, { method: "PUT", json: { login: sel.value || null } }); toast(sel.value ? `${w} réservé` : `${w} partagé`); cfg = await api("/api/config"); applyAccount(); }
-      catch (e) { toast(e.message, 6000); sel.value = was; }
-      loadZoom();
-    };
-  });
+  try { d = await api("/api/zoom-account"); } catch (e) { $("#zoomMine").textContent = "Erreur : " + e.message; return; }
+  const z = d.session, box = $("#zoomMine");
+  const line = d.capture ? `⏳ connexion en cours dans l'écran de l'assistant <b>${esc(d.capture)}</b>`
+    : !z ? "Aucune session Zoom enregistrée : l'assistant entre en invité."
+    : z.expired ? `❌ session Zoom expirée${z.expired_at ? " le " + fmtWhen(z.expired_at) : ""} : reconnectez-vous.`
+    : `✅ session Zoom enregistrée le ${fmtWhen(z.saved_at)}${z.used_at ? ` · dernière réunion le ${fmtWhen(z.used_at)}` : ""}`;
+  box.innerHTML = `<p class="zoom-st">${line}</p><div class="row zoom-act">` + (d.capture
+    ? `<button type="button" class="primary z-done">J'ai terminé</button><button type="button" class="ghost z-screen">Revoir l'écran</button>
+       <button type="button" class="ghost z-cancel">Annuler</button>`
+    : `<button type="button" class="primary z-in">${z && !z.expired ? "Se reconnecter à Zoom" : "Se connecter à Zoom"}</button>
+       ${z ? `<button type="button" class="ghost danger z-forget">Oublier ma session</button>` : ""}`) + `</div>
+    <p class="hint">${d.capture ? "Connectez-vous dans l'écran de l'assistant (cochez « Rester connecté »), puis « J'ai terminé » : votre session est reprise, chiffrée, et retirée de l'assistant."
+      : "« Se connecter » ouvre la page de connexion Zoom dans l'écran d'un assistant libre. Pour couper la session chez Zoom : « Se déconnecter de tous les appareils » dans votre profil Zoom."}</p>`;
+  const screen = (w) => { openMeeting(w); setTimeout(() => toggleVnc(w, true), 400); };
+  if ($(".z-in", box)) $(".z-in", box).onclick = async () => {
+    try { const r = await api("/api/zoom-account/signin", { method: "POST" }); toast("Connectez-vous à Zoom dans l'écran de l'assistant, puis Réglages > « J'ai terminé »", 7000); screen(r.name); }
+    catch (e) { toast(e.message, 5000); }
+  };
+  if ($(".z-screen", box)) $(".z-screen", box).onclick = () => screen(d.capture);
+  if ($(".z-done", box)) $(".z-done", box).onclick = async (e) => {
+    e.target.disabled = true; e.target.textContent = "Vérification…";
+    try { await api("/api/zoom-account/finish", { method: "POST" }); toast("Session Zoom enregistrée : vos réunions Zoom se feront avec votre compte"); cfg = await api("/api/config"); applyAccount(); }
+    catch (x) { toast(x.message, 5000); }
+    loadZoom();
+  };
+  if ($(".z-cancel", box)) $(".z-cancel", box).onclick = async () => { try { await api("/api/zoom-account/cancel", { method: "POST" }); } catch (x) { toast(x.message); } loadZoom(); };
+  if ($(".z-forget", box)) $(".z-forget", box).onclick = async () => {
+    if (!confirm("Oublier votre session Zoom ? L'assistant entrera de nouveau en invité.")) return;
+    try { await api("/api/zoom-account", { method: "DELETE" }); toast("Session Zoom oubliée"); cfg = await api("/api/config"); applyAccount(); } catch (x) { toast(x.message); }
+    loadZoom();
+  };
 }
 $("#zoomBox").addEventListener("toggle", () => { if ($("#zoomBox").open) loadZoom(); });
 $("#csAttest").onchange = () => { $("#csOk").disabled = !$("#csAttest").checked; };
