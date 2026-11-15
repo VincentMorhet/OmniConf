@@ -39,6 +39,17 @@ créé au premier démarrage avec `ADMIN_PASSWORD` (dans `/etc/webconf/control.e
   réunions d'avant les comptes n'ont pas de propriétaire : seuls les administrateurs les voient.
 - **Assistants** : ils sont communs. Un assistant en réunion n'est accessible qu'à celui qui l'a lancé (et aux
   administrateurs) ; les autres le voient « occupé », sans titre ni écran ni transcription.
+- **Assistant réservé (compte Zoom, « comme si c'était moi »)** : un administrateur réserve un assistant à un compte
+  (Réglages > Votre compte Zoom ; `/var/lib/webconf/worker_reserved.json`). La personne s'y connecte elle-même à
+  Zoom par l'écran distant (« Se connecter à Zoom ») ; la session reste dans le profil Chrome de cet assistant. Ses
+  réunions Zoom y entrent avec son compte (son nom, son avatar ; case « Zoom : entrer avec mon compte » au
+  lancement, décochée : un autre assistant en invité). Personne d'autre, administrateurs compris, ne peut s'en
+  servir ni voir son écran ; il ne sert jamais aux réunions Zoom en invité. La session est vérifiée avant chaque
+  entrée (page de profil Zoom ouverte puis refermée, aucun cookie lu) : fermée, l'entrée est refusée (réunion
+  planifiée : un autre assistant en invité). Si Zoom signale le compte déjà dans la réunion sur un autre appareil
+  (« compagnon », « transférer »), l'assistant ne clique sur rien et sort. Un assistant ne redevient partagé
+  qu'une fois la session Zoom fermée. Tests : `tests/zoom_account_mock_test.py` (pages Zoom factices) et
+  `tests/zoom_account_test.py` (assistants simulés).
 - **👤 Mon compte** : nom dans les comptes rendus (« Pour … »), nom de l'assistant par plateforme (par
   défaut ce nom ; sinon `DEFAULT_NAMES`), mot de passe.
 - **Jetons MCP** : chaque jeton appartient à un compte et ne donne accès qu'à ses réunions. Les jetons

@@ -229,28 +229,47 @@ class Teams:
 
 
 # --------------------------------------------------------------------------- Zoom
+class AccountBusy(RuntimeError):
+    """Le compte Zoom de l'utilisateur est déjà utilisé ailleurs : l'assistant ne prend pas sa place."""
+
+
 class Zoom:
     LEAVE = ["button[aria-label*='Leave' i]", "button.footer__leave-btn", *_btn("^Leave$", "^Quitter$")]
     WAITING = ["text=/host will let you in|waiting for the host|l'hôte va vous admettre|attendre l'hôte/i"]
+    NAME = ["#input-for-name", "input[placeholder*='name' i]", "input[placeholder*='nom' i]"]
+    JOIN = ["button.preview-join-button", *_btn("^Join$", "^Rejoindre$", "^Participer$")]
+    # compte déjà dans la réunion (ou connecté) sur un autre appareil : Zoom propose « compagnon » ou « transférer » ;
+    # on ne clique jamais (transférer sortirait l'utilisateur de la réunion)
+    ACCOUNT_BUSY = ["text=/join as (a )?companion|en tant que compagnon|transfer (the )?(meeting|session)|transférer (la|cette)"
+                    "|switch to this device|basculer sur cet appareil|already (in|joined) (this|the) meeting|déjà dans (cette|la) réunion"
+                    "|signed in (on|from) another device|connecté (sur|depuis) un autre appareil/i"]
 
     @staticmethod
-    async def join(page: Page, url: str, name: str, set_state, passcode: str | None = None):
+    async def join(page: Page, url: str, name: str, set_state, passcode: str | None = None, as_me: bool = False):
+        """as_me : entrée avec le compte Zoom connecté dans le navigateur de l'assistant (son nom, son avatar)."""
         await page.goto(zoom_web_url(url, passcode), wait_until="domcontentloaded", timeout=45000)
         await _click(page, ["#onetrust-accept-btn-handler", *_btn("Accept Cookies", "Accepter")], timeout=5)
-        name_input = await _find(page, ["#input-for-name", "input[placeholder*='name' i]",
-                                        "input[placeholder*='nom' i]"], timeout=40)
-        if not name_input:
+        # invité : champ du nom ; compte connecté : le nom du compte, parfois sans champ à remplir
+        if not await _find(page, Zoom.NAME + (Zoom.JOIN if as_me else []), timeout=40):
+            raise RuntimeError("champ nom introuvable" if not as_me else "page d'entrée Zoom non reconnue")
+        name_input = await _find(page, Zoom.NAME, timeout=2)
+        if name_input and await name_input.is_editable():
+            if not as_me or not (await name_input.input_value()).strip():   # compte connecté : son nom est gardé
+                await name_input.fill(name)
+        elif not as_me:
             raise RuntimeError("champ nom introuvable")
-        await name_input.fill(name)
         if passcode:
             pwd = await _find(page, ["#input-for-pwd", "input[type='password']"])
             if pwd:
                 await pwd.fill(passcode)
-        await _click(page, ["button.preview-join-button", *_btn("^Join$", "^Rejoindre$", "^Participer$")], timeout=20)
+        await _click(page, Zoom.JOIN, timeout=20)
         await _click(page, _btn("^I Agree$", "^J'accepte$"), timeout=3)
         deadline = time.monotonic() + 3600
         audio_done = False
         while time.monotonic() < deadline:
+            if as_me and await _find(page, Zoom.ACCOUNT_BUSY, timeout=1):
+                raise AccountBusy("votre compte Zoom est déjà dans cette réunion (ou connecté) sur un autre appareil : "
+                                  "l'assistant n'a pas pris votre place")
             if not audio_done and await _click(page, ["button.join-audio-by-voip__join-btn",
                                                       *_btn("Join Audio by Computer", "Join with Computer Audio",
                                                             "Rejoindre l'audio par ordinateur")]):

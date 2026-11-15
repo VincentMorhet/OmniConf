@@ -798,3 +798,9 @@ h3.day { font-size: 12.5px; letter-spacing: .06em; text-transform: uppercase; co
 .pl-ask > summary small { color: var(--mute); font-size: 12.5px; }
 .pl-ask[open] > summary { margin-bottom: 8px; }
 @media (max-width: 720px) { .ask .vv-act button, .ask .vv-act select { flex: 1 1 100%; } .ask-t { font-size: 18px; } }
+
+/* compte Zoom (assistant réservé) */
+.zoom-w p { margin: 4px 0 8px; overflow-wrap: anywhere; }
+.zoom-w small { color: var(--mute); }
+.zoom-res { align-items: center; margin: 6px 0; }
+.zoom-res select { width: auto; max-width: 100%; }

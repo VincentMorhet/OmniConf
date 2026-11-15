@@ -22,7 +22,7 @@ import lexicon
 import reid
 import voiceprints
 from audio_bridge import AudioBridge
-from meetings import (PLATFORMS, SPEAKER_DEBUG_JS, Browser, active_speakers, clean_name, detect_platform, unwrap_url,
+from meetings import (PLATFORMS, SPEAKER_DEBUG_JS, AccountBusy, Browser, active_speakers, clean_name, detect_platform, unwrap_url,
                       visible_participants)
 from recorder import Recorder, _slug
 import slides as slides_mod
@@ -88,6 +88,7 @@ class JoinReq(BaseModel):
     calendar: dict | None = None     # événement d'agenda (eid Google / id Exchange, organisateur, invités), facultatif
     owner: str | None = None         # compte OmniConf qui lance la réunion (propriétaire des fichiers)
     me_name: str | None = None       # son nom dans les comptes rendus
+    as_me: bool = False              # Zoom : entrer avec le compte connecté dans ce navigateur (assistant réservé)
 
 
 class OpenReq(BaseModel):
@@ -240,7 +241,9 @@ async def _run_join(req: JoinReq, platform: str):
             recognized = True
             if impl is None:  # autre plateforme : on ouvre la page, finir à la main via l'écran distant
                 await page.goto(req.url, wait_until="domcontentloaded", timeout=45000)
-            elif platform in ("zoom", "web"):
+            elif platform == "zoom":
+                recognized = await impl.join(page, req.url, name, set_state, req.passcode, as_me=req.as_me)
+            elif platform == "web":
                 recognized = await impl.join(page, req.url, name, set_state, req.passcode)
             else:
                 await impl.join(page, req.url, name, set_state)
@@ -252,6 +255,10 @@ async def _run_join(req: JoinReq, platform: str):
         await _after_join(req, platform, note)
     except asyncio.CancelledError:
         raise
+    except AccountBusy as e:          # compte de l'utilisateur utilisé ailleurs : on sort sans rien toucher
+        log.warning("entrée Zoom avec le compte de l'utilisateur : %s", e)
+        await browser.blank()
+        set_state("error", error=str(e)[:300])
     except Exception as e:
         log.exception("join failed")
         await _join_debug(str(e))
@@ -548,6 +555,27 @@ async def open_url(req: OpenReq):
     _take(req.owner, req.me_name)
     set_state("manual", platform=None, url=req.url)
     return await status()
+
+
+@app.get("/zoom/session", dependencies=[Depends(auth)])
+async def zoom_session():
+    """Une session Zoom est-elle ouverte dans le navigateur de l'assistant ? La page de profil est ouverte dans un
+    onglet à part puis refermée (jamais pendant une réunion) ; aucun cookie n'est lu ni renvoyé, seulement oui/non."""
+    if state["state"] in ("joining", "lobby", "in_meeting", "leaving") or recorder.active:
+        raise HTTPException(409, "assistant en réunion")
+    async with browser.lock:
+        await browser.page()
+        pg = await browser.ctx.new_page()
+        try:
+            await pg.goto("https://zoom.us/profile", wait_until="domcontentloaded", timeout=30000)
+            await pg.wait_for_timeout(2500)          # redirection éventuelle vers la page de connexion
+            url = pg.url
+        finally:
+            await pg.close()
+    u = urlparse(url)
+    signed = (u.hostname or "").endswith("zoom.us") and "/profile" in u.path and not re.search(r"signin|login|sso", url, re.I)
+    log.info("session Zoom : %s", "ouverte" if signed else "fermée")
+    return {"signed_in": signed, "checked_at": dt.datetime.now().astimezone().isoformat(timespec="seconds")}
 
 
 @app.post("/browser/reset", dependencies=[Depends(auth)])
