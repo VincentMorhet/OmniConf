@@ -216,6 +216,18 @@ nom saisi à la main l'emporte toujours. Calibrage sur 11 réunions (82 voix) : 
 l'autre 0,88 à 0,96, personnes différentes 0,76 au plus. Réglages : `VOICEPRINT_MATCH`, `VOICEPRINT_MARGIN`.
 Test de l'écran de validation : `tests/voice_review_ui_test.py` (données fictives, aucune diffusion).
 
+**« Qui parle ? »** : comme la reconnaissance des visages d'une photothèque, le doute se règle par une question.
+Pendant la recherche des voix (chaque nuit, quelques minutes après le compte rendu d'une nouvelle réunion, et après
+chaque décision), chaque assistant compare aussi les voix de ses réunions qui ne sont ni nommées à la main ni
+reconnues aux empreintes : une voix qui ressemble à une personne cochée (≥ 0,70, `VOICEPRINT_ASK`) sans être reconnue
+d'office (sous 0,82, deux empreintes trop proches, ou réunion antérieure à l'empreinte), et qui ne porte pas déjà ce
+nom, devient une question « Est-ce X ? » avec 3 extraits à écouter (accueil des administrateurs et page de la
+réunion). « Oui » (ou « C'est Y », personne cochée) nomme la voix dans la réunion (transcription et compte rendu) et
+l'ajoute, validée, à l'empreinte (origine « confirmée ») ; « Non » et « Je ne sais pas » ne la reposent plus ; chaque
+réponse s'annule. Rien de biométrique n'est gardé pour une question (nom proposé, ressemblance, positions des
+extraits) ; les centres des voix ne restent qu'en mémoire de l'assistant. Tests : `tests/voice_questions_unit_test.py`
+(assistant, données fictives) et `tests/voice_questions_ui_test.py` (écran, aucune diffusion ni renommage).
+
 Choix du modèle (banc d'essai `tests/speaker_models_bench.py`, 6 réunions, 29 personnes, 777 phrases dont
 l'auteur est connu) :
 

@@ -46,6 +46,7 @@ def serve():
     (data / "voiceprints.json").write_text(json.dumps({NAME: {
         "groups": {f"{w}/{stem}|moi": group("moi", "Moi", 40, 180.0, 20.0),
                    f"{w}/{stem}|vignette": group("vignette", NAME, 12, 50.0, 200.0)}, "review": {}}}))
+    (data / "voice_questions.json").write_text(json.dumps({"items": {}, "answers": {}}))
     os.environ.update(ADMIN_LOGIN="essai", ADMIN_NAME="Compte Essai", COOKIE_SECURE="0",
                       SECRET_KEY=os.urandom(16).hex())
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "control"))
@@ -56,6 +57,7 @@ def serve():
     async def no_push(names=None):            # rien n'est envoyé aux assistants
         return {w: "essai : non diffusé"}
     A.voiceprints_push = no_push
+    A.vp_start_build = lambda names, by: {"state": "done", "names": [], "workers": {}, "people": {}}   # aucune recherche
     A.vp_schedule = lambda names, by, delay=60: None     # pas de nouvelle recherche sur les assistants
     uvicorn.run(A.app, host="127.0.0.1", port=int(os.environ.get("TEST_PORT", "8099")), log_level="warning")
 

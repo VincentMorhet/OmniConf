@@ -153,6 +153,7 @@ class ExtractReq(BaseModel):
     exclude: dict[str, list[str]] = {}      # voix refusées à l'écoute (par personne)
     refs: dict[str, list[float]] = {}       # empreintes validées (référence pour écarter les phrases parasites)
     negatives: dict[str, list] = {}         # extraits refusés à l'écoute : [[réunion, début]] par personne
+    questions: bool = False                 # aussi les voix douteuses à faire confirmer (« Est-ce X ? »)
 
 
 @app.get("/voiceprints", dependencies=[Depends(auth)])
@@ -171,17 +172,19 @@ async def voiceprints_put(body: PrintsBody):
     return {"version": v, "people": sorted(voiceprints.load())}
 
 
-def _extract_low_priority(names, owners, exclude, refs, negatives):
+def _extract_low_priority(names, owners, exclude, refs, negatives, asks):
     try:   # priorité basse (fil de calcul seul) : une réunion qui démarre sur l'assistant reste prioritaire
         os.setpriority(os.PRIO_PROCESS, __import__("threading").get_native_id(), 15)
     except OSError:
         pass
-    return voiceprints.extract(recorder.dir, names, owners, exclude, refs, negatives)
+    return voiceprints.extract(recorder.dir, names, owners, exclude, refs, negatives, asks)
 
 
-async def _vp_extract(names, owners, exclude, refs, negatives):
+async def _vp_extract(names, owners, exclude, refs, negatives, questions):
+    asks = {} if questions else None
     try:
-        vp_job.update(result=await asyncio.to_thread(_extract_low_priority, names, owners, exclude, refs, negatives), state="done")
+        res = await asyncio.to_thread(_extract_low_priority, names, owners, exclude, refs, negatives, asks)
+        vp_job.update(result=res, questions=asks, state="done")
     except Exception as e:
         log.warning("empreintes : %s", e)
         vp_job.update(state="error", error=str(e)[:300])
@@ -199,16 +202,17 @@ async def voiceprints_extract(req: ExtractReq):
     names = [n for n in req.names if n.strip()][:200]
     vp_job.clear()
     vp_job.update(state="running", started=time.time(), names=names)
-    asyncio.create_task(_vp_extract(names, req.owners, req.exclude, req.refs, req.negatives))
+    asyncio.create_task(_vp_extract(names, req.owners, req.exclude, req.refs, req.negatives, req.questions))
     return {"state": "running"}
 
 
 @app.get("/voiceprints/extract", dependencies=[Depends(auth)])
 async def voiceprints_extract_get():
-    """État du calcul ; le résultat (empreintes par voix, extraits) n'est rendu qu'une fois, puis oublié."""
+    """État du calcul ; le résultat (empreintes par voix, extraits, questions) n'est rendu qu'une fois, puis oublié."""
     out = {k: vp_job.get(k) for k in ("state", "error", "started", "ended", "names")}
     if vp_job.get("state") == "done":
         out["result"] = vp_job.pop("result", None)
+        out["questions"] = vp_job.pop("questions", None)
         vp_job["state"] = "fetched"
     return out
 
@@ -651,6 +655,7 @@ async def recording_report_build(name: str):
 class SpeakerReq(BaseModel):
     id: str
     name: str | None = None
+    via: str | None = None       # « question » : nom donné en répondant à « Est-ce X ? » (voix confirmée)
 
 
 @app.post("/transcript/speakers", dependencies=[Depends(auth)])
@@ -669,10 +674,13 @@ async def recording_rename_speaker(name: str, req: SpeakerReq):
     if not p:
         raise HTTPException(404, "pas de transcription")
     doc = json.loads(p.read_text())
-    if not rename_in_doc(doc, req.id, req.name):
+    if not rename_in_doc(doc, req.id, req.name, req.via):
         raise HTTPException(404, "intervenant inconnu")
-    if transcriber.base and recorder.stem(name) == transcriber.base.name and req.id in transcriber.diar.spk:
-        transcriber.rename_speaker(req.id, req.name)  # réunion qui vient de finir : état mémoire = fichier
+    if (transcriber.base and recorder.stem(name) == transcriber.base.name and req.id in transcriber.diar.spk
+            and not doc.get("reid")):
+        # réunion qui vient de finir, voix pas encore recalculées : état mémoire = fichier (après la ré-identification,
+        # le fichier a d'autres voix S1… : c'est lui qu'on modifie, la mémoire de la réunion n'est plus à jour)
+        transcriber.rename_speaker(req.id, req.name)
         return {"ok": True, "speakers": transcriber.labels()}
     save_doc(p.parent / recorder.stem(p.name), doc)
     return {"ok": True, "speakers": doc["speakers"]}

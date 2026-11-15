@@ -776,3 +776,25 @@ h3.day { font-size: 12.5px; letter-spacing: .06em; text-transform: uppercase; co
 #voiceList .vv-act button { min-height: 42px; flex: 0 1 auto; }
 .vv-act small { color: var(--mute); font-size: 12px; }
 @media (max-width: 720px) { #voiceList .vv-act button, .vv-act select { flex: 1 1 100%; } }
+/* « Est-ce X ? » (accueil et page d'une réunion) */
+.ask-sub { color: var(--mute); font-size: 13.5px; margin: -6px 0 10px; }
+.ask .vv-clips button.clip { display: flex; gap: 10px; align-items: flex-start; width: 100%; text-align: left; padding: 8px 10px;
+  min-height: 44px; border-radius: 10px; background: var(--field); border: 1px solid var(--line); color: var(--fg); font-size: 13px; line-height: 1.35; }
+.ask .vv-clips .clip.odd { border-style: dashed; }
+.ask-q + .ask-q { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 14px; }
+.ask-t { font-size: 20px; margin: 8px 0 2px; letter-spacing: -.01em; overflow-wrap: anywhere; }
+.ask-t b { color: var(--accent); }
+.ask-n { font-size: 12px; padding: 1px 9px; border-radius: 999px; background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); white-space: nowrap; }
+.ask-open { margin-left: auto; font-size: 13px; white-space: nowrap; }
+.ask .vv-act button { min-height: 44px; flex: 0 1 auto; }
+.ask-done { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px 10px; margin-bottom: 12px; border-radius: 10px;
+  background: color-mix(in srgb, var(--ok) 12%, transparent); }
+.ask-done small { color: var(--fg); font-size: 13px; flex: 1 1 240px; min-width: 0; overflow-wrap: anywhere; }
+.ask-done button { min-height: 36px; padding: 4px 12px; }
+.pl-ask { margin-top: 8px; border: 1px solid color-mix(in srgb, var(--warn) 55%, var(--line)); border-radius: 12px; background: var(--card2); padding: 8px 12px; }
+.pl-ask > summary { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; cursor: pointer; list-style: none; min-height: 40px; }
+.pl-ask > summary::-webkit-details-marker { display: none; }
+.pl-ask > summary svg.i { width: 18px; height: 18px; color: var(--warn); }
+.pl-ask > summary small { color: var(--mute); font-size: 12.5px; }
+.pl-ask[open] > summary { margin-bottom: 8px; }
+@media (max-width: 720px) { .ask .vv-act button, .ask .vv-act select { flex: 1 1 100%; } .ask-t { font-size: 18px; } }

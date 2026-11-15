@@ -67,6 +67,7 @@ SCHEDULE_FILE = DATA / "schedule.json"
 LEXICON_FILE = DATA / "lexicon.md"
 CONSENT_FILE = DATA / "voice_consents.json"   # consentements aux empreintes vocales (attestés par un administrateur)
 VOICEPRINT_FILE = DATA / "voiceprints.json"   # empreintes de référence (personnes consentantes seulement)
+VOICE_Q_FILE = DATA / "voice_questions.json"  # « Est-ce X ? » : voix douteuses à confirmer, et réponses données
 USERS = Users(DATA / "users.json", admin_password=PASSWORD, admin_login=os.environ.get("ADMIN_LOGIN"),
               admin_name=os.environ.get("ADMIN_NAME"),
               bot_names=json.loads(os.environ["DEFAULT_NAMES"]) if os.environ.get("DEFAULT_NAMES") else None)   # lexique de l'installation (noms, corrections, sigles, registre), poussé aux workers
@@ -848,7 +849,69 @@ def vp_forget(name: str) -> bool:
     gone = d.pop(name, None) is not None
     if gone:
         vp_save(d)
+    q = vq_load()                     # questions et réponses qui la concernent : effacées aussi
+    items = {k: x for k, x in q["items"].items() if x.get("name") != name}
+    answers = {k: a for k, a in q["answers"].items() if name not in (a.get("name"), a.get("to"))}
+    if len(items) != len(q["items"]) or len(answers) != len(q["answers"]):
+        vq_save({"items": items, "answers": answers})
     return gone
+
+
+# « Est-ce X ? » : pendant la recherche des voix, chaque assistant signale les voix de ses réunions qui ressemblent à
+# l'empreinte d'une personne cochée sans certitude (aucun vecteur : nom, ressemblance, positions de 3 extraits). Une
+# réponse « oui » (ou « c'est Y ») nomme la voix dans la réunion et l'ajoute, validée, à l'empreinte de la personne.
+def vq_load() -> dict:
+    """{"items": {"<assistant>/<réunion>|<voix>": {worker, meeting, title, sid, label, name, sim, sure, alt?, alt_sim?,
+    n, sec, clips, found_at}}, "answers": {même clé: {answer: yes|no|other|unknown, name, to?, at, by}}}."""
+    try:
+        d = json.loads(VOICE_Q_FILE.read_text())
+    except (FileNotFoundError, ValueError):
+        d = {}
+    return {"items": d.get("items") or {}, "answers": d.get("answers") or {}}
+
+
+def vq_save(d: dict):
+    tmp = VOICE_Q_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(d, ensure_ascii=False))
+    os.chmod(tmp, 0o600)
+    tmp.replace(VOICE_Q_FILE)
+
+
+def vq_pending(d: dict, ok: set) -> list[dict]:
+    """Questions encore à poser : personne cochée, pas de réponse (ou « non » à un autre nom que celui proposé)."""
+    out = []
+    for qid, q in d["items"].items():
+        a = d["answers"].get(qid)
+        if q.get("name") not in ok or (a and not (a["answer"] == "no" and a.get("name") != q["name"])):
+            continue
+        out.append({"id": qid, **{k: q.get(k) for k in ("worker", "meeting", "title", "sid", "label", "name", "sim",
+                                                        "sure", "n", "sec", "clips")},
+                    **({"alt": q["alt"], "alt_sim": q.get("alt_sim")} if q.get("alt") in ok else {})})
+    out.sort(key=lambda q: (-(q["sim"] or 0), q["id"]))
+    return out
+
+
+def vq_store(results: dict[str, dict | None], ok: set):
+    """Questions renvoyées par les assistants après une recherche (assistant occupé : ses questions sont gardées)."""
+    d = vq_load()
+    now = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    for w, res in results.items():
+        if res is None:
+            continue
+        old = {k: x for k, x in d["items"].items() if x.get("worker") == w}
+        for k in old:
+            d["items"].pop(k)
+        for stem, item in (res or {}).items():
+            for q in (item or {}).get("questions") or []:
+                if not isinstance(q, dict) or q.get("name") not in ok or not q.get("sid"):
+                    continue
+                qid = f"{w}/{stem}|{q['sid']}"
+                d["items"][qid] = {**{k: q.get(k) for k in ("sid", "label", "name", "sim", "sure", "n", "sec", "clips")},
+                                   **({"alt": q["alt"], "alt_sim": q.get("alt_sim")} if q.get("alt") else {}),
+                                   "worker": w, "meeting": stem, "title": item.get("title"),
+                                   "found_at": (old.get(qid) or {}).get("found_at") or now}
+    if any(r is not None for r in results.values()):
+        vq_save(d)
 
 
 def vp_migrate() -> bool:
@@ -965,26 +1028,29 @@ async def voiceprints_build(names: list[str], by: str):
         try:
             r = await http.post(wurl(n) + "/voiceprints/extract", timeout=15,
                                 json={"names": names, "owners": owners, "exclude": exclude, "refs": refs,
-                                      "negatives": negatives})
+                                      "negatives": negatives, "questions": True})
             if r.status_code >= 400:
                 job["workers"][n] = "occupé (réunion en cours)" if r.status_code == 409 else f"erreur {r.status_code}"
-                return n, None
+                return n, None, None
             job["workers"][n] = "recherche en cours"
             for _ in range(720):                     # 1 h au plus
                 await asyncio.sleep(5)
                 g = (await http.get(wurl(n) + "/voiceprints/extract", timeout=15)).json()
                 if g.get("state") == "done":
                     job["workers"][n] = "terminé"
-                    return n, g.get("result") or {}
+                    return n, g.get("result") or {}, g.get("questions") if isinstance(g.get("questions"), dict) else None
                 if g.get("state") in ("error", "fetched", None):
                     job["workers"][n] = f"erreur : {g.get('error') or g.get('state')}"
-                    return n, None
+                    return n, None, None
             job["workers"][n] = "trop long"
         except Exception as e:
             job["workers"][n] = f"injoignable ({str(e)[:60]})"
-        return n, None
-    results = dict(await asyncio.gather(*(one(n) for n in WORKERS)))
+        return n, None, None
+    got = await asyncio.gather(*(one(n) for n in WORKERS))
+    results = {n: res for n, res, _ in got}
     ok = set(vp_consented())          # consentement retiré pendant le calcul : rien n'est gardé
+    vq_store({n: q for n, _, q in got}, ok)
+    job["questions"] = len(vq_pending(vq_load(), ok))
     d = vp_load()                     # validations faites pendant la recherche : conservées
     now = dt.datetime.now().astimezone().isoformat(timespec="seconds")
     for name in names:
@@ -1230,6 +1296,98 @@ async def voiceprints_attribute(body: VoiceAttribute, u: dict = Depends(require_
     return {"summary": vp_summary(src), "to": vp_summary(dst), "workers": await voiceprints_push()}
 
 
+# ----------------------------------------------------------------------------- « Est-ce X ? »
+@app.get("/api/voice-questions")
+async def voice_questions(worker: str | None = None, meeting: str | None = None, u: dict = Depends(require_admin)):
+    """Voix douteuses à confirmer (toutes, ou celles d'une réunion), les plus ressemblantes d'abord."""
+    d, ok = vq_load(), set(vp_consented())
+    qs = [q for q in vq_pending(d, ok) if (not worker or q["worker"] == worker) and (not meeting or q["meeting"] == meeting)]
+    return {"questions": qs, "people": sorted(ok), "answered": len(d["answers"]),
+            "searching": (vp_state["job"] or {}).get("state") == "running"}
+
+
+@app.get("/api/voice-questions/clip")
+async def voice_question_clip(id: str, t: float, u: dict = Depends(require_admin)):
+    """Extrait d'une voix douteuse (MP3 lu à la demande sur l'assistant, jamais conservé ici)."""
+    q = vq_load()["items"].get(id) or {}
+    c = next((c for c in q.get("clips") or [] if abs(float(c["t"]) - t) < 0.01), None)
+    if not c or q.get("worker") not in WORKERS or q.get("name") not in set(vp_consented()):
+        raise HTTPException(404, "extrait inconnu")
+    r = await wcall(q["worker"], "GET", f"/recordings/{quote(q['meeting'] + '.mp4')}/audio", timeout=30,
+                    params={"start": max(0.0, float(c["t"]) - 0.3), "end": float(c["te"]) + 0.3, "fmt": "mp3"})
+    return Response(r.content, media_type="audio/mpeg", headers={"Cache-Control": "private, max-age=3600"})
+
+
+class VoiceAnswer(BaseModel):
+    id: str
+    answer: str | None            # yes : c'est bien la personne proposée ; other : c'est `to` ; no ; unknown ; None : annuler
+    to: str | None = None
+
+
+async def _vq_name(q: dict, name: str | None, via: str | None):
+    """Nomme (ou dénomme) la voix dans la transcription de la réunion, sur l'assistant."""
+    await wcall(q["worker"], "PATCH", f"/recordings/{quote(q['meeting'] + '.mp4')}/speakers", timeout=15,
+                json={"id": q["sid"], "name": name, "via": via})
+    _rec_cache.pop(q["worker"], None)
+
+
+@app.post("/api/voice-questions/answer")
+async def voice_question_answer(body: VoiceAnswer, u: dict = Depends(require_admin)):
+    """Réponse à « Est-ce X ? ». Oui (ou « c'est Y ») : la voix prend ce nom dans la réunion (compte rendu compris) et
+    compte, validée, dans l'empreinte de la personne (recalculée une minute après). Non / je ne sais pas : la question
+    n'est plus posée. Sans réponse : la précédente est annulée (nom retiré, voix retirée de l'empreinte)."""
+    if body.answer not in ("yes", "no", "other", "unknown", None):
+        raise HTTPException(400, "réponse inconnue")
+    d, ok = vq_load(), set(vp_consented())
+    q = d["items"].get(body.id)
+    if not q:
+        raise HTTPException(404, "question inconnue (recherche refaite entre-temps ?)")
+    now = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    gid = f"{q['worker']}/{q['meeting']}|confirmée"
+    if body.answer is None:
+        prev = d["answers"].get(body.id)
+        if not prev:
+            return {"ok": True}
+        if prev["answer"] in ("yes", "other"):
+            who = prev.get("to") or prev["name"]
+            await _vq_name(q, None, None)
+            d = vq_load()
+            same = [k for k, a in d["answers"].items() if k != body.id and k.startswith(f"{q['worker']}/{q['meeting']}|")
+                    and a["answer"] in ("yes", "other") and (a.get("to") or a["name"]) == who]
+            vd = vp_load()
+            rv = (vd.get(who) or {}).get("review") or {}
+            if not same and (rv.get(gid) or {}).get("via") == "question":
+                rv.pop(gid)
+                vp_compute(vd[who])
+                vp_save(vd)
+                await voiceprints_push()
+            if who in ok:
+                vp_schedule([who], u["login"])
+        d["answers"].pop(body.id, None)
+        vq_save(d)
+        log.info("question %s : réponse annulée par %s", body.id, u["login"])
+        return {"ok": True}
+    who = q["name"] if body.answer == "yes" else body.to if body.answer == "other" else None
+    if body.answer in ("yes", "other"):
+        if who not in ok:
+            raise HTTPException(400, f"{who or '?'} : consentement non attesté, cette voix ne peut pas lui être attribuée")
+        await _vq_name(q, who, "question")
+        vd = vp_load()
+        e = vd.setdefault(who, {})
+        e.setdefault("groups", {})
+        e.setdefault("review", {})[gid] = {"ok": True, "at": now, "by": u["login"], "via": "question"}
+        vp_compute(e)
+        vp_save(vd)
+        vp_schedule([who], u["login"])          # la voix confirmée rejoint l'empreinte à la recherche suivante
+        d = vq_load()
+    d["answers"][body.id] = {"answer": body.answer, "name": q["name"], **({"to": who} if body.answer == "other" else {}),
+                             "label": q.get("label"), "at": now, "by": u["login"]}
+    vq_save(d)
+    log.info("question %s (%s ?) : %s%s par %s", body.id, q["name"], body.answer, f" ({who})" if body.answer == "other" else "",
+             u["login"])
+    return {"ok": True, "named": who, "left": len(vq_pending(d, ok))}
+
+
 # ----------------------------------------------------------------------------- lexique
 def lexicon_version(text: str) -> str | None:
     """Même empreinte que worker/lexicon.py."""
@@ -1284,6 +1442,12 @@ async def lexicon_sync():
             last = (vp_state.get("job") or {}).get("started") or ""
             if now.hour == 3 and not last.startswith(now.date().isoformat()) and vp_consented():
                 vp_start_build(vp_consented(), "nuit")
+            # compte rendu d'une nouvelle réunion terminé : voix cherchées (et questions posées) quelques minutes après
+            reps = {f"{n}/{_stem(x['name'])}" for n in WORKERS for x in await worker_recordings(n) if x.get("report")}
+            seen = vp_state.get("reports")
+            if seen is not None and reps - seen and vp_consented():
+                vp_schedule(vp_consented(), "nouvelle réunion", delay=120)
+            vp_state["reports"] = (seen or set()) | reps
         except Exception as e:  # pragma: no cover
             log.warning("empreintes vocales : %s", e)
         await asyncio.sleep(120)
@@ -1321,8 +1485,8 @@ async def lexicon_put(body: LexiconBody, u: dict = Depends(require_admin)):
 async def startup():
     asyncio.create_task(scheduler())
     asyncio.create_task(lexicon_sync())
-    if vp_migrate():                  # anciennes empreintes retirées : voix candidates recherchées pour validation
-        vp_start_build(vp_consented(), "mise à jour")
+    if vp_migrate() or (not VOICE_Q_FILE.exists() and vp_consented()):
+        vp_start_build(vp_consented(), "mise à jour")   # voix candidates (et questions) recherchées tout de suite
 
 
 # ----------------------------------------------------------------------------- écran distant (noVNC)

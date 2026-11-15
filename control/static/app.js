@@ -73,7 +73,7 @@ function showTab(tab) {
   setCur(w);
   if (tab === "focus") enterFocus(w);
   if (tab === "rec" || tab === "set") loadRecordings();   // réglages : stockage
-  if (tab === "home") { refreshShots(); loadRecordings(); }
+  if (tab === "home") { refreshShots(); loadRecordings(); loadAsk(); }
   if (!recRoute) window.scrollTo(0, 0);
 }
 const openMeeting = (name) => { location.hash = "#m/" + encodeURIComponent(name); };
@@ -1244,7 +1244,7 @@ async function openPlayer(url, title, file, o = { video: true }) {
   $("#playerMd").href = url + "/transcript?fmt=md&download=1";
   $("#playerDocx").classList.add("hidden"); $("#playerDocx").href = url + "/report?fmt=docx&download=1";
   pl.classList.remove("tronly", "withtr");
-  box.innerHTML = ""; $("#playerCr").innerHTML = ""; $("#playerAn").innerHTML = "";
+  box.innerHTML = ""; $("#playerCr").innerHTML = ""; $("#playerAn").innerHTML = ""; $("#playerAsk").innerHTML = "";
   $("#playerSpk").innerHTML = "";
   $("#playerTabs").classList.toggle("hidden", !o.transcript);
   player.view = o.transcript ? (o.tab || (o.report ? "cr" : "tr")) : null;   // le compte rendu d'abord, s'il existe
@@ -1285,6 +1285,9 @@ async function openPlayer(url, title, file, o = { video: true }) {
     const stem = decodeURIComponent(f || "").replace(/\.(mp4|transcript\.json)$/, "");
     (doc.slides || []).forEach(s => insertByTime(box, slideEl(s, `/api/slides/${w}/${encodeURIComponent(stem)}/${s.repeat_of || s.n}`, seek)));
     repaint();
+    loadPlayerAsk(w, stem, async () => {           // réponse donnée : noms des voix relus (transcription, compte rendu)
+      try { const d2 = await api(url + "/transcript"); if (player.url === url) { doc.speakers = d2.speakers; repaint(); } } catch { }
+    });
     if (!box.children.length) box.textContent = "Aucune parole transcrite.";
     $('#playerTabs [data-v="an"]').classList.toggle("hidden", !doc.analysis?.state);
     paintPlayerAn();
@@ -1569,7 +1572,8 @@ $("#usersBox").addEventListener("toggle", () => { if ($("#usersBox").open) loadU
 // Empreintes vocales : consentements attestés sur l'honneur par un administrateur
 let consentTarget = null, consentText = "";
 const fmtMin = (sec) => sec >= 90 ? `${(sec / 60).toLocaleString("fr-FR", { maximumFractionDigits: 1 })} min` : `${Math.round(sec)} s`;
-const VP_KIND = { moi: "micro de l'assistant (canal « Moi »)", "nommée": "voix nommée à la main", vignette: "voix nommée d'après sa vignette" };
+const VP_KIND = { moi: "micro de l'assistant (canal « Moi »)", "nommée": "voix nommée à la main", vignette: "voix nommée d'après sa vignette",
+  "confirmée": "voix confirmée en répondant à « Est-ce… ? »" };
 const stemDate = (stem) => { const m = /^(\d{4})(\d\d)(\d\d)-(\d\d)(\d\d)/.exec(stem || ""); return m ? `${m[3]}/${m[2]}/${m[1]} ${m[4]}:${m[5]}` : stem || ""; };
 function vpLine(name, vp) {
   if (!vp) return "";
@@ -1684,6 +1688,89 @@ async function loadVoices(det, name) {
   try { vpCache[name] = await api(`/api/voiceprints/voices?name=${encodeURIComponent(name)}`); renderVoices(list, name, vpCache[name]); }
   catch (e) { list.innerHTML = `<small>Erreur : ${esc(e.message)}</small>`; }
 }
+// « Est-ce X ? » : voix douteuses à confirmer, comme la reconnaissance des visages d'une photothèque
+const askState = { list: [], people: [], skip: new Set(), last: null };
+const fmtSim = (x) => (x ?? 0).toLocaleString("fr-FR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+function askWhy(q) {
+  if (q.alt) return `hésitation entre ${esc(q.name)} (${fmtSim(q.sim)}) et ${esc(q.alt)} (${fmtSim(q.alt_sim)})`;
+  if (q.sure) return `très ressemblante (${fmtSim(q.sim)}), mais pas encore nommée dans cette réunion`;
+  return `ressemblante (${fmtSim(q.sim)}), sans certitude : reconnue d'office à partir de 0,82`;
+}
+function askH(q, pos) {
+  const url = (c) => `/api/voice-questions/clip?id=${encodeURIComponent(q.id)}&t=${c.t}`;
+  const others = askState.people.filter(n => n !== q.name && n !== q.alt);
+  return `<div class="ask-q" data-id="${esc(q.id)}">
+    <div class="vv-h">${pos ? `<span class="ask-n">${esc(pos)}</span>` : ""}<b>${esc(stemDate(q.meeting))}</b><span>${esc(q.title || "réunion sans titre")}</span>
+      ${pos ? `<a class="ask-open" href="#enr/${encodeURIComponent(q.worker)}/${encodeURIComponent(q.meeting + ".mp4")}">Ouvrir la réunion</a>` : ""}</div>
+    <p class="ask-t">Est-ce <b>${esc(q.name)}</b> ?</p>
+    <div class="vv-m">voix « ${esc(q.label)} » · ${q.n} passage${q.n > 1 ? "s" : ""}, ${fmtMin(q.sec)} · ${askWhy(q)}</div>
+    <div class="vv-clips">${(q.clips || []).map(c => `<button type="button" class="clip${c.odd ? " odd" : ""}" data-url="${esc(url(c))}"><svg class="i"><use href="#i-play"/></svg>
+      <span><b>${fmtT(c.t)}</b>${c.odd ? " · le passage le moins typique de cette voix" : ""}<br>« ${esc(c.text || "")} »</span></button>`).join("")}</div>
+    <div class="vv-act">
+      <button type="button" class="primary a-yes">Oui, c'est ${esc(q.name)}</button>
+      ${q.alt ? `<button type="button" class="a-alt">C'est ${esc(q.alt)}</button>` : ""}
+      <button type="button" class="a-no">Non</button>
+      ${others.length ? `<select class="a-to" aria-label="C'est quelqu'un d'autre de la liste"><option value="">C'est quelqu'un d'autre…</option>${others.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join("")}</select>` : ""}
+      <button type="button" class="ghost a-unk">Je ne sais pas</button>
+      ${pos ? `<button type="button" class="ghost a-skip">Plus tard</button>` : ""}</div></div>`;
+}
+async function askAnswer(q, answer, to, after) {
+  if (vpBtn) vpAudio.pause();
+  const who = answer === "yes" ? q.name : to;
+  try {
+    await api("/api/voice-questions/answer", { method: "POST", json: { id: q.id, answer, to: answer === "other" ? to : null } });
+    askState.last = { q, text: who ? `« ${q.label} » s'appelle maintenant ${who} dans la réunion du ${stemDate(q.meeting)} ; son empreinte s'enrichit dans une minute`
+      : answer === "no" ? `Noté : « ${q.label} » n'est pas ${q.name}` : "Question écartée" };
+  } catch (e) { toast(e.message); }
+  after?.();
+}
+async function askUndo(after) {
+  const l = askState.last; if (!l) return;
+  try { await api("/api/voice-questions/answer", { method: "POST", json: { id: l.q.id, answer: null } }); askState.last = null; toast("Réponse annulée"); }
+  catch (e) { toast(e.message); }
+  after?.();
+}
+function wireAsk(root, list, after) {
+  root.querySelectorAll(".ask-q").forEach(el => {
+    const q = list.find(x => x.id === el.dataset.id); if (!q) return;
+    el.querySelectorAll(".clip").forEach(b => { b.onclick = () => playClip(b, b.dataset.url); });
+    $(".a-yes", el).onclick = () => askAnswer(q, "yes", null, after);
+    if ($(".a-alt", el)) $(".a-alt", el).onclick = () => askAnswer(q, "other", q.alt, after);
+    $(".a-no", el).onclick = () => askAnswer(q, "no", null, after);
+    $(".a-unk", el).onclick = () => askAnswer(q, "unknown", null, after);
+    if ($(".a-to", el)) $(".a-to", el).onchange = (e) => { const to = e.target.value; if (to) askAnswer(q, "other", to, after); };
+    if ($(".a-skip", el)) $(".a-skip", el).onclick = () => { askState.skip.add(q.id); renderAsk(); };
+  });
+  const u = $(".a-undo", root); if (u) u.onclick = () => askUndo(after);
+}
+const askDone = (meeting) => askState.last && (!meeting || askState.last.q.meeting === meeting)
+  ? `<div class="ask-done"><small>✓ ${esc(askState.last.text)}</small><button type="button" class="ghost a-undo">Annuler</button></div>` : "";
+async function loadAsk() {
+  if (!me?.admin) return $("#askSec").classList.add("hidden");
+  try { const d = await api("/api/voice-questions"); askState.list = d.questions; askState.people = d.people; } catch { return; }
+  renderAsk();
+}
+function renderAsk() {
+  const L = [...askState.list].sort((a, b) => askState.skip.has(a.id) - askState.skip.has(b.id)), box = $("#askBox");
+  $("#askSec").classList.toggle("hidden", !L.length && !askState.last);
+  $("#askCount").textContent = L.length; $("#askCount").classList.toggle("hidden", !L.length);
+  box.innerHTML = askDone() + (L.length ? askH(L[0], `${L.length} question${L.length > 1 ? "s" : ""}`) : "<small>Plus aucune question pour l'instant.</small>");
+  wireAsk(box, L, loadAsk);
+}
+// page d'une réunion : ses voix à confirmer
+async function loadPlayerAsk(w, stem, refresh) {
+  const box = $("#playerAsk"); box.innerHTML = "";
+  if (!me?.admin) return;
+  let d; try { d = await api(`/api/voice-questions?worker=${encodeURIComponent(w)}&meeting=${encodeURIComponent(stem)}`); } catch { return; }
+  if (!player.url?.includes(encodeURIComponent(stem))) return;
+  askState.people = d.people;
+  const n = d.questions.length, was = $("#playerAsk details")?.open;
+  box.innerHTML = n ? `<details class="ask pl-ask"${was ? " open" : ""}><summary><svg class="i"><use href="#i-users"/></svg><b>Qui parle ? ${n} voix à confirmer</b>
+      <small>ressemblent à une personne cochée, sans certitude</small></summary>${askDone(stem)}${d.questions.map(q => askH(q)).join("")}</details>`
+    : askDone(stem) ? `<div class="ask pl-ask">${askDone(stem)}</div>` : "";
+  wireAsk(box, d.questions, async () => { await refresh(); loadPlayerAsk(w, stem, refresh); });
+}
+
 let vpPoll = null;
 async function loadConsents() {
   const box = $("#voiceList");
@@ -1780,6 +1867,6 @@ async function boot() {
   showTab(location.hash.slice(1) || "home");   // charge aussi les enregistrements (accueil, compteur du menu)
   if (view() === "meet") loadRecordings();
   timers = [setInterval(refresh, 3000), setInterval(refreshShots, 1500), setInterval(loadSchedule, 30000),
-    setInterval(pollTranscripts, 1500), setInterval(() => view() === "home" && loadRecordings(), 60000)];
+    setInterval(pollTranscripts, 1500), setInterval(() => { if (view() === "home") { loadRecordings(); loadAsk(); } }, 60000)];
 }
 boot();

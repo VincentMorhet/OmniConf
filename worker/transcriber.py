@@ -661,19 +661,26 @@ def save_doc(base: Path, doc: dict):
     Path(str(base) + ".md").write_text(to_markdown(doc))
 
 
-def rename_in_doc(doc: dict, sid: str, name: str | None) -> bool:
-    """Renomme un intervenant dans une transcription enregistrée (et recalcule les doublons « (2) »)."""
+def rename_in_doc(doc: dict, sid: str, name: str | None, via: str | None = None) -> bool:
+    """Renomme un intervenant dans une transcription enregistrée (et recalcule les doublons « (2) »).
+    `via` : « question » si le nom vient d'une réponse à « Est-ce X ? » (voix confirmée à l'écoute)."""
     spk = doc.get("speakers") or {}
     if sid not in spk or sid == "ME":
         return False
     name = (name or "").strip() or None
-    spk[sid]["name"] = name
+    old, spk[sid]["name"] = spk[sid].get("name"), name
+    if name and via:
+        spk[sid]["via"] = via
+    elif name != old:                  # renommée autrement : ce n'est plus une voix confirmée
+        spk[sid].pop("via", None)
     seen: dict[str, int] = {}
     for k, v in spk.items():
         if k == "ME":
             continue
         base = v.get("name") or v.get("auto") or v.get("label") or k
-        v["source"] = "manual" if v.get("name") else ("voice" if base.startswith("Intervenant") else "ui")
+        # voix reconnue par son empreinte (ré-identification) : le reste, même quand une autre voix est renommée
+        v["source"] = ("manual" if v.get("name") else "voiceprint" if v.get("print_sim") is not None
+                       else "voice" if base.startswith("Intervenant") else "ui")
         seen[base] = seen.get(base, 0) + 1
         v["label"] = base if seen[base] == 1 else f"{base} ({seen[base]})"
     return True

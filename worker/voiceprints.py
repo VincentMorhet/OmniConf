@@ -18,6 +18,12 @@ Reconnaissance (`match`, appelée par la ré-identification de fin de réunion) 
 voix est comparé aux empreintes ; un groupe très proche d'une empreinte (et nettement plus que des autres)
 prend ce nom. Ce nom l'emporte sur la vignette (cas d'une personne qui parle depuis le poste d'une autre),
 mais pas sur un nom donné à la main.
+
+Questions (`ask`, pendant la recherche des voix) : une voix d'une réunion qui n'est ni nommée à la main ni reconnue,
+mais qui ressemble à une empreinte (doute : entre 0,70 et le seuil, ou deux empreintes trop proches ; ou réunion
+antérieure à l'empreinte), est proposée à l'IHM sous la forme « Est-ce X ? » avec 3 extraits à écouter, comme la
+reconnaissance des visages d'une photothèque. Rien n'en est gardé sur disque : nom proposé, ressemblance et positions
+des extraits seulement. Une réponse « oui » nomme la voix (voix « confirmée ») ; elle compte alors dans l'empreinte.
 """
 from __future__ import annotations
 
@@ -49,7 +55,13 @@ PHRASE_MIN = 0.50         # phrase gardée pour l'empreinte si assez proche des 
 MIN_GROUP_SEC = 8.0       # groupe trop court : centre peu fiable, pas de reconnaissance
 CLIP_MAX = 12.0           # extrait à écouter : 12 s au plus
 NEG_MIN = 0.50            # phrase retirée si elle ressemble à un extrait refusé (≥ 0,50) plus qu'à la personne
-KINDS_FR = {"moi": "micro de l'assistant (canal « Moi »)", "nommée": "voix nommée à la main", "vignette": "vignette"}
+ASK_MIN = float(os.environ.get("VOICEPRINT_ASK", "0.70"))     # ressemblance à partir de laquelle on demande
+ASK_MIN_SEC = 15.0        # voix trop courte : pas de question (centre peu fiable, extraits trop brefs)
+ASK_PHRASES = 30          # phrases (les plus longues) d'une voix pour juger de sa ressemblance
+ASK_PER_MEETING = 8       # questions par réunion au plus (les plus ressemblantes)
+KINDS_FR = {"moi": "micro de l'assistant (canal « Moi »)", "nommée": "voix nommée à la main", "vignette": "vignette",
+            "confirmée": "voix confirmée en réponse à une question"}
+_ASK_CACHE: dict = {}     # (réunion, date de la transcription, voix) -> (centre, extraits, phrases, durée) ; en mémoire
 _DUP = re.compile(r"\s\(\d+\)$")
 
 
@@ -127,7 +139,7 @@ def samples(doc: dict, targets: dict[str, str], owner_name: str | None) -> dict[
             if s.get("source") == "manual":
                 k = key(s.get("name") or s.get("label"))
                 if k in targets:
-                    who, kind = targets[k], "nommée"
+                    who, kind = targets[k], "confirmée" if s.get("via") == "question" else "nommée"
             elif s.get("source") == "ui" and not s.get("no_tile"):
                 k = key(s.get("label"))
                 if k in targets and key(e.get("ui")) == k:
@@ -177,36 +189,52 @@ def _title(rec_dir: Path, stem: str, meta: dict) -> str | None:
 
 def extract(rec_dir: Path, names: list[str], owners: dict[str, str] | None = None,
             exclude: dict[str, list[str]] | None = None, refs: dict[str, list[float]] | None = None,
-            negatives: dict[str, list] | None = None) -> dict:
+            negatives: dict[str, list] | None = None, asks: dict | None = None) -> dict:
     """Voix candidates de chaque personne sur les enregistrements de l'assistant, une par réunion et par origine
     (le contrôle les fait valider, puis fait la moyenne des voix validées) :
     {nom: {"<réunion>|<origine>": {"meeting", "title", "kind", "label", "sum": [...], "n", "sec", "dropped",
     "dropped_neg", "clips": [{"t", "te", "text", "sim", "d", "v", "odd"?}]}}}.
     `exclude` : {nom: [voix refusées]} (écartées de la référence) ; `refs` : {nom: empreinte validée} ;
     `negatives` : {nom: [[réunion, début]]} extraits refusés à l'écoute : ces phrases, et toutes celles qui leur
-    ressemblent plus qu'à la personne, sont retirées de ses voix."""
+    ressemblent plus qu'à la personne, sont retirées de ses voix.
+    `asks` (facultatif) : rempli des questions à poser, {réunion: {"title", "questions": [...]}} (voir `ask`)."""
     import reid
     targets = {key(n): n for n in names if key(n)}
     owners, exclude, refs, negatives = owners or {}, exclude or {}, refs or {}, negatives or {}
     found: dict[str, list] = {}       # nom -> [(empreinte, nature, réunion, durée, début, fin, texte)]
     info: dict[str, dict] = {}        # réunion|nature -> titre, nom de la voix
     ex = None
+    prints = usable() if asks is not None else {}
+    live = set()
     for t in sorted(rec_dir.glob("*.transcript.json")):
         stem = t.name[: -len(".transcript.json")]
         media = rec_dir / (stem + ".mp4")
         if not media.exists():
             continue
         try:
+            mt = t.stat().st_mtime
             doc = json.loads(t.read_text())
-        except ValueError:
+        except (OSError, ValueError):
             continue
         meta = doc.get("meta") or {}
         owner_name = owners.get(meta.get("owner") or "") or doc.get("me_name") or meta.get("me_name")
         todo = samples(doc, targets, owner_name)
+        pcm = None
+
+        def get_pcm():
+            nonlocal pcm, ex
+            ex = ex or reid._extractor()
+            if pcm is None:
+                pcm = reid.load_pcm(media)
+            return pcm, ex
+        if prints:
+            live.add((stem, mt))
+            qs = ask(stem, mt, doc, prints, get_pcm)
+            if qs:
+                asks[stem] = {"title": _title(rec_dir, stem, meta), "questions": qs}
         if not todo:
             continue
-        ex = ex or reid._extractor()
-        pcm = reid.load_pcm(media)
+        get_pcm()
         for who, spans in todo.items():
             embs = reid.embed_all(pcm, [(a, b) for a, b, *_ in spans], ex)
             for (a, b, kind, text, label), v in zip(spans, embs):
@@ -217,6 +245,10 @@ def extract(rec_dir: Path, names: list[str], owners: dict[str, str] | None = Non
                                                          "kind": kind, "labels": {}})
                 g["labels"][label] = g["labels"].get(label, 0) + 1
         log.info("empreintes : %s -> %s", stem, {w: len(s) for w, s in todo.items()})
+    if prints:
+        for k in [k for k in _ASK_CACHE if k[:2] not in live]:     # réunion supprimée ou transcription modifiée
+            _ASK_CACHE.pop(k, None)
+        log.info("questions sur les voix : %s", {st: len(a["questions"]) for st, a in asks.items()})
     out: dict[str, dict] = {}
     for who, L in found.items():
         # phrases parasites écartées (voix nommée à la main qui mêlait plusieurs personnes, écho) : comparées à
@@ -258,6 +290,70 @@ def extract(rec_dir: Path, names: list[str], owners: dict[str, str] | None = Non
         if res:
             out[who] = res
     return out
+
+
+def ask(stem: str, mt: float, doc: dict, prints: dict[str, np.ndarray], get_pcm) -> list[dict]:
+    """Questions à poser sur une réunion : voix ni nommées à la main ni reconnues par une empreinte, qui ressemblent
+    à l'une d'elles (≥ ASK_MIN) sans porter déjà ce nom. [{"sid", "label", "name", "sim", "sure", "alt"?,
+    "alt_sim"?, "n", "sec", "clips": [{"t", "te", "text", "odd"?}]}], les plus ressemblantes d'abord.
+    `get_pcm()` -> (son de la réunion, extracteur), appelé seulement si une voix n'est pas déjà en mémoire."""
+    import reid
+    sp, raw = doc.get("speakers") or {}, doc.get("raw") or []
+    # le canal « Moi » (micro de l'assistant) : sa voix n'est pas aussi dans le son de la réunion (cf. reid)
+    me_sec = sum(float(e.get("te") or e["t"]) - float(e["t"]) for e in raw if e.get("spk") == "ME" and e.get("text"))
+    me_key = key((doc.get("meta") or {}).get("me_name")) if me_sec >= 30 else ""
+    names = [n for n in prints if not me_key or key(n) != me_key]
+    if not names:
+        return []
+    M = np.array([prints[n] for n in names])
+    by: dict[str, list] = {}
+    for e in raw:
+        sid = e.get("spk")
+        if not e.get("text") or not sid or sid == "ME":
+            continue
+        s = sp.get(sid) or {}
+        if s.get("name") or s.get("source") in ("manual", "voiceprint", "me"):
+            continue
+        a, b = float(e["t"]), float(e.get("te") or e["t"])
+        if b - a >= reid.LONG_SEC:
+            by.setdefault(sid, []).append((a, b, (e.get("text") or "").strip()))
+    out = []
+    for sid, L in by.items():
+        sec = sum(min(b - a, reid.MAX_SEG_SEC) for a, b, _ in L)
+        if len(L) < MIN_PHRASES or sec < ASK_MIN_SEC:
+            continue
+        ck = (stem, mt, sid)
+        if ck not in _ASK_CACHE:
+            pick = sorted(L, key=lambda x: x[0] - x[1])[:ASK_PHRASES]
+            pcm, ex = get_pcm()
+            rows = [{"a": a, "b": b, "text": t, "u": _unit(v), "d": min(b - a, reid.MAX_SEG_SEC)}
+                    for (a, b, t), v in zip(pick, reid.embed_all(pcm, [(a, b) for a, b, _ in pick], ex)) if v is not None]
+            if len(rows) < MIN_PHRASES:
+                _ASK_CACHE[ck] = None
+                continue
+            c = _unit(np.mean([r["u"] for r in rows], axis=0))
+            for r in rows:                 # extraits : les plus typiques de la voix (et le moins ressemblant)
+                r["sim"] = float(r["u"] @ c)
+            clips = [{k: x[k] for k in ("t", "te", "text", "odd") if k in x} for x in _clips(rows)]
+            _ASK_CACHE[ck] = (c, clips, len(L), round(sec, 1))
+        hit = _ASK_CACHE[ck]
+        if not hit:
+            continue
+        c, clips, n, sec = hit
+        sims = M @ c
+        order = np.argsort(-sims)
+        best = float(sims[order[0]])
+        second = float(sims[order[1]]) if len(order) > 1 else -1.0
+        name, label = names[order[0]], (sp.get(sid) or {}).get("label") or sid
+        if best < ASK_MIN or key(label) == key(name):          # pas assez ressemblante, ou déjà nommée ainsi
+            continue
+        q = {"sid": sid, "label": label, "name": name, "sim": round(best, 3),
+             "sure": best >= MATCH and best - second >= MARGIN, "n": n, "sec": sec, "clips": clips}
+        if second >= ASK_MIN and best - second < MARGIN:
+            q.update(alt=names[order[1]], alt_sim=round(second, 3))
+        out.append(q)
+    out.sort(key=lambda q: -q["sim"])
+    return out[:ASK_PER_MEETING]
 
 
 # ----------------------------------------------------------------------------- reconnaissance
