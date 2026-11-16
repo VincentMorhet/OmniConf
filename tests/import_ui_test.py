@@ -245,6 +245,9 @@ async def main():
     bear = lambda t: {"Authorization": "Bearer " + t}
     check(anon.get("/api/imports", headers=bear(tok)).status_code == 200, "jeton d'import : liste de ses imports")
     check(anon.get("/api/imports", headers=bear(rtok)).status_code == 401, "jeton de lecture : pas d'import")
+    wtok = me.post("/api/mcp/tokens", json={"name": "Essai écriture", "scope": "write"}).json()["token"]
+    check(anon.get("/api/imports", headers=bear(wtok)).status_code == 200, "jeton d'écriture : import autorisé")
+    check(anon.get("/api/recordings", headers=bear(wtok)).status_code == 401, "jeton d'écriture : pas de lecture des réunions")
     check(anon.get("/api/recordings", headers=bear(tok)).status_code == 401, "jeton d'import : pas de lecture des réunions")
     r = anon.post("/mcp", headers={**bear(tok), "Content-Type": "application/json"},
                   json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})

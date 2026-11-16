@@ -7,9 +7,10 @@ poignée de main, « server/discover »).
 Authentification : en-tête « Authorization: Bearer <jeton> ». Les jetons sont propres à un client
 (ex. Claude), révocables, et ont une portée :
   - read  : outils de lecture (list_meetings, get_meeting, get_transcript, get_draft_cr, get_slides, get_audio_url)
-  - write : dépôt du compte rendu final (attach_cr), et rien d'autre (jeton distinct, à n'utiliser qu'à la demande)
-  - import : envoi d'enregistrements passés (API /api/imports du contrôle, script tools/omniconf_import.py) ; aucun
-    outil MCP, aucune lecture des réunions
+  - write : dépôt du compte rendu final (attach_cr) et envoi d'enregistrements passés (API /api/imports), rien
+    d'autre (jeton distinct, à n'utiliser qu'à la demande)
+  - import : envoi d'enregistrements passés seulement (API /api/imports du contrôle, script tools/omniconf_import.py) ;
+    aucun outil MCP, aucune lecture des réunions
 Seule l'empreinte SHA-256 des jetons est conservée (DATA_DIR/mcp_tokens.json). Gestion : IHM
 (Enregistrements > Accès de Claude) ou en ligne de commande (voir __main__).
 

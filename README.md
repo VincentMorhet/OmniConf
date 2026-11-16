@@ -201,7 +201,7 @@ créé au premier démarrage avec `ADMIN_PASSWORD` (dans `/etc/webconf/control.e
      transcription ni le compte rendu. Des consignes de rédaction pour le premier compte rendu (`notes`)
      peuvent aussi être données.
    - En nombre, par script : `tools/omniconf_import.py` (Python 3.8+, sans dépendance), avec un jeton de portée
-     « import » (Réglages > Accès de Claude > « + Jeton d'import (vidéos) », variable `WEBCONF_IMPORT_TOKEN`,
+     « import » ou « write » (écriture) (Réglages > Accès de Claude > « + Jeton d'import (vidéos) », variable `WEBCONF_IMPORT_TOKEN`,
      adresse dans `WEBCONF_URL`). Ce jeton ne sert qu'à envoyer des enregistrements, au nom de son
      propriétaire : ni lecture des réunions ni outil MCP. Manifeste JSON (fichier, début, titre, plateforme,
      coupures, consignes), reprise au morceau près, et rythme réglable (`--parallel`, 2 par défaut) pour

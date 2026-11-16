@@ -1031,7 +1031,7 @@ async function loadTokens() {
     $("#mcpCaFp").textContent = d.ca_sha256 || "";
     const live = d.tokens.filter(x => !x.revoked);
     box.innerHTML = live.length ? live.map(x => `<div class="tok"><b>${esc(x.name)}</b>
-      <span class="badge ${x.scope === "read" ? "" : "warn"}">${{ write: "écriture (dépôt du CR final)", import: "import (envoi de vidéos)" }[x.scope] || "lecture"}</span>
+      <span class="badge ${x.scope === "read" ? "" : "warn"}">${{ write: "écriture (CR final, import de vidéos)", import: "import (envoi de vidéos)" }[x.scope] || "lecture"}</span>
       <small>${me?.admin && x.user && x.user !== me.login ? "👤 " + esc(x.user_name || x.user) + " · " : ""}créé le ${new Date(x.created).toLocaleString("fr-FR")} · ${x.last_used ? "utilisé le " + new Date(x.last_used).toLocaleString("fr-FR") : "jamais utilisé"}</small>
       <button class="danger" data-id="${esc(x.id)}">Révoquer</button></div>`).join("") : "<small>Aucun jeton actif.</small>";
     box.querySelectorAll("button[data-id]").forEach(b => b.onclick = async () => {

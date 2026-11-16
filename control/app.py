@@ -827,13 +827,14 @@ class ImportStart(BaseModel):
 
 
 def import_user(request: Request) -> dict:
-    """Compte connecté à l'IHM, ou jeton de portée « import » (script d'envoi : « Authorization: Bearer wci_… »)."""
+    """Compte connecté à l'IHM, ou jeton de portée « import » ou « write » (script d'envoi : « Authorization: Bearer
+    wci_… » ou « wcw_… » ; le jeton d'écriture peut importer depuis le 16/11/2026, à la demande de l'utilisateur)."""
     u = session_user(request.session)
     if u:
         return u
     auth = request.headers.get("authorization", "")
     e = mcp.tokens.check(auth[7:].strip()) if auth.lower().startswith("bearer ") else None
-    if not e or e.get("scope") != "import":
+    if not e or e.get("scope") not in ("import", "write"):
         raise HTTPException(401, "non connecté (ou jeton d'import absent, invalide ou révoqué)")
     u = USERS.get(e.get("user") or USERS.first_admin())
     if not u or u.get("disabled"):
