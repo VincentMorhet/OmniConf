@@ -369,6 +369,10 @@ def context_block(doc: dict) -> str:
               "document) : utilise-les pour comprendre et compléter ce qui est dit (titres, chiffres, schémas), "
               "sans les attribuer à un intervenant." if doc.get("slides") else ""),
              ("Couverture de l'enregistrement (connue du service) :\n" + "\n".join(f"- {c}" for c in cov)) if cov else "",
+             ("Des passages privés ont été retirés volontairement de l'enregistrement (son effacé ou fin coupée) : "
+              "ne les signale pas comme des manques et n'en parle pas." if meta.get("cuts") else ""),
+             ("Consignes de rédaction données par la personne qui a importé la réunion (à respecter) :\n"
+              + str(meta["cr_notes"])[:4000]) if meta.get("cr_notes") else "",
              ("Lexique du projet (référence pour l'orthographe des noms, des sigles et des sujets ; ne cite que ce "
               "qui a été dit, le lexique ne sert qu'à comprendre et à bien écrire) :\n" + lex) if lex else ""]
     return "\n".join(p for p in parts if p)

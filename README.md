@@ -196,6 +196,19 @@ créé au premier démarrage avec `ADMIN_PASSWORD` (dans `/etc/webconf/control.e
      reprennent après un redémarrage, et la mise à jour d'un assistant attend la fin des imports.
    - La réunion importée appartient à la personne qui l'a envoyée (marquée « Importée ») ; personne d'autre
      ne la voit tant qu'elle ne la partage pas.
+   - Passages privés : à l'import, des plages à couper (`cuts`, en secondes depuis le début du fichier) : son
+     effacé sur la plage, ou fin du fichier coupée (fin vide). Rien n'en reste dans la vidéo gardée, la
+     transcription ni le compte rendu. Des consignes de rédaction pour le premier compte rendu (`notes`)
+     peuvent aussi être données.
+   - En nombre, par script : `tools/omniconf_import.py` (Python 3.8+, sans dépendance), avec un jeton de portée
+     « import » (Réglages > Accès de Claude > « + Jeton d'import (vidéos) », variable `WEBCONF_IMPORT_TOKEN`,
+     adresse dans `WEBCONF_URL`). Ce jeton ne sert qu'à envoyer des enregistrements, au nom de son
+     propriétaire : ni lecture des réunions ni outil MCP. Manifeste JSON (fichier, début, titre, plateforme,
+     coupures, consignes), reprise au morceau près, et rythme réglable (`--parallel`, 2 par défaut) pour
+     laisser la main aux réunions en direct. API : `POST /api/imports` (nom, taille, date du fichier,
+     titre, début ISO, plateforme, `transcribe`, `cuts`, `notes`) → `{worker, id, received}` ;
+     `PUT /api/imports/<worker>/<id>?offset=N` (morceau brut, 64 Mo au plus ; 409 avec `received` si le
+     décalage ne suit pas) ; `POST …/finish` ; `GET /api/imports` (avancement, réunion créée).
 10. **📖 Lexique du projet** (onglet Enregistrements) : un texte Markdown, saisi une fois et envoyé à tous
    les assistants (ils le retrouvent dans les 2 minutes après un redémarrage).
    - Sections reconnues :

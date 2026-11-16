@@ -1031,7 +1031,7 @@ async function loadTokens() {
     $("#mcpCaFp").textContent = d.ca_sha256 || "";
     const live = d.tokens.filter(x => !x.revoked);
     box.innerHTML = live.length ? live.map(x => `<div class="tok"><b>${esc(x.name)}</b>
-      <span class="badge ${x.scope === "write" ? "warn" : ""}">${x.scope === "write" ? "écriture (dépôt du CR final)" : "lecture"}</span>
+      <span class="badge ${x.scope === "read" ? "" : "warn"}">${{ write: "écriture (dépôt du CR final)", import: "import (envoi de vidéos)" }[x.scope] || "lecture"}</span>
       <small>${me?.admin && x.user && x.user !== me.login ? "👤 " + esc(x.user_name || x.user) + " · " : ""}créé le ${new Date(x.created).toLocaleString("fr-FR")} · ${x.last_used ? "utilisé le " + new Date(x.last_used).toLocaleString("fr-FR") : "jamais utilisé"}</small>
       <button class="danger" data-id="${esc(x.id)}">Révoquer</button></div>`).join("") : "<small>Aucun jeton actif.</small>";
     box.querySelectorAll("button[data-id]").forEach(b => b.onclick = async () => {
@@ -1041,18 +1041,19 @@ async function loadTokens() {
   } catch (e) { box.textContent = "Erreur : " + e.message; }
 }
 async function createToken(scope) {
-  const name = prompt("Nom du jeton (pour le reconnaître, ex. « Claude PC bureau ») :", scope === "write" ? "Claude écriture" : "Claude");
+  const name = prompt("Nom du jeton (pour le reconnaître, ex. « Claude PC bureau ») :", { write: "Claude écriture", import: "Claude import" }[scope] || "Claude");
   if (!name) return;
   try {
     const d = await api("/api/mcp/tokens", { method: "POST", json: { name, scope } });
     const out = $("#mcpNew"); out.classList.remove("hidden");
     $("#mcpNewTok").value = d.token;
-    $("#mcpNewVar").textContent = scope === "write" ? "WEBCONF_WRITE_TOKEN" : "WEBCONF_TOKEN";
+    $("#mcpNewVar").textContent = { write: "WEBCONF_WRITE_TOKEN", import: "WEBCONF_IMPORT_TOKEN" }[scope] || "WEBCONF_TOKEN";
     loadTokens();
   } catch (e) { toast(e.message); }
 }
 $("#mcpCreate").onclick = () => createToken("read");
 $("#mcpCreateW").onclick = () => createToken("write");
+$("#mcpCreateI").onclick = () => createToken("import");
 $("#mcpCopy").onclick = async () => {
   const v = $("#mcpNewTok").value;
   try { await navigator.clipboard.writeText(v); toast("Jeton copié"); } catch (e) { $("#mcpNewTok").select(); }

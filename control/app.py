@@ -822,6 +822,26 @@ class ImportStart(BaseModel):
     started_at: str | None = None
     platform: str | None = None
     transcribe: bool = True
+    cuts: list[list[float | None]] | None = None    # passages privés : [[début, fin], …] en s, fin vide = jusqu'au bout
+    notes: str | None = None                         # consignes pour le premier compte rendu
+
+
+def import_user(request: Request) -> dict:
+    """Compte connecté à l'IHM, ou jeton de portée « import » (script d'envoi : « Authorization: Bearer wci_… »)."""
+    u = session_user(request.session)
+    if u:
+        return u
+    auth = request.headers.get("authorization", "")
+    e = mcp.tokens.check(auth[7:].strip()) if auth.lower().startswith("bearer ") else None
+    if not e or e.get("scope") != "import":
+        raise HTTPException(401, "non connecté (ou jeton d'import absent, invalide ou révoqué)")
+    u = USERS.get(e.get("user") or USERS.first_admin())
+    if not u or u.get("disabled"):
+        raise HTTPException(401, "compte du jeton désactivé ou supprimé")
+    return u
+
+
+IU = Depends(import_user)
 
 
 def _imp_owner(u: dict) -> dict:
@@ -844,7 +864,7 @@ async def _free_disk(n: str) -> int:
 
 
 @app.post("/api/imports")
-async def import_start(body: ImportStart, u: dict = CU):
+async def import_start(body: ImportStart, u: dict = IU):
     """Nouvel import, ou reprise d'un envoi laissé en plan (même fichier : même nom, taille et date)."""
     fname = os.path.basename(body.file or "")
     mine = [x for l in await asyncio.gather(*(worker_imports(n, u["login"]) for n in WORKERS)) for x in l]
@@ -870,7 +890,7 @@ async def import_start(body: ImportStart, u: dict = CU):
 
 
 @app.get("/api/imports")
-async def imports_list(u: dict = CU):
+async def imports_list(u: dict = IU):
     owner = None if is_admin(u) else u["login"]
     names = USERS.names()
     out = [{**x, "owner_name": names.get(x.get("owner"), x.get("owner")), "mine": x.get("owner") == u["login"]}
@@ -879,12 +899,12 @@ async def imports_list(u: dict = CU):
 
 
 @app.get("/api/imports/{name}/{jid}")
-async def import_get(name: str, jid: str, u: dict = CU):
+async def import_get(name: str, jid: str, u: dict = IU):
     return {**(await wcall(name, "GET", f"/imports/{jid}", params=_imp_owner(u))).json(), "worker": name}
 
 
 @app.put("/api/imports/{name}/{jid}")
-async def import_chunk(name: str, jid: str, offset: int, request: Request, u: dict = CU):
+async def import_chunk(name: str, jid: str, offset: int, request: Request, u: dict = IU):
     """Un morceau du fichier (au plus 64 Mo), à sa place : le suivant n'est accepté qu'une fois celui-ci écrit."""
     data = await request.body()
     if len(data) > CHUNK_MAX:
@@ -895,17 +915,17 @@ async def import_chunk(name: str, jid: str, offset: int, request: Request, u: di
 
 
 @app.post("/api/imports/{name}/{jid}/finish")
-async def import_finish(name: str, jid: str, u: dict = CU):
+async def import_finish(name: str, jid: str, u: dict = IU):
     return {**(await wcall(name, "POST", f"/imports/{jid}/finish", params={"owner": u["login"]})).json(), "worker": name}
 
 
 @app.post("/api/imports/{name}/{jid}/retry")
-async def import_retry(name: str, jid: str, u: dict = CU):
+async def import_retry(name: str, jid: str, u: dict = IU):
     return {**(await wcall(name, "POST", f"/imports/{jid}/retry", params=_imp_owner(u))).json(), "worker": name}
 
 
 @app.delete("/api/imports/{name}/{jid}")
-async def import_cancel(name: str, jid: str, u: dict = CU):
+async def import_cancel(name: str, jid: str, u: dict = IU):
     r = await wcall(name, "DELETE", f"/imports/{jid}", params=_imp_owner(u), timeout=30)
     _rec_cache.pop(name, None)
     return r.json()

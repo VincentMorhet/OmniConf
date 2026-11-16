@@ -98,6 +98,13 @@ def I_atoms(p: Path) -> list[str]:
     return out
 
 
+def max_volume(p: Path, start: float, end: float) -> float:
+    r = subprocess.run(["ffmpeg", "-nostdin", "-ss", str(start), "-to", str(end), "-i", str(p), "-map", "0:a",
+                        "-af", "volumedetect", "-f", "null", "-"], capture_output=True, text=True)
+    m = [l for l in r.stderr.splitlines() if "max_volume" in l]
+    return float(m[-1].split("max_volume:")[1].split("dB")[0]) if m else 0.0
+
+
 def streams_of(p: Path) -> dict:
     r = subprocess.run(["ffprobe", "-v", "error", "-print_format", "json", "-show_streams", "-show_format", str(p)],
                        capture_output=True, text=True)
@@ -274,6 +281,34 @@ async def main():
     check("--no-video" in args and "--no-slides" in args, f"transcription d'un son : sans image ni diapositives ({args})")
     started = dt.datetime.fromisoformat(meta["started_at"])
     check(abs((dt.datetime.now().astimezone() - started).total_seconds() - 9) < 60, "sans date donnée : maintenant moins la durée")
+
+    # --- passages privés : son effacé sur une plage, fin coupée ; consignes pour le compte rendu
+    for bad in ([[5, 3]], [[-1, 2]], [["a", 2]], [[1, 2]] * 51):
+        try:
+            imp.create("essai", None, "c.mp4", 10, cuts=bad)
+            check(False, f"plage refusée : {bad[:2]}")
+        except I.UserError as e:
+            check(True, f"plage refusée : {bad[:1]} ({e})")
+    p = media["mp4"]
+    j = imp.create("essai", None, "prive.mp4", p.stat().st_size, None, "Privé", None, "teams",
+                   cuts=[[9, None], [3, 5]], notes="Ne pas reprendre le détail médical.")
+    j = await send(imp, j, p)
+    j, _ = await wait_stage(imp, j["id"])
+    mp4 = rec / (j["stem"] + ".mp4")
+    meta = json.loads(Path(str(mp4) + ".json").read_text())
+    dur = float(streams_of(mp4)["format"]["duration"])
+    check(j["stage"] == "terminé" and 8.5 <= dur <= 9.6, f"fin coupée à 9 s (vidéo de {dur:.1f} s sur 12)")
+    check(j["stem"].endswith("_Prive"), f"accents retirés du nom de fichier ({j['stem']})")
+    check(max_volume(mp4, 3.3, 4.7) < -80 and max_volume(mp4, 1, 2.5) > -30 and max_volume(mp4, 6, 8) > -30,
+          f"son effacé de 3 à 5 s, gardé ailleurs ({max_volume(mp4, 3.3, 4.7):.0f} dB / {max_volume(mp4, 1, 2.5):.0f} dB)")
+    check(meta.get("cuts") == [{"from": 3.0, "to": 5.0}, {"from": 9.0, "to": None, "original_duration": 12.0}]
+          and meta.get("cr_notes") == "Ne pas reprendre le détail médical.", f"coupures et consignes notées ({meta.get('cuts')})")
+    md = (dt.datetime.fromisoformat(meta["ended_at"]) - dt.datetime.fromisoformat(meta["started_at"])).total_seconds()
+    check(8 <= md <= 10, f"durée de la réunion après coupure : {md:.0f} s")
+    j = imp.create("essai", None, "tout.mp4", p.stat().st_size, None, None, None, None, cuts=[[2, None]])
+    j = await send(imp, j, p)
+    j, _ = await wait_stage(imp, j["id"])
+    check(j["stage"] == "erreur" and "presque rien" in j["error"], f"coupure qui ne laisse presque rien : refusée ({j['error']})")
 
     # --- refus après réception
     for key, want in (("mute", "aucune piste son"), ("short", "trop court"), ("junk", "illisible")):

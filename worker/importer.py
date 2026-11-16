@@ -21,6 +21,7 @@ import secrets
 import shutil
 import sys
 import time
+import unicodedata
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
@@ -50,7 +51,8 @@ class Cancelled(Exception):
 
 
 def _slug(s: str) -> str:
-    s = re.sub(r"[^A-Za-z0-9._-]+", "-", s or "").strip("-")
+    s = unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode()     # « Comité » -> « Comite »
+    s = re.sub(r"[^A-Za-z0-9._-]+", "-", s).strip("-")
     return s[:60] or "reunion"
 
 
@@ -83,13 +85,18 @@ def streams(info: dict) -> tuple[dict | None, dict | None, float]:
     return v, a, dur
 
 
-def convert_cmd(src: Path, dst: Path, v: dict | None, a: dict, encode: bool = False,
-                dur: float = 0.0) -> tuple[list[str], str]:
+def convert_cmd(src: Path, dst: Path, v: dict | None, a: dict, encode: bool = False, dur: float = 0.0,
+                trim: float | None = None, mutes: list | None = None) -> tuple[list[str], str]:
     """Commande ffmpeg vers un MP4 lisible partout (H.264 + AAC, index en tête) et ce qu'elle fait.
-    `encode` : tout réencoder (la simple copie a échoué)."""
+    `encode` : tout réencoder (la simple copie a échoué) ; `dur` : durée gardée ; `trim` : fin coupée à partir de
+    cette seconde ; `mutes` : plages [début, fin] dont le son est effacé (passages privés)."""
     base = ["ffmpeg", "-nostdin", "-y", "-loglevel", "error", "-nostats", "-progress", "pipe:1"]
-    acopy = a.get("codec_name") == "aac" and not encode
+    acopy = a.get("codec_name") == "aac" and not encode and not mutes
     aopt = ["-c:a", "copy"] if acopy else ["-c:a", "aac", "-b:a", "160k"]
+    if mutes:
+        expr = "+".join(f"between(t,{x:.3f},{y:.3f})" for x, y in mutes)
+        aopt = ["-af", f"volume=enable='{expr}':volume=0"] + aopt
+    tail = ["-t", f"{trim:.3f}"] if trim is not None else []
     if v is None:                 # son seul : image fixe sombre, une image par seconde
         cmd = base + ["-i", str(src), "-f", "lavfi", "-i", f"color=c=0x161b26:s=1280x720:r=1:d={max(1.0, dur):.2f}",
                       "-map", "1:v", "-map", "0:a:0", "-shortest",
@@ -103,7 +110,9 @@ def convert_cmd(src: Path, dst: Path, v: dict | None, a: dict, encode: bool = Fa
             "-vf", "scale='min(1920,iw)':-2"]
         cmd = base + ["-i", str(src), "-map", "0:v:0", "-map", "0:a:0", *vopt, *aopt]
         what = "copie de la vidéo" if vcopy and acopy else "conversion de la vidéo"
-    return cmd + ["-movflags", "+faststart", "-f", "mp4", str(dst)], what
+    if mutes or trim is not None:
+        what += " (passages privés coupés)"
+    return cmd + tail + ["-movflags", "+faststart", "-f", "mp4", str(dst)], what
 
 
 class Importer:
@@ -156,7 +165,7 @@ class Importer:
     def public(j: dict | None) -> dict | None:
         if not j:
             return None
-        keys = ("id", "kind", "owner", "file", "size", "last_modified", "received", "title", "started_at", "platform", "transcribe",
+        keys = ("id", "kind", "owner", "file", "size", "last_modified", "received", "title", "started_at", "platform", "transcribe", "cuts",
                 "stage", "step", "pct", "error", "note", "stem", "duration", "audio_only", "created", "updated")
         return {k: j.get(k) for k in keys}
 
@@ -187,7 +196,7 @@ class Importer:
     # ------------------------------------------------------------------ envoi
     def create(self, owner: str, me_name: str | None, file: str, size: int, last_modified: int | None = None,
                title: str | None = None, started_at: str | None = None, platform: str | None = None,
-               transcribe: bool = True) -> dict:
+               transcribe: bool = True, cuts: list | None = None, notes: str | None = None) -> dict:
         file = os.path.basename(file or "").strip()[:200]
         ext = file.rsplit(".", 1)[-1].lower() if "." in file else ""
         if ext not in VIDEO_EXT | AUDIO_EXT:
@@ -202,18 +211,21 @@ class Importer:
                 raise UserError("date de la réunion illisible")
         platform = platform if platform in PLATFORMS else "web"
         title = (title or "").strip()[:200] or None
+        cuts = check_cuts(cuts)
+        notes = (notes or "").strip()[:4000] or None
         for j in self.jobs.values():                  # même fichier, même personne, envoi pas fini : on reprend
             if (j["stage"] == "upload" and j.get("owner") == owner and j["file"] == file and j["size"] == size
                     and j.get("last_modified") == last_modified):
                 self._set(j, title=title or j.get("title"), started_at=started_at or j.get("started_at"),
-                          platform=platform, transcribe=transcribe, me_name=me_name)
+                          platform=platform, transcribe=transcribe, me_name=me_name, cuts=cuts, notes=notes)
                 return j
         free = shutil.disk_usage(self.rec).free
         if free < 2.1 * size + MARGIN:                # fichier reçu + vidéo convertie, et de la marge
             raise UserError(f"place insuffisante sur l'assistant {self.worker} ({free / 1024 ** 3:.1f} Go libres)")
         j = {"id": secrets.token_hex(8), "kind": "upload", "owner": owner, "me_name": me_name, "file": file,
              "size": size, "last_modified": last_modified, "received": 0, "title": title, "started_at": started_at,
-             "platform": platform, "transcribe": transcribe, "stage": "upload", "step": None, "pct": 0,
+             "platform": platform, "transcribe": transcribe, "cuts": cuts, "notes": notes,
+             "stage": "upload", "step": None, "pct": 0,
              "error": None, "note": None, "stem": None, "created": time.time()}
         self._part(j).write_bytes(b"")
         self.jobs[j["id"]] = j
@@ -401,25 +413,32 @@ class Importer:
             started = started.astimezone()
         started = started or dt.datetime.now().astimezone() - dt.timedelta(seconds=dur)
         title = j.get("title") or re.sub(r"[_]+", " ", j["file"].rsplit(".", 1)[0]).strip() or "Réunion importée"
+        cuts = j.get("cuts") or []
+        trim = min((x for x, y in cuts if y is None), default=None)
+        trim = trim if trim is not None and trim < dur else None
+        mutes = [(x, min(y, trim or y)) for x, y in cuts if y is not None and x < (trim if trim is not None else dur)]
+        keep = trim if trim is not None else dur
+        if keep < 5:
+            raise UserError("il ne reste presque rien après les coupures demandées")
         tmp = self.dir / (j["id"] + ".mp4.tmp")
-        cmd, what = convert_cmd(part, tmp, v, a, dur=dur)
-        self._set(j, step=what, duration=round(dur, 1), audio_only=v is None)
+        cmd, what = convert_cmd(part, tmp, v, a, dur=keep, trim=trim, mutes=mutes)
+        self._set(j, step=what, duration=round(keep, 1), audio_only=v is None)
         try:
-            await self._ffmpeg(j, cmd, dur)
+            await self._ffmpeg(j, cmd, keep)
         except UserError as e:
             if "-c:v" not in cmd or "copy" not in cmd:
                 raise
             log.info("import %s : copie impossible (%s), réencodage", j["id"], e)
-            cmd, what = convert_cmd(part, tmp, v, a, encode=True, dur=dur)
+            cmd, what = convert_cmd(part, tmp, v, a, encode=True, dur=keep, trim=trim, mutes=mutes)
             self._set(j, step=what, pct=0)
-            await self._ffmpeg(j, cmd, dur)
+            await self._ffmpeg(j, cmd, keep)
         out = await probe(tmp)
         _, a2, d2 = streams(out)
-        if not a2 or d2 < dur - max(5.0, 0.02 * dur):
+        if not a2 or d2 < keep - max(5.0, 0.02 * keep):
             tmp.unlink(missing_ok=True)
-            raise UserError(f"conversion incomplète ({d2:.0f} s sur {dur:.0f} s)")
+            raise UserError(f"conversion incomplète ({d2:.0f} s sur {keep:.0f} s)")
         self._check_cancel(j)
-        ended = started + dt.timedelta(seconds=min(d2, dur))      # durée du fichier d'origine
+        ended = started + dt.timedelta(seconds=min(d2, keep))     # durée du fichier d'origine (après coupure)
         stem = self._stem_for(started, title)
         meta = {"title": title, "platform": j.get("platform") or "web", "worker": self.worker, "owner": j["owner"],
                 "started_at": started.astimezone().isoformat(timespec="seconds"),
@@ -427,6 +446,11 @@ class Importer:
                 "imported": {"file": j["file"], "size": j["size"], "at": _now(), "by": j["owner"]}}
         if v is None:
             meta["audio_only"] = True
+        if trim is not None or mutes:               # passages privés : son effacé, fin coupée (rien n'en reste)
+            meta["cuts"] = [{"from": round(x, 1), "to": round(y, 1)} for x, y in mutes] + (
+                [{"from": round(trim, 1), "to": None, "original_duration": round(dur, 1)}] if trim is not None else [])
+        if j.get("notes"):
+            meta["cr_notes"] = j["notes"]
         mp4 = self.rec / (stem + ".mp4")
         os.replace(tmp, mp4)
         mj = Path(str(mp4) + ".json")
@@ -518,6 +542,23 @@ class Importer:
             self._set(j, note=f"compte rendu : {st.get('error') or st['state']}")
 
 
+def check_cuts(cuts) -> list:
+    """Plages à couper : [[début, fin], …] en secondes depuis le début du fichier ; fin vide (None) : jusqu'au bout."""
+    out = []
+    for c in cuts or []:
+        try:
+            x = float(c[0])
+            y = None if len(c) < 2 or c[1] is None else float(c[1])
+        except (TypeError, ValueError, IndexError):
+            raise UserError(f"plage à couper illisible : {c!r}")
+        if x < 0 or (y is not None and y <= x):
+            raise UserError(f"plage à couper incorrecte : {c!r}")
+        out.append([x, y])
+    if len(out) > 50:
+        raise UserError("trop de plages à couper (50 au plus)")
+    return sorted(out, key=lambda c: c[0])
+
+
 def glob_escape(s: str) -> str:
     return re.sub(r"([*?\[])", r"[\1]", s)
 
@@ -533,6 +574,8 @@ class ImportReq(BaseModel):
     started_at: str | None = None
     platform: str | None = None
     transcribe: bool = True
+    cuts: list[list[float | None]] | None = None
+    notes: str | None = None
 
 
 class TranscribeReq(BaseModel):

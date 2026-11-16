@@ -102,6 +102,12 @@ def worker(port: int, name: str):
             raise HTTPException(404)
         return FileResponse(p, media_type="video/mp4")
 
+    @app.delete("/recordings/{fname}")
+    async def delete(fname: str):
+        if not rec.delete(fname, imp.busy_stems()):
+            raise HTTPException(400, "impossible de supprimer")
+        return {"ok": True}
+
     @app.get("/test/chunks")
     async def chunks():
         return {"offsets": offsets}
@@ -229,6 +235,57 @@ async def main():
     r = me.post("/api/imports", json={"file": "notes.txt", "size": 10})
     check(r.status_code == 400 and "format non pris en charge" in r.json()["detail"], "extension .txt refusée")
     check(me.delete(f"/api/imports/{w}/{jid}").status_code == 200 and not me.get("/api/imports").json(), "import abandonné : effacé")
+
+    # --- jeton d'import et script d'envoi (tools/omniconf_import.py)
+    anon = httpx.Client(base_url=BASE, timeout=60)
+    check(anon.get("/api/imports").status_code == 401, "sans connexion ni jeton : refusé")
+    tok = me.post("/api/mcp/tokens", json={"name": "Essai import", "scope": "import"}).json()["token"]
+    rtok = me.post("/api/mcp/tokens", json={"name": "Essai lecture", "scope": "read"}).json()["token"]
+    check(tok.startswith("wci_"), "jeton d'import créé (préfixe wci_)")
+    bear = lambda t: {"Authorization": "Bearer " + t}
+    check(anon.get("/api/imports", headers=bear(tok)).status_code == 200, "jeton d'import : liste de ses imports")
+    check(anon.get("/api/imports", headers=bear(rtok)).status_code == 401, "jeton de lecture : pas d'import")
+    check(anon.get("/api/recordings", headers=bear(tok)).status_code == 401, "jeton d'import : pas de lecture des réunions")
+    r = anon.post("/mcp", headers={**bear(tok), "Content-Type": "application/json"},
+                  json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    check(r.status_code == 200 and not r.json().get("result", {}).get("tools"), "jeton d'import : aucun outil MCP")
+    man = WK / "manifeste.json"
+    man.write_text(json.dumps([
+        {"path": str(media["teams"]), "started_at": "2026-09-17T09:31:59+02:00", "title": "Comité (script)",
+         "cuts": [[9, None], [3, 5]], "notes": "Ne pas reprendre le détail personnel."},
+        {"path": str(media["zoom"])},
+        {"path": str(WK / "media" / "absent.mp4")}]))
+    env = {**os.environ, "WEBCONF_IMPORT_TOKEN": tok, "WEBCONF_URL": BASE}
+    script = [sys.executable, str(ROOT / "tools" / "omniconf_import.py")]
+    out = subprocess.run(script + [str(man), "--dry-run"], capture_output=True, text=True, env=env).stdout
+    check("2 fichier(s) à envoyer" in out and "1 introuvable" in out and "début inconnu" in out,
+          f"script, essai à blanc : {out.strip().splitlines()[:4]}")
+    out = subprocess.run(script + [str(man), "--parallel", "2"], capture_output=True, text=True, env=env, timeout=300)
+    check(out.returncode == 0 and "terminé : 2 fichier(s) envoyé(s)" in out.stdout, f"script : envoi ({out.stdout.strip().splitlines()[-1:]} {out.stderr[-300:]})")
+    again = subprocess.run(script + [str(man)], capture_output=True, text=True, env=env, timeout=60).stdout
+    check("0 fichier(s) à envoyer" in again and "2 déjà envoyé" in again, f"script relancé : rien n'est renvoyé ({again.strip().splitlines()[:1]})")
+
+    async def scripted_done():
+        js = anon.get("/api/imports", headers=bear(tok)).json()
+        return js if len(js) == 2 and all(j["stage"] == "terminé" for j in js) else None
+    js = await wait_for(scripted_done, 120)
+    check(js is not None, "imports du script traités (conversion, transcription, compte rendu)")
+    st = subprocess.run(script + ["--status", str(man)], capture_output=True, text=True, env=env, timeout=60)
+    state = json.loads((WK / "manifeste.etat.json").read_text())
+    meetings = [s.get("meeting") for s in state.values()]
+    check(all(m and ":" in m for m in meetings) and len(meetings) == 2, f"--status : réunions créées notées ({meetings})")
+    recs = {x["meta"].get("title"): x for x in me.get("/api/recordings").json()}
+    c = recs.get("Comité (script)")
+    check(c and c["meta"]["owner"] == "essai" and c["meta"]["started_at"].startswith("2026-09-17T09:31:59")
+          and c["meta"].get("cr_notes") and len(c["meta"].get("cuts") or []) == 2 and 8 <= c["duration"] <= 10,
+          f"réunion du script : propriétaire, début, coupures, consignes ({c and {k: c['meta'].get(k) for k in ('owner', 'started_at', 'cuts')}})")
+    z = next((x for x in me.get("/api/recordings").json() if x["meta"].get("imported", {}).get("file", "").startswith("GMT")), None)
+    check(z and z["meta"]["started_at"][:10] == dt.date.today().isoformat(),
+          f"sans début donné ni date « AAAA-MM-JJ HH-MM-SS » dans le nom : maintenant moins la durée ({z and z['meta']['started_at']})")
+    for x in me.get("/api/recordings").json():              # place nette pour la suite (IHM)
+        me.delete(f"/api/recordings/{x['worker']}/{x['name']}")
+    for j in me.get("/api/imports").json():
+        me.delete(f"/api/imports/{j['worker']}/{j['id']}")
 
     async with async_playwright() as p:
         b = await p.chromium.launch(channel="chrome", headless=True)

@@ -467,7 +467,7 @@ async def main():
     tr.active = True
     tr.base, tr.t0 = base, t0
     tr.meta = {**{k: rmeta.get(k) for k in ("title", "platform", "url", "site", "worker", "calendar", "owner", "shared_with",
-                                           "late_start", "imported", "audio_only") if rmeta.get(k)},
+                                           "late_start", "imported", "audio_only", "cuts", "cr_notes") if rmeta.get(k)},
                "started_at": dt.datetime.fromtimestamp(t0).astimezone().isoformat(),
                "ended_at": rmeta.get("ended_at"), "asr": T.ASR_MODEL, "llm": T.LLM_MODEL, "lang": T.LANG,
                "me_name": args.me, "lexicon": lexicon.load().version or None, "offline": {"at": dt.datetime.now().astimezone().isoformat(),

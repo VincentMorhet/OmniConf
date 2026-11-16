@@ -8,6 +8,8 @@ Authentification : en-tête « Authorization: Bearer <jeton> ». Les jetons sont
 (ex. Claude), révocables, et ont une portée :
   - read  : outils de lecture (list_meetings, get_meeting, get_transcript, get_draft_cr, get_slides, get_audio_url)
   - write : dépôt du compte rendu final (attach_cr), et rien d'autre (jeton distinct, à n'utiliser qu'à la demande)
+  - import : envoi d'enregistrements passés (API /api/imports du contrôle, script tools/omniconf_import.py) ; aucun
+    outil MCP, aucune lecture des réunions
 Seule l'empreinte SHA-256 des jetons est conservée (DATA_DIR/mcp_tokens.json). Gestion : IHM
 (Enregistrements > Accès de Claude) ou en ligne de commande (voir __main__).
 
@@ -80,9 +82,9 @@ class TokenStore:
         return hashlib.sha256(token.encode()).hexdigest()
 
     def create(self, name: str, scope: str, user: str | None = None) -> tuple[str, dict]:
-        if scope not in ("read", "write"):
-            raise ValueError("portée : read ou write")
-        token = ("wcr_" if scope == "read" else "wcw_") + secrets.token_urlsafe(32)
+        if scope not in ("read", "write", "import"):
+            raise ValueError("portée : read, write ou import")
+        token = {"read": "wcr_", "write": "wcw_", "import": "wci_"}[scope] + secrets.token_urlsafe(32)
         entry = {"id": secrets.token_hex(4), "name": (name or "claude").strip()[:60], "scope": scope,
                  "hash": self._hash(token), "created": _now_iso(), "last_used": None, "revoked": None,
                  "user": user}
@@ -1131,7 +1133,7 @@ if __name__ == "__main__":
     sub = ap.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("create", help="crée un jeton (affiché une seule fois)")
     c.add_argument("--name", default="claude")
-    c.add_argument("--scope", choices=["read", "write"], default="read")
+    c.add_argument("--scope", choices=["read", "write", "import"], default="read")
     c.add_argument("--user", help="compte OmniConf du jeton (ses réunions seulement ; défaut : premier administrateur)")
     c.add_argument("--out", help="écrire le jeton dans ce fichier (mode 600) au lieu de l'afficher")
     sub.add_parser("list", help="liste les jetons")
