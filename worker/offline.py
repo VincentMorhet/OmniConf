@@ -8,6 +8,8 @@ en direct. Les participants sont relevés sur les vignettes toutes les minutes.
 
   docker exec -u bot webconf-wN /opt/webconf/venv/bin/python /opt/webconf/worker/offline.py <nom>.mp4 [--force]
 
+(lancé aussi par l'assistant pour une vidéo importée ou « Transcrire et faire le compte rendu » : voir importer.py)
+
 Écrit <nom>.transcript.json et <nom>.md à côté de la vidéo ; le compte rendu se lance ensuite comme
 d'habitude (bouton « Régénérer » ou POST /recordings/<nom>/report).
 """
@@ -435,6 +437,7 @@ async def main():
     ap.add_argument("name", help="nom de la vidéo (…mp4) dans le dossier des enregistrements")
     ap.add_argument("--force", action="store_true", help="remplace une transcription existante")
     ap.add_argument("--no-slides", action="store_true")
+    ap.add_argument("--no-video", action="store_true", help="son seul (import) : pas de lecture des noms à l'image")
     ap.add_argument("--finalize", action="store_true", help="seulement la dernière passe (noms, voix) sur le fichier")
     ap.add_argument("--me", default=os.environ.get("TRANSCRIPT_ME_NAME") or None,
                     help="nom de l'utilisateur (voix « ME »), ex. « Camille Durand »")
@@ -464,7 +467,7 @@ async def main():
     tr.active = True
     tr.base, tr.t0 = base, t0
     tr.meta = {**{k: rmeta.get(k) for k in ("title", "platform", "url", "site", "worker", "calendar", "owner", "shared_with",
-                                           "late_start") if rmeta.get(k)},
+                                           "late_start", "imported", "audio_only") if rmeta.get(k)},
                "started_at": dt.datetime.fromtimestamp(t0).astimezone().isoformat(),
                "ended_at": rmeta.get("ended_at"), "asr": T.ASR_MODEL, "llm": T.LLM_MODEL, "lang": T.LANG,
                "me_name": args.me, "lexicon": lexicon.load().version or None, "offline": {"at": dt.datetime.now().astimezone().isoformat(),
@@ -473,9 +476,12 @@ async def main():
 
     # 1. image : orateur actif et participants
     scan = VideoScan(tr.http, mp4, *probe)
-    prog = asyncio.create_task(_progress(lambda: f"image {int(scan.pos // 60)} min, noms lus {sum(t.done() for t in scan.tasks.values())}/{len(scan.tasks)}"))
-    names, rosters = await scan.run()
-    prog.cancel()
+    if args.no_video:
+        names, rosters = {}, []
+    else:
+        prog = asyncio.create_task(_progress(lambda: f"image {int(scan.pos // 60)} min, noms lus {sum(t.done() for t in scan.tasks.values())}/{len(scan.tasks)}"))
+        names, rosters = await scan.run()
+        prog.cancel()
     every = [n for n in names.values() if n] + [n for _, r in rosters for n in r]
     full = resolve_names(every)
     lex = lexicon.load()          # noms de référence (casse, noms tronqués complétés)

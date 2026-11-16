@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 import analyst
+import importer as importer_mod
 import lexicon
 import reid
 import voiceprints
@@ -67,6 +68,19 @@ app = FastAPI(title="webconf-worker")
 def auth(x_agent_token: str = Header("")):
     if x_agent_token != TOKEN:
         raise HTTPException(401, "bad token")
+
+
+# Import d'enregistrements faits ailleurs, et transcription après coup des vidéos restées sans transcription
+importer = importer_mod.Importer(
+    recorder.dir, NAME, launch_report=lambda stem: _launch_report(stem, force=True),
+    report_state=lambda stem: reports.get(stem),
+    live_stem=lambda: recorder.stem(recorder.file.name) if recorder.active and recorder.file else None)
+app.include_router(importer_mod.router(importer, [Depends(auth)]))
+
+
+@app.on_event("startup")
+async def _startup():
+    importer.start()             # reprend les imports interrompus (redémarrage, mise à jour)
 
 
 def set_state(s: str, **kw):
@@ -134,7 +148,7 @@ async def status():
             "listeners": bridge.listeners, "transcript": transcriber.status(),
             "vnc_port": VNC_PORT, "lexicon": lexicon.load().version or None,
             "voiceprints": voiceprints.version(), "voiceprints_job": {"state": vp_job.get("state")} if vp_job else None,
-            "session_out": bool(session_out)}
+            "session_out": bool(session_out), "imports": importer.status()}
 
 
 class LexiconBody(BaseModel):
@@ -767,6 +781,9 @@ async def recording_report_build(name: str):
         raise HTTPException(404, "pas de transcription")
     if transcriber.active and transcriber.base and transcriber.base.name == stem:
         raise HTTPException(409, "transcription en cours : le compte rendu sera généré à la fin de la réunion")
+    ij = importer.for_stem(stem)
+    if ij and ij["stage"] in ("attente", "conversion", "transcription"):
+        raise HTTPException(409, "transcription après coup en cours : le compte rendu suivra")
     if not _launch_report(stem, force=True):
         raise HTTPException(409, "compte rendu déjà en cours de génération")
     return reports[stem]
@@ -1013,6 +1030,7 @@ async def recordings():
         x["final_cr"] = (recorder.dir / (stem + ".cr-final.json")).exists()
         x["report_job"] = reports.get(stem)
         x["slides_job"] = slides_jobs.get(stem)
+        x["import_job"] = importer.public(importer.for_stem(stem))
     return items
 
 
@@ -1069,6 +1087,7 @@ async def disk():
 async def recording_delete(name: str):
     busy = (recorder.stem(transcriber.base.name),) if transcriber.active and transcriber.base else ()
     busy += tuple(k for k, j in reports.items() if j["state"] == "running")
+    busy += importer.busy_stems()                 # import ou transcription après coup en cours
     if not recorder.delete(name, busy):
         raise HTTPException(400, "impossible de supprimer")
     return {"ok": True}

@@ -433,7 +433,7 @@ async def start_meeting(m: StartMeeting, u: dict) -> dict:
         await worker_for(target, u)
     else:
         # d'abord un assistant libre, sinon un des siens resté ouvert (navigation, erreur)
-        for st in sorted(sts, key=lambda x: x.get("state") != "idle"):
+        for st in sorted(sts, key=lambda x: (x.get("state") != "idle", bool((x.get("imports") or {}).get("busy")))):
             if st.get("online") and st["state"] in ("idle", "manual", "error") and can_use_worker(u, st):
                 target = st["name"]
                 break
@@ -806,6 +806,121 @@ async def storage():
         except Exception:
             return {"worker": n, "error": "injoignable"}
     return await asyncio.gather(*(one(n) for n in WORKERS))
+
+
+# ----------------------------------------------------------------------------- import d'enregistrements
+# Vidéo ou son d'une réunion passée, envoyé par morceaux à un assistant (qui convertit, transcrit après coup et
+# rédige le compte rendu : worker/importer.py). Chacun ne voit et ne gère que ses imports (administrateurs : tous).
+CHUNK_MAX = 64 * 1024 * 1024
+
+
+class ImportStart(BaseModel):
+    file: str
+    size: int
+    last_modified: int | None = None
+    title: str | None = None
+    started_at: str | None = None
+    platform: str | None = None
+    transcribe: bool = True
+
+
+def _imp_owner(u: dict) -> dict:
+    return {} if is_admin(u) else {"owner": u["login"]}
+
+
+async def worker_imports(n: str, owner: str | None = None) -> list[dict]:
+    try:
+        r = await http.get(wurl(n) + "/imports", params={"owner": owner} if owner else None, timeout=5)
+        return [{**x, "worker": n} for x in r.json()] if r.status_code == 200 else []
+    except Exception:
+        return []
+
+
+async def _free_disk(n: str) -> int:
+    try:
+        return int((await http.get(wurl(n) + "/disk", timeout=3)).json().get("free") or 0)
+    except Exception:
+        return 0
+
+
+@app.post("/api/imports")
+async def import_start(body: ImportStart, u: dict = CU):
+    """Nouvel import, ou reprise d'un envoi laissé en plan (même fichier : même nom, taille et date)."""
+    fname = os.path.basename(body.file or "")
+    mine = [x for l in await asyncio.gather(*(worker_imports(n, u["login"]) for n in WORKERS)) for x in l]
+    same = next((x for x in mine if x["stage"] == "upload" and x["file"] == fname and x["size"] == body.size
+                 and x.get("last_modified") == body.last_modified), None)
+    if same:
+        target = same["worker"]
+    else:
+        sts = await asyncio.gather(*(worker_status(n) for n in WORKERS))
+        free = dict(zip(WORKERS, await asyncio.gather(*(_free_disk(n) for n in WORKERS))))
+        cands = [st for st in sts if st.get("online") and "imports" in st]     # assistants à jour seulement
+        if not cands:
+            raise HTTPException(503, "aucun assistant disponible pour l'import : réessayez dans quelques minutes")
+        # d'abord un assistant sans import en cours, libre (pas en réunion), avec le plus de place
+        cands.sort(key=lambda st: (bool((st.get("imports") or {}).get("busy")), st.get("state") != "idle",
+                                   -free.get(st["name"], 0)))
+        target = cands[0]["name"]
+    r = await wcall(target, "POST", "/imports", json={**body.model_dump(), "file": fname, "owner": u["login"],
+                                                       "me_name": u.get("name")})
+    if not same:
+        log.info("import de %s par %s sur %s (%d octets)", fname, u["login"], target, body.size)
+    return {**r.json(), "worker": target}
+
+
+@app.get("/api/imports")
+async def imports_list(u: dict = CU):
+    owner = None if is_admin(u) else u["login"]
+    names = USERS.names()
+    out = [{**x, "owner_name": names.get(x.get("owner"), x.get("owner")), "mine": x.get("owner") == u["login"]}
+           for l in await asyncio.gather(*(worker_imports(n, owner) for n in WORKERS)) for x in l]
+    return sorted(out, key=lambda x: -(x.get("created") or 0))
+
+
+@app.get("/api/imports/{name}/{jid}")
+async def import_get(name: str, jid: str, u: dict = CU):
+    return {**(await wcall(name, "GET", f"/imports/{jid}", params=_imp_owner(u))).json(), "worker": name}
+
+
+@app.put("/api/imports/{name}/{jid}")
+async def import_chunk(name: str, jid: str, offset: int, request: Request, u: dict = CU):
+    """Un morceau du fichier (au plus 64 Mo), à sa place : le suivant n'est accepté qu'une fois celui-ci écrit."""
+    data = await request.body()
+    if len(data) > CHUNK_MAX:
+        raise HTTPException(413, "morceau trop gros")
+    r = await wcall(name, "PUT", f"/imports/{jid}", params={"offset": offset, "owner": u["login"]}, content=data,
+                    headers={"Content-Type": "application/octet-stream"}, timeout=httpx.Timeout(120, connect=5))
+    return {**r.json(), "worker": name}
+
+
+@app.post("/api/imports/{name}/{jid}/finish")
+async def import_finish(name: str, jid: str, u: dict = CU):
+    return {**(await wcall(name, "POST", f"/imports/{jid}/finish", params={"owner": u["login"]})).json(), "worker": name}
+
+
+@app.post("/api/imports/{name}/{jid}/retry")
+async def import_retry(name: str, jid: str, u: dict = CU):
+    return {**(await wcall(name, "POST", f"/imports/{jid}/retry", params=_imp_owner(u))).json(), "worker": name}
+
+
+@app.delete("/api/imports/{name}/{jid}")
+async def import_cancel(name: str, jid: str, u: dict = CU):
+    r = await wcall(name, "DELETE", f"/imports/{jid}", params=_imp_owner(u), timeout=30)
+    _rec_cache.pop(name, None)
+    return r.json()
+
+
+@app.post("/api/recordings/{name}/{file}/transcribe")
+async def recording_transcribe(name: str, file: str, u: dict = CU):
+    """Transcription après coup (puis compte rendu) d'une vidéo restée sans transcription."""
+    meta = await rec_meta(name, file, u, edit=True)
+    owner = meta.get("owner") or u["login"]
+    r = await wcall(name, "POST", f"/recordings/{file}/transcribe",
+                    json={"owner": owner, "me_name": USERS.names().get(owner) or u.get("name")})
+    _rec_cache.pop(name, None)
+    log.info("transcription après coup de %s/%s demandée par %s", name, file, u["login"])
+    return r.json()
 
 
 # ----------------------------------------------------------------------------- planification

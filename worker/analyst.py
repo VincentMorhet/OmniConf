@@ -1118,6 +1118,8 @@ def _source_line(report: dict, doc: dict) -> str:
     parts = [f"transcription ({how})"]
     if n_slides:
         parts.append(f"{n_slides} écran{'s' if n_slides > 1 else ''} partagé{'s' if n_slides > 1 else ''} relu{'s' if n_slides > 1 else ''}")
+    if meta.get("imported"):
+        parts.append("enregistrement importé")
     if meta.get("offline"):
         parts.append("transcription faite après coup")
     parts.append(f"rédaction par {len(drafted)} modèle{'s' if len(drafted) > 1 else ''} puis confrontation et contrôle")

@@ -177,6 +177,25 @@ créé au premier démarrage avec `ADMIN_PASSWORD` (dans `/etc/webconf/control.e
 
    La transcription d'une réunion de 83 min a pris environ 30 min, surtout pour la mise en forme et les
    pages partagées.
+
+   Depuis l'IHM, sans ligne de commande : menu ⋯ d'une vidéo restée sans transcription > « Transcrire et faire
+   le compte rendu ». L'assistant enchaîne la transcription après coup et le compte rendu ; l'avancement
+   s'affiche sur la carte.
+
+   **⬆ Importer** (page Enregistrements, ou glisser-déposer des fichiers sur la page) : la vidéo ou le son
+   d'une réunion passée, enregistrée ailleurs (Teams, Zoom, OBS, dictaphone…), plusieurs fichiers à la fois.
+   - Titre, début et plateforme sont devinés du nom du fichier (« …-20261105_093112-Enregistrement de la
+     réunion.mp4 » de Teams, « GMT20261105-083112_… » de Zoom en heure UTC, « 2026-11-05 09-31-12.mkv »
+     d'OBS), sinon de la date du fichier moins sa durée ; tout se corrige avant l'envoi.
+   - Envoi par morceaux de 16 Mo, au plus 20 Go par fichier (`IMPORT_MAX_GB`). Un envoi coupé reprend tout
+     seul ; page fermée : choisir de nouveau le même fichier, l'envoi reprend où il s'était arrêté (gardé 48 h).
+   - L'assistant choisi est celui qui n'a pas d'import en cours, hors réunion, avec le plus de place. Il
+     convertit en MP4 (copie sans réencodage pour du H.264/AAC, sinon réencodage ; un son seul reçoit une
+     image fixe), range la réunion à sa date, puis transcrit après coup et rédige le compte rendu.
+   - Un import à la fois par assistant, en basse priorité : une réunion en cours garde la main. Les travaux
+     reprennent après un redémarrage, et la mise à jour d'un assistant attend la fin des imports.
+   - La réunion importée appartient à la personne qui l'a envoyée (marquée « Importée ») ; personne d'autre
+     ne la voit tant qu'elle ne la partage pas.
 10. **📖 Lexique du projet** (onglet Enregistrements) : un texte Markdown, saisi une fois et envoyé à tous
    les assistants (ils le retrouvent dans les 2 minutes après un redémarrage).
    - Sections reconnues :

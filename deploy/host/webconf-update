@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Met à jour les assistants (conteneurs webconf-*) dont l'image ou les réglages ont changé, SEULEMENT s'ils sont
-# libres : un assistant en réunion, qui enregistre, transcrit, rédige un compte rendu ou lit des diapositives
-# attend la fin. Lancé par le déploiement, puis chaque minute (webconf-update.timer) pour les mises à jour différées.
+# libres : un assistant en réunion, qui enregistre, transcrit, rédige un compte rendu, lit des diapositives ou
+# reçoit / convertit / transcrit une vidéo importée attend la fin. Lancé par le déploiement, puis chaque minute
+# (webconf-update.timer) pour les mises à jour différées.
 #   webconf-update            met à jour ce qui peut l'être
 #   webconf-update --status   montre seulement l'état (à jour / libre / occupé)
 set -uo pipefail
@@ -42,6 +43,11 @@ if (s.get("transcript") or {}).get("active"):
     why.append("transcription")
 if (s.get("voiceprints_job") or {}).get("state") == "running":
     why.append("empreintes vocales")
+imp = s.get("imports") or {}
+if imp.get("active"):
+    why.append("import de vidéo")
+if imp.get("uploading"):
+    why.append("vidéo en cours d'envoi")
 try:
     for x in get("/recordings"):
         for k, lab in (("report_job", "compte rendu"), ("slides_job", "diapositives")):

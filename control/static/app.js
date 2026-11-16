@@ -1100,7 +1100,8 @@ async function loadRecordings() {
        ${fmtSize(d.free)} libres</span>`).join("");
     renderRecordings(); renderRecent();
     clearTimeout(loadRecordings._t);   // compte rendu en cours de génération : on rafraîchit la liste
-    if (items.some(r => r.report_job?.state === "running")) loadRecordings._t = setTimeout(() => {
+    loadImports();
+    if (items.some(r => r.report_job?.state === "running" || r.import_job)) loadRecordings._t = setTimeout(() => {
       if (view() !== "meet") loadRecordings(); }, 10000);
   } catch (e) { if (view() === "rec") toast("Erreur : " + e.message); }
 }
@@ -1158,7 +1159,9 @@ function recItem(r, started, opts = {}) {
   const video = r.kind !== "transcript";
   const plat = platOf(r) === "web" ? (r.meta?.site || siteOf(r.meta?.url || "") || "Web") : (PLAT_FR[platOf(r)] || platOf(r));
   const when = (opts.short ? dayLabel(started) + " · " : "") + started.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+  const ij = r.import_job;
   const state = r.recording ? `<span class="chip live">● En cours</span>`
+    : ij ? `<span class="chip run" title="${esc(ij.step || "")}">${esc(impChip(ij))}</span>`
     : r.report ? `<span class="chip ok">Compte rendu</span>`
     : r.report_job?.state === "running" ? `<span class="chip run" title="${esc(r.report_job.step || "")}">Compte rendu en cours…</span>`
     : r.transcript ? `<span class="chip">Transcription</span>` : `<span class="chip">Vidéo seule</span>`;
@@ -1170,7 +1173,7 @@ function recItem(r, started, opts = {}) {
     <div class="rbody">
       <b class="rtitle"></b>
       <div class="rmeta">${esc(when)} · ${esc(plat)}${opts.short ? "" : ` · ${esc(r.worker)}`}</div>
-      <div class="rtags">${state}${r.final_cr ? `<span class="chip ok">CR final</span>` : ""}${owner}</div>
+      <div class="rtags">${state}${r.final_cr ? `<span class="chip ok">CR final</span>` : ""}${r.meta?.imported ? `<span class="chip soft" title="Fichier « ${esc(r.meta.imported.file || "")} » importé${r.meta.imported.at ? " le " + esc(new Date(r.meta.imported.at).toLocaleDateString("fr-FR")) : ""}">Importée</span>` : ""}${owner}</div>
     </div>
     <button class="icon more" title="Télécharger, partager, renommer, supprimer…" aria-haspopup="menu"><svg class="i"><use href="#i-more"/></svg></button>
     <div class="rmenu hidden" role="menu">
@@ -1179,6 +1182,7 @@ function recItem(r, started, opts = {}) {
       ${r.report ? `<a href="${url}/report?fmt=docx&download=1">Compte rendu (Word)</a>` : ""}
       ${r.final_cr ? `<a href="${url}/final?fmt=md" target="_blank" rel="noopener">Compte rendu final (Markdown)</a>
         <a href="${url}/final?fmt=pdf" target="_blank" rel="noopener">Compte rendu final (PDF, s'il a été joint)</a>` : ""}
+      ${video && !r.transcript && !r.recording && !ij && r.can_edit !== false ? `<button class="trn">Transcrire et faire le compte rendu</button>` : ""}
       ${r.can_edit === false ? "" : `<button class="share">Partager avec…</button>
       <button class="ren">Renommer</button>
       <button class="del bad" ${r.recording ? "disabled title=\"Enregistrement en cours\"" : ""}>Supprimer</button>`}
@@ -1194,6 +1198,7 @@ function recItem(r, started, opts = {}) {
   el.onclick = () => play();                                     // toute la carte : compte rendu d'abord
   if ($(".play", el)) $(".play", el).onclick = (e) => { e.stopPropagation(); play(undefined, video); };   // lecture immédiate
   if ($(".share", el)) $(".share", el).onclick = () => shareRecording(r, title);
+  if ($(".trn", el)) $(".trn", el).onclick = () => transcribeRecording(r, title);
   if ($(".ren", el)) $(".ren", el).onclick = () => renameRecording(url, r.meta?.title || r.name);
   if ($(".del", el)) $(".del", el).onclick = () => deleteRecording(url, title);
   if (opts.short) el.querySelectorAll(".more, .rmenu").forEach(x => x.remove());
@@ -1231,6 +1236,226 @@ async function openFinal(name) {
 }
 ["#r-search", "#r-platform", "#r-worker"].forEach(s => $(s).addEventListener("input", renderRecordings));
 $("#refreshRec").onclick = loadRecordings;
+
+// ------------------------------------------------------------------ import d'enregistrements passés
+// Envoi par morceaux de 16 Mo à un assistant (reprise au même endroit après une coupure, ou en choisissant de
+// nouveau le même fichier), puis conversion, transcription après coup et compte rendu sur l'assistant.
+const IMP_CHUNK = 16 * 1024 * 1024;
+const IMP_ACTIVE = ["attente", "conversion", "transcription", "compte rendu"];
+let impJobs = [], impEntries = [], impQueue = [], impBusy = false;
+const impLocal = new Map();          // envois de cette page : « assistant/id » -> {file, title, sent, size, speed…}
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const pad2 = (n) => String(n).padStart(2, "0");
+const localInput = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+
+function impChip(j) {
+  if (j.stage === "compte rendu") return "Compte rendu en cours…";
+  if (j.stage === "attente") return "Transcription en attente";
+  if (j.stage === "conversion") return "Conversion…";
+  return `Transcription… ${Math.round(j.pct || 0)} %`;
+}
+// Date dans le nom du fichier : Teams « …-20261105_093112-Enregistrement… », Zoom « GMT20261105-083112_… » (heure
+// UTC), OBS « 2026-11-05 09-31-12 »… ; sinon la date du fichier (fin de l'enregistrement) moins la durée.
+function impDateFromName(n) {
+  let m = n.match(/(GMT)?((?:19|20)\d{2})[-_.]?(\d{2})[-_.]?(\d{2})[ _T.-]{0,3}(\d{2})[-_.:h]?(\d{2})(?:[-_.:m]?(\d{2}))?/);
+  if (m) {
+    const [, gmt, y, mo, d, h, mi, se] = m;
+    if (+mo >= 1 && +mo <= 12 && +d >= 1 && +d <= 31 && +h < 24 && +mi < 60)
+      return { date: gmt ? new Date(Date.UTC(+y, mo - 1, +d, +h, +mi, +(se || 0))) : new Date(+y, mo - 1, +d, +h, +mi, +(se || 0)), match: m[0] };
+  }
+  m = n.match(/((?:19|20)\d{2})[-_.](\d{2})[-_.](\d{2})/);
+  if (m && +m[2] >= 1 && +m[2] <= 12 && +m[3] >= 1 && +m[3] <= 31) return { date: null, day: [+m[1], m[2] - 1, +m[3]], match: m[0] };
+  return null;
+}
+function impTitle(name, match) {
+  let t = name.replace(/\.[^.]+$/, "");
+  if (match) t = t.replace(match, " ");
+  t = t.replace(/GMT/g, " ").replace(/[-_ ]*(Enregistrement de la réunion|Meeting Recording|Recording|Enregistrement)(?![A-Za-zÀ-ÿ])/gi, " ")
+    .replace(/_?\d{3,4}x\d{3,4}/g, " ").replace(/_+/g, " ").replace(/\s{2,}/g, " ").replace(/^[\s-]+|[\s-]+$/g, "").trim();
+  return /^(video|audio|zoom|gmt)?\s*\d*$/i.test(t) ? "" : t;
+}
+const impPlatform = (n) => /Enregistrement de la réunion|Meeting Recording|teams/i.test(n) ? "teams"
+  : /zoom|^GMT\d{8}|^video\d+/i.test(n) ? "zoom" : "web";
+function impDuration(file) {           // durée lue par le navigateur (formats qu'il sait lire), sinon inconnue
+  return new Promise(res => {
+    const el = document.createElement(file.type.startsWith("audio") ? "audio" : "video");
+    const url = URL.createObjectURL(file); let done = false;
+    const end = (d) => { if (done) return; done = true; URL.revokeObjectURL(url); el.removeAttribute("src"); res(d); };
+    el.preload = "metadata"; el.muted = true;
+    el.onloadedmetadata = () => end(isFinite(el.duration) && el.duration > 0 ? el.duration : null);
+    el.onerror = () => end(null); setTimeout(() => end(null), 6000); el.src = url;
+  });
+}
+async function openImport(files) {
+  files = [...files].filter(f => f.size > 0);
+  if (!files.length) return;
+  impEntries = await Promise.all(files.map(async (file) => {
+    const dur = await impDuration(file), g = impDateFromName(file.name);
+    let date = g?.date, src = "date lue dans le nom du fichier";
+    if (!date) {
+      const end = new Date(file.lastModified || Date.now()), start = new Date(end - (dur || 0) * 1000);
+      date = g?.day ? new Date(...g.day, start.getHours(), start.getMinutes()) : start;
+      src = g?.day ? "jour lu dans le nom du fichier, heure du fichier" : `date du fichier${dur ? " moins la durée" : ""} : à vérifier`;
+    }
+    return { file, dur, date, src, title: impTitle(file.name, g?.match), platform: impPlatform(file.name) };
+  }));
+  $("#impList").innerHTML = impEntries.map((e, i) => `<div class="imp-row" data-i="${i}">
+    <div class="imp-file"><b>${esc(e.file.name)}</b><small>${fmtSize(e.file.size)}${e.dur ? " · " + fmtSec(Math.round(e.dur)) : ""}</small></div>
+    <label>Titre<input class="i-title" maxlength="200" placeholder="Réunion importée" value="${esc(e.title)}"></label>
+    <div class="imp-2">
+      <label>Début de la réunion<input class="i-date" type="datetime-local" required value="${localInput(e.date)}"></label>
+      <label>Plateforme<select class="i-plat"><option value="teams">Teams</option><option value="zoom">Zoom</option><option value="web">Autre</option></select></label>
+    </div>
+    <small class="imp-src">${esc(e.src)}</small></div>`).join("");
+  document.querySelectorAll("#impList .imp-row").forEach(row => { $(".i-plat", row).value = impEntries[+row.dataset.i].platform; });
+  $("#impOk").textContent = impEntries.length > 1 ? `Importer les ${impEntries.length} fichiers` : "Importer";
+  $("#dlgImport").showModal();
+}
+$("#dlgImport").addEventListener("close", () => {
+  $("#importFile").value = "";
+  if ($("#dlgImport").returnValue !== "ok") return;
+  const tr = $("#impTr").checked;
+  document.querySelectorAll("#impList .imp-row").forEach(row => {
+    const e = impEntries[+row.dataset.i], d = new Date($(".i-date", row).value);
+    impQueue.push({ file: e.file, transcribe: tr, platform: $(".i-plat", row).value,
+      title: $(".i-title", row).value.trim() || "Réunion importée", started_at: isNaN(d) ? null : d.toISOString() });
+  });
+  impEntries = [];
+  impRun();
+});
+async function impRun() {
+  if (impBusy) return;
+  impBusy = true;
+  try { while (impQueue.length) await impUpload(impQueue.shift()); }
+  finally { impBusy = false; renderImports(); }
+}
+class HttpErr extends Error { constructor(status, msg, detail) { super(msg); this.status = status; this.detail = detail; } }
+async function impFetch(url, opts) {
+  const r = await fetch(url, { credentials: "same-origin", ...opts });
+  if (r.status === 401) { showLogin(); throw new HttpErr(401, "non connecté"); }
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new HttpErr(r.status, typeof d.detail === "string" ? d.detail : d.detail?.message || r.statusText, d.detail);
+  return d;
+}
+async function impUpload(e) {
+  let job;
+  try {
+    job = await api("/api/imports", { method: "POST", json: { file: e.file.name, size: e.file.size, last_modified: e.file.lastModified,
+      title: e.title, started_at: e.started_at, platform: e.platform, transcribe: e.transcribe } });
+  } catch (err) { toast(`« ${e.file.name} » : ${err.message}`, 7000); return; }
+  if (job.stage !== "upload") { loadImports(); return; }
+  const key = job.worker + "/" + job.id, base = `/api/imports/${encodeURIComponent(job.worker)}/${job.id}`;
+  const st = { key, worker: job.worker, id: job.id, file: e.file, title: e.title, size: e.file.size, sent: job.received || 0,
+    speed: 0, err: null, retry: null, cancel: false };
+  impLocal.set(key, st);
+  if (st.sent) toast(`Reprise de l'envoi de « ${e.file.name} » à ${Math.round(100 * st.sent / st.size)} %`, 4000);
+  renderImports();
+  let t0 = performance.now(), b0 = st.sent, fails = 0;
+  while (st.sent < st.size && !st.cancel) {
+    const end = Math.min(st.size, st.sent + IMP_CHUNK);
+    try {
+      const d = await impFetch(`${base}?offset=${st.sent}`, { method: "PUT", body: e.file.slice(st.sent, end),
+        headers: { "Content-Type": "application/octet-stream" } });
+      st.sent = d.received; st.retry = null; fails = 0;
+      const secs = (performance.now() - t0) / 1000;
+      if (secs > 1) st.speed = (st.sent - b0) / secs;
+    } catch (err) {
+      if (st.cancel) break;
+      if (err.status === 409 && err.detail?.received != null) { st.sent = err.detail.received; continue; }
+      if (err.status && err.status < 500 && err.status !== 429) { st.err = err.message; break; }   // refus : inutile d'insister
+      if (++fails > 10) { st.err = "envoi interrompu (" + err.message + ")"; break; }
+      const wait = Math.min(30, 2 ** fails);
+      st.retry = `connexion perdue, nouvel essai dans ${wait} s`; renderImports();
+      await sleep(wait * 1000);
+      try { st.sent = (await impFetch(base)).received; } catch (_) { /* on réessaie le même morceau */ }
+      t0 = performance.now(); b0 = st.sent;
+    }
+    renderImports();
+  }
+  if (st.cancel) { impLocal.delete(key); renderImports(); return; }
+  if (!st.err) {
+    try { await impFetch(base + "/finish", { method: "POST" }); impLocal.delete(key); toast(`« ${st.title} » envoyé : conversion puis transcription sur ${job.worker}`, 4000); }
+    catch (err) { st.err = err.message; }
+  }
+  if (st.err) toast(`« ${st.title} » : ${st.err}`, 7000);
+  loadImports();
+}
+async function loadImports() {
+  try { impJobs = await api("/api/imports"); } catch (e) { return; }
+  const active = impJobs.filter(j => IMP_ACTIVE.includes(j.stage));
+  const was = loadImports._active || new Set(), now = new Set(active.map(j => j.worker + "/" + j.id));
+  // un travail vient de finir, ou sa vidéo vient d'apparaître : la liste des réunions est rafraîchie
+  const stems = new Set(active.filter(j => j.stem).map(j => j.worker + "/" + j.id));
+  if ([...was].some(k => !now.has(k)) || [...stems].some(k => !(loadImports._stems || new Set()).has(k))) setTimeout(loadRecordings, 300);
+  loadImports._active = now; loadImports._stems = stems;
+  renderImports();
+  clearTimeout(loadImports._t);
+  if (active.length) loadImports._t = setTimeout(loadImports, 5000);
+}
+function renderImports() {
+  const box = $("#imports");
+  const rows = [];
+  for (const st of impLocal.values()) {
+    const pct = st.size ? 100 * st.sent / st.size : 0;
+    const eta = st.speed > 0 ? Math.round((st.size - st.sent) / st.speed) : null;
+    rows.push({ key: st.key, title: st.title, file: st.file.name, pct, err: st.err, local: true,
+      line: st.err ? st.err : st.retry || `Envoi : ${st.sent ? fmtSize(st.sent) : "0 Mo"} sur ${fmtSize(st.size)}${st.speed ? ` · ${fmtSize(st.speed)}/s` : ""}${eta != null ? ` · encore ${fmtSec(eta)}` : ""}` });
+  }
+  for (const j of impJobs) {
+    const key = j.worker + "/" + j.id;
+    if (impLocal.has(key) || j.stage === "terminé") continue;
+    const who = j.mine ? "" : ` · ${j.owner_name}`;
+    const line = j.stage === "upload" ? `Envoi interrompu à ${Math.round(100 * j.received / j.size)} % : choisissez de nouveau ce fichier pour reprendre`
+      : j.stage === "erreur" ? j.error || "erreur"
+      : j.stage === "annulé" ? "annulé"
+      : j.stage === "attente" ? "En attente (un import à la fois par assistant)"
+      : `${j.stage === "conversion" ? "Conversion" : j.stage === "transcription" ? "Transcription" : "Compte rendu"}${j.step ? " : " + j.step : ""}`;
+    rows.push({ key, j, title: j.title || j.file, file: j.file, err: j.stage === "erreur", line: line + who + ` · ${j.worker}`,
+      pct: j.stage === "upload" ? 100 * j.received / j.size : j.pct });
+  }
+  box.classList.toggle("hidden", !rows.length);
+  box.innerHTML = rows.map(x => `<div class="imp ${x.err ? "bad" : ""}" data-key="${esc(x.key)}">
+    <svg class="i"><use href="#i-upload"/></svg>
+    <div class="imp-body"><b>${esc(x.title)}</b><small>${esc(x.line)}</small>
+      ${x.pct != null && !x.err ? `<span class="bar"><i style="width:${Math.max(1, Math.min(100, x.pct)).toFixed(1)}%"></i></span>` : ""}</div>
+    <div class="imp-act">${x.local && !x.err ? `<button class="ghost small i-cancel">Annuler</button>`
+      : x.local ? `<button class="ghost small i-drop">Fermer</button>`
+      : x.j.stage === "upload" ? `<button class="small i-resume">Reprendre…</button><button class="ghost small i-cancel">Abandonner</button>`
+      : x.j.stage === "erreur" || x.j.stage === "annulé" ? `${x.j.stage === "erreur" ? `<button class="small i-retry">Réessayer</button>` : ""}<button class="ghost small i-cancel">Retirer</button>`
+      : `<button class="ghost small i-cancel">Annuler</button>`}</div></div>`).join("");
+  box.querySelectorAll(".imp").forEach(el => {
+    const key = el.dataset.key, [w, id] = key.split("/"), base = `/api/imports/${encodeURIComponent(w)}/${id}`;
+    const st = impLocal.get(key), j = impJobs.find(x => x.worker + "/" + x.id === key);
+    if ($(".i-cancel", el)) $(".i-cancel", el).onclick = async () => {
+      const what = j && j.stem ? "La vidéo déjà convertie reste dans vos enregistrements, sans transcription." : "Le fichier envoyé sera effacé de l'assistant.";
+      if (!(await askConfirm("Arrêter cet import ?", what, "Arrêter", true))) return;
+      if (st) st.cancel = true;
+      try { await api(base, { method: "DELETE" }); } catch (e) { toast(e.message); }
+      impLocal.delete(key); loadImports(); loadRecordings();
+    };
+    if ($(".i-drop", el)) $(".i-drop", el).onclick = () => { impLocal.delete(key); loadImports(); };
+    if ($(".i-retry", el)) $(".i-retry", el).onclick = async () => {
+      try { await api(base + "/retry", { method: "POST" }); toast("Import relancé"); } catch (e) { toast(e.message, 5000); }
+      loadImports();
+    };
+    if ($(".i-resume", el)) $(".i-resume", el).onclick = () => $("#importFile").click();
+  });
+}
+async function transcribeRecording(r, title) {
+  if (!(await askConfirm("Transcrire après coup ?", `« ${title} » : le son est transcrit (voix reconnues, noms lus à l'image), puis le compte rendu est rédigé. Comptez environ la moitié de la durée de la réunion ; vous pouvez fermer la page.`, "Transcrire"))) return;
+  try { await api(recUrl(r) + "/transcribe", { method: "POST" }); toast("Transcription demandée : l'avancement s'affiche sur la carte", 4000); }
+  catch (e) { toast(e.message, 5000); }
+  loadRecordings();
+}
+$("#importBtn").onclick = () => $("#importFile").click();
+$("#importFile").onchange = (e) => openImport(e.target.files);
+// glisser-déposer des fichiers sur la page des enregistrements
+$("#tab-rec").addEventListener("dragover", (e) => { if ([...e.dataTransfer.types].includes("Files")) { e.preventDefault(); $("#tab-rec").classList.add("drop"); } });
+$("#tab-rec").addEventListener("dragleave", (e) => { if (e.target === $("#tab-rec")) $("#tab-rec").classList.remove("drop"); });
+$("#tab-rec").addEventListener("drop", (e) => { e.preventDefault(); $("#tab-rec").classList.remove("drop"); openImport(e.dataTransfer.files); });
+window.addEventListener("beforeunload", (e) => {
+  if ([...impLocal.values()].some(x => !x.err && !x.cancel) || impQueue.length) { e.preventDefault(); e.returnValue = ""; }
+});
 
 let player = { url: null, doc: null, rep: null, seek: null };
 async function openPlayer(url, title, file, o = { video: true }) {
