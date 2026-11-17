@@ -1115,6 +1115,7 @@ function renderRecordings() {
     const hay = [r.meta?.title, r.name, r.meta?.url, r.worker, d.toLocaleDateString("fr-FR"), dayLabel(d)].join(" ").toLowerCase();
     return (!q || hay.includes(q)) && (!pf || platOf(r) === pf) && (!wf || r.worker === wf);
   });
+  recShown = items;
   const root = $("#recordings"); root.innerHTML = "";
   if (!items.length) {
     root.innerHTML = `<div class="empty">${recItems.length ? "Aucun résultat" : "Aucun enregistrement pour l'instant"}</div>`;
@@ -1203,8 +1204,70 @@ function recItem(r, started, opts = {}) {
   if ($(".ren", el)) $(".ren", el).onclick = () => renameRecording(url, r.meta?.title || r.name);
   if ($(".del", el)) $(".del", el).onclick = () => deleteRecording(url, title);
   if (opts.short) el.querySelectorAll(".more, .rmenu").forEach(x => x.remove());
+  if (selMode && !opts.short) {          // sélection de plusieurs réunions : un clic coche ou décoche
+    const k = recKey(r), ok = recPickable(r);
+    el.classList.add("pick"); el.classList.toggle("nopick", !ok); el.classList.toggle("picked", recSel.has(k));
+    el.insertAdjacentHTML("afterbegin", `<span class="pickbox" aria-hidden="true"><svg class="i"><use href="#i-check"/></svg></span>`);
+    el.onclick = (e) => {
+      e.preventDefault();
+      if (!ok) return toast(r.recording ? "Enregistrement en cours" : "Réunion d'un autre utilisateur : vous ne pouvez pas la partager");
+      if (recSel.has(k)) recSel.delete(k); else recSel.add(k);
+      el.classList.toggle("picked", recSel.has(k)); updateSelBar();
+    };
+  }
   return el;
 }
+// ------------------------------------------------------------------ plusieurs réunions d'un coup (partage)
+let selMode = false, recShown = [], smItems = [];
+const recSel = new Set();
+const recKey = (r) => r.worker + "/" + r.name;
+const recPickable = (r) => r.can_edit !== false && !r.recording;
+function setSelMode(on) {
+  selMode = on;
+  if (!on) recSel.clear();
+  $("#tab-rec").classList.toggle("selecting", on);
+  $("#selBtn").classList.toggle("on", on);
+  renderRecordings(); updateSelBar();
+}
+function updateSelBar() {
+  const n = recSel.size;
+  $("#selBar").classList.toggle("hidden", !selMode);
+  $("#selCount").textContent = n ? `${n} réunion${n > 1 ? "s" : ""} sélectionnée${n > 1 ? "s" : ""}` : "Touchez les réunions à choisir";
+  $("#selShare").disabled = !n;
+}
+$("#selBtn").onclick = () => setSelMode(!selMode);
+$("#selDone").onclick = () => setSelMode(false);
+$("#selNone").onclick = () => { recSel.clear(); renderRecordings(); updateSelBar(); };
+$("#selAll").onclick = () => { recShown.filter(recPickable).forEach(r => recSel.add(recKey(r))); renderRecordings(); updateSelBar(); };
+$("#selShare").onclick = async () => {
+  let dir;
+  try { dir = await api("/api/users/directory"); } catch (e) { return toast(e.message); }
+  smItems = recItems.filter(r => recSel.has(recKey(r)));
+  if (!smItems.length) return;
+  $("#smCount").textContent = `${smItems.length} réunion${smItems.length > 1 ? "s" : ""}`;
+  $("#smList").innerHTML = dir.filter(x => x.login !== me.login).map(x => {
+    const n = smItems.filter(r => (r.shared_with || []).includes(x.login)).length;
+    return `<label><input type="checkbox" value="${esc(x.login)}"> ${esc(x.name)} <small>(${esc(x.login)})${n ? ` · déjà partagé${n > 1 ? "es" : "e"} : ${n}` : ""}</small></label>`;
+  }).join("") || "<small>Aucun autre compte.</small>";
+  $("#smOk").disabled = true;
+  document.querySelector("input[name=smMode][value=add]").checked = true;
+  $("#dlgShareMany").showModal();
+};
+$("#smList").addEventListener("change", () => { $("#smOk").disabled = !$("#smList").querySelector("input:checked"); });
+$("#dlgShareMany").addEventListener("close", async () => {
+  if ($("#dlgShareMany").returnValue !== "ok" || !smItems.length) return;
+  const who = [...$("#smList").querySelectorAll("input:checked")].map(x => x.value);
+  const mode = document.querySelector("input[name=smMode]:checked").value;
+  if (!who.length) return;
+  try {
+    const d = await api("/api/recordings/access-bulk", { method: "POST", json: {
+      items: smItems.map(r => ({ worker: r.worker, file: r.name })), [mode]: who } });
+    toast(`${mode === "add" ? "Partage enregistré" : "Partage retiré"} pour ${d.done} réunion${d.done > 1 ? "s" : ""}`
+      + (d.failed.length ? ` (${d.failed.length} refusée${d.failed.length > 1 ? "s" : ""} : ${d.failed[0].error})` : ""), 5000);
+    setSelMode(false);
+  } catch (e) { toast(e.message, 5000); }
+  loadRecordings();
+});
 async function renameRecording(url, title) {
   const t = prompt("Nouveau titre :", title);
   if (!t || t === title) return false;
@@ -2053,6 +2116,46 @@ async function loadConsents() {
   } catch (e) { box.textContent = "Erreur : " + e.message; }
 }
 $("#voiceBox").addEventListener("toggle", () => { if ($("#voiceBox").open) loadConsents(); });
+// Plusieurs consentements d'un coup : une attestation pour toutes les personnes cochées (à recocher si la liste change)
+let cmText = { one: "", many: "" };
+const cmNewNames = () => $("#cmNew").value.split(/\n/).map(x => x.trim()).filter(Boolean);
+function cmUpdate(keep) {
+  const n = $("#cmList").querySelectorAll("input:checked").length + cmNewNames().length;
+  if (!keep) $("#cmAttest").checked = false;
+  $("#cmText").textContent = n > 1 ? cmText.many.replace("{n}", n) : cmText.one;
+  $("#cmOk").disabled = !n || !$("#cmAttest").checked;
+  $("#cmOk").textContent = n ? `Attester ${n} consentement${n > 1 ? "s" : ""}` : "Attester";
+}
+$("#vaMany").onclick = async () => {
+  let d;
+  try { d = await api("/api/voice-consents"); } catch (e) { return toast(e.message); }
+  cmText = { one: d.attestation, many: d.attestation_many || d.attestation };
+  const todo = d.items.filter(x => !x.consent);
+  $("#cmList").innerHTML = todo.map(x => `<label data-n="${esc(x.name.toLowerCase())}"><input type="checkbox" value="${esc(x.id)}"> ${esc(x.name)}${x.note ? ` <small>📝 ${esc(x.note)}</small>` : ""}</label>`).join("")
+    || "<small>Toutes les personnes de la liste ont déjà leur consentement attesté. Ajoutez-en ci-dessous.</small>";
+  $("#cmNew").value = ""; $("#cmNote").value = ""; $("#cmFilter").value = "";
+  cmUpdate();
+  $("#dlgConsentMany").showModal();
+};
+$("#cmList").addEventListener("change", () => cmUpdate());
+$("#cmNew").addEventListener("input", () => cmUpdate());
+$("#cmAttest").onchange = () => cmUpdate(true);
+$("#cmFilter").addEventListener("input", () => {
+  const q = $("#cmFilter").value.trim().toLowerCase();
+  $("#cmList").querySelectorAll("label").forEach(l => l.classList.toggle("hidden", !!q && !l.dataset.n.includes(q)));
+});
+$("#cmAll").onclick = () => { $("#cmList").querySelectorAll("label:not(.hidden) input").forEach(x => { x.checked = true; }); cmUpdate(); };
+$("#cmNone").onclick = () => { $("#cmList").querySelectorAll("input").forEach(x => { x.checked = false; }); cmUpdate(); };
+$("#dlgConsentMany").addEventListener("close", async () => {
+  if ($("#dlgConsentMany").returnValue !== "ok" || !$("#cmAttest").checked) return;
+  const ids = [...$("#cmList").querySelectorAll("input:checked")].map(x => x.value);
+  try {
+    const d = await api("/api/voice-consents/attest", { method: "POST", json: { ids, names: cmNewNames(), attest: true,
+      note: $("#cmNote").value.trim() || null } });
+    toast(`${d.attested.length} consentement${d.attested.length > 1 ? "s" : ""} enregistré${d.attested.length > 1 ? "s" : ""} : recherche des voix lancée`, 5000);
+  } catch (e) { toast(e.message, 5000); }
+  loadConsents();
+});
 
 // Compte Zoom : session de chacun, gardée chiffrée et chargée le temps de ses réunions (« comme si c'était moi »)
 const fmtWhen = (x) => x ? new Date(x).toLocaleString("fr-FR", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "";

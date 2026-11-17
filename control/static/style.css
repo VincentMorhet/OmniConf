@@ -829,3 +829,30 @@ dialog.dlg label.chk { flex-direction: row; color: var(--fg); font-size: 14px; }
 .imp-2 label:first-child { flex: 2 1 200px; }
 .imp-2 label:last-child { flex: 1 1 120px; }
 @media (max-width: 560px) { .imp { flex-wrap: wrap; } .imp-act { width: 100%; } }
+
+/* ---- plusieurs réunions d'un coup (partage groupé) */
+#selBtn { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px; }
+#selBtn.on { background: color-mix(in srgb, var(--accent) 18%, transparent); border-color: var(--accent); }
+.selecting .ritem .play, .selecting .ritem .more { display: none; }
+.ritem.pick { position: relative; cursor: pointer; }
+.ritem .pickbox { position: absolute; top: 8px; left: 8px; z-index: 2; width: 26px; height: 26px; border-radius: 50%;
+  border: 2px solid #fff; background: rgba(0, 0, 0, .35); display: grid; place-items: center; }
+.ritem .pickbox svg.i { width: 16px; height: 16px; color: #fff; opacity: 0; stroke-width: 3; }
+.ritem.picked { outline: 2px solid var(--accent); outline-offset: -2px; }
+.ritem.picked .pickbox { background: var(--accent); border-color: var(--accent); }
+.ritem.picked .pickbox svg.i { opacity: 1; }
+.ritem.nopick { opacity: .45; cursor: not-allowed; }
+.selbar { position: fixed; left: 50%; transform: translateX(-50%); bottom: 16px; width: min(760px, calc(100vw - 32px));
+  box-sizing: border-box; z-index: 30; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 10px 12px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); }
+.selecting #recordings { padding-bottom: 96px; }
+.selbar .grow { flex: 1; }
+.selbar button svg.i { width: 16px; height: 16px; }
+.selbar #selShare { display: inline-flex; align-items: center; gap: 6px; }
+@media (max-width: 700px) { .selbar { bottom: calc(84px + env(safe-area-inset-bottom)); }
+  .selecting #recordings { padding-bottom: 150px; } }
+.seg { display: flex; gap: 14px; flex-wrap: wrap; margin: 6px 0 8px; }
+dialog.dlg .seg label { flex-direction: row; align-items: center; gap: 6px; color: var(--fg); font-size: 14px; margin: 0; }
+.cm-tools { flex-wrap: wrap; gap: 6px; margin: 4px 0 6px; }
+.cm-tools input { flex: 1 1 180px; min-width: 0; }
+#cmList label.hidden { display: none !important; }

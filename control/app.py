@@ -696,6 +696,44 @@ async def recording_access(name: str, file: str, body: Access, u: dict = CU):
     return r.json()
 
 
+class BulkAccess(BaseModel):
+    items: list[dict]              # [{"worker": "w1", "file": "….mp4"}, …]
+    add: list[str] = []            # comptes à qui partager
+    remove: list[str] = []         # comptes à qui retirer le partage
+
+
+@app.post("/api/recordings/access-bulk")
+async def recordings_access_bulk(body: BulkAccess, u: dict = CU):
+    """Partager (ou ne plus partager) plusieurs réunions d'un coup ; seules celles que ce compte peut modifier."""
+    known = {x["login"] for x in USERS.all()}
+    bad = [x for x in body.add + body.remove if x not in known]
+    if bad:
+        raise HTTPException(400, "compte(s) inconnu(s) : " + ", ".join(bad))
+    if not body.items or len(body.items) > 2000 or not (body.add or body.remove):
+        raise HTTPException(400, "rien à faire")
+    sem = asyncio.Semaphore(8)
+
+    async def one(it: dict):
+        w, f = str(it.get("worker") or ""), str(it.get("file") or "")
+        async with sem:
+            try:
+                meta = await rec_meta(w, f, u, edit=True)
+                cur = sorted(set(meta.get("shared_with") or []))
+                new = sorted((set(cur) | set(body.add)) - set(body.remove) - {meta.get("owner")})
+                if new != cur:
+                    await wcall(w, "PATCH", f"/recordings/{f}/meta", json={"shared_with": new})
+                return None
+            except HTTPException as e:
+                return {"worker": w, "file": f, "error": str(e.detail)}
+    res = await asyncio.gather(*(one(it) for it in body.items))
+    for w in {str(it.get("worker")) for it in body.items}:
+        _rec_cache.pop(w, None)
+    failed = [r for r in res if r]
+    log.info("partage groupé par %s : %d réunion(s), +%s -%s, %d refus", u["login"], len(body.items) - len(failed),
+             ",".join(body.add) or "-", ",".join(body.remove) or "-", len(failed))
+    return {"done": len(body.items) - len(failed), "failed": failed}
+
+
 @app.get("/api/recordings/{name}/{file}")
 async def recording_get(name: str, file: str, request: Request, download: int = 0, u: dict = CU):
     """Relais en streaming avec support Range (lecture vidéo sur iPhone/iPad)."""
@@ -1025,6 +1063,9 @@ async def scheduler():
 # ----------------------------------------------------------------------------- consentements (empreintes vocales)
 CONSENT_TEXT = ("J'atteste sur l'honneur avoir reçu le consentement explicite de cette personne à l'utilisation de son "
                 "empreinte vocale pour la reconnaître dans les réunions enregistrées par OmniConf.")
+CONSENT_TEXT_MANY = ("J'atteste sur l'honneur avoir reçu le consentement explicite de chacune des {n} personnes cochées "
+                     "ci-dessus à l'utilisation de son empreinte vocale pour la reconnaître dans les réunions "
+                     "enregistrées par OmniConf.")
 
 
 def load_consents() -> list[dict]:
@@ -1056,7 +1097,8 @@ class ConsentSet(BaseModel):
 async def consents_list(u: dict = Depends(require_admin)):
     names = USERS.names()
     items = [{**x, "by_name": names.get(x.get("by"), x.get("by"))} for x in load_consents()]
-    return {"items": sorted(items, key=lambda x: (not x.get("consent"), x["name"].lower())), "attestation": CONSENT_TEXT}
+    return {"items": sorted(items, key=lambda x: (not x.get("consent"), x["name"].lower())), "attestation": CONSENT_TEXT,
+            "attestation_many": CONSENT_TEXT_MANY}
 
 
 @app.post("/api/voice-consents")
@@ -1104,6 +1146,51 @@ async def consents_set(cid: str, body: ConsentSet, u: dict = Depends(require_adm
         log.info("consentement (empreinte vocale) de %s retiré par %s ; empreinte effacée", x["name"], u["login"])
     save_consents(items)
     return x
+
+
+class ConsentMany(BaseModel):
+    ids: list[str] = []            # personnes déjà dans la liste
+    names: list[str] = []          # personnes à ajouter puis attester
+    attest: bool = False
+    note: str | None = None
+
+
+@app.post("/api/voice-consents/attest")
+async def consents_attest_many(body: ConsentMany, u: dict = Depends(require_admin)):
+    """Plusieurs consentements attestés d'un coup (une attestation sur l'honneur pour toutes les personnes cochées)."""
+    if not body.attest:
+        raise HTTPException(400, "l'attestation sur l'honneur doit être cochée")
+    items = load_consents()
+    now = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    ids = set(body.ids)
+    for raw in body.names:
+        name = " ".join(str(raw).split())[:80]
+        if not name:
+            continue
+        if len(name) < 3:
+            raise HTTPException(400, f"nom trop court : « {name} » (Prénom Nom)")
+        x = next((i for i in items if i["name"].lower() == name.lower()), None)
+        if not x:
+            x = {"id": uuid.uuid4().hex[:8], "name": name, "consent": False, "at": None, "by": None, "note": None,
+                 "history": [{"at": now, "by": u["login"], "action": "ajout"}]}
+            items.append(x)
+        ids.add(x["id"])
+    targets = [x for x in items if x["id"] in ids and not x["consent"]]
+    if not targets:
+        raise HTTPException(400, "aucune personne à attester (déjà attestées, ou aucune cochée)")
+    text = CONSENT_TEXT_MANY.format(n=len(targets)) if len(targets) > 1 else CONSENT_TEXT
+    note = (body.note or "").strip()[:300] or None
+    for x in targets:
+        x.update(consent=True, at=now, by=u["login"])
+        if note:
+            x["note"] = note
+        x["history"].append({"at": now, "by": u["login"], "action": "consentement attesté", "texte": text,
+                             "lot": len(targets)})
+    save_consents(items)
+    names = [x["name"] for x in targets]
+    log.info("consentements (empreintes vocales) attestés d'un coup par %s : %d personne(s)", u["login"], len(names))
+    vp_schedule(names, u["login"], delay=5)          # empreintes calculées ensuite (tâche de fond)
+    return {"attested": names}
 
 
 @app.delete("/api/voice-consents/{cid}")
