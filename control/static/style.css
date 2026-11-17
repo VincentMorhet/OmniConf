@@ -856,3 +856,13 @@ dialog.dlg .seg label { flex-direction: row; align-items: center; gap: 6px; colo
 .cm-tools { flex-wrap: wrap; gap: 6px; margin: 4px 0 6px; }
 .cm-tools input { flex: 1 1 180px; min-width: 0; }
 #cmList label.hidden { display: none !important; }
+
+/* « Qui parle ? » : passage écouté retiré (✕) avant de répondre */
+.ask .vv-clips .clip-row > button.clip { flex: 1 1 0; min-width: 0; width: auto; }
+.ask .vv-clips .clip-row > button.cx { flex: 0 0 44px; min-height: 44px; padding: 0; border-radius: 10px; display: inline-flex;
+  align-items: center; justify-content: center; background: var(--field); border: 1px solid var(--line); color: var(--bad); }
+.ask .vv-clips .clip-row .clip-ref { display: none; }
+.ask .vv-clips .clip-row.refused .clip-ref { display: flex; }
+.ask .vv-clips .clip-row.refused > button.cx { display: none; }
+.ask .vv-clips .clip-ref button { min-height: 36px; padding: 4px 10px; }
+.ask-tip { margin: 8px 0 0; font-size: 12.5px; color: var(--mute); }

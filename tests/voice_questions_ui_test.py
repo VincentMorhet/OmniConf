@@ -59,7 +59,8 @@ def serve():
     @A.app.get("/test/state")
     async def state():
         return {"calls": calls, "answers": A.vq_load()["answers"],
-                "review": {n: e.get("review") for n, e in A.vp_load().items()}}
+                "review": {n: e.get("review") for n, e in A.vp_load().items()},
+                "clip_review": {n: e.get("clip_review") or {} for n, e in A.vp_load().items()}}
     uvicorn.run(A.app, host="127.0.0.1", port=int(os.environ.get("TEST_PORT", "8099")), log_level="warning")
 
 
@@ -93,6 +94,8 @@ async def main():
     check(api.post("/api/voice-questions/answer", json={"id": qs[0]["id"], "answer": "other", "to": "Inconnu Total"}).status_code == 400,
           "attribution à une personne non cochée : refusée")
     check(api.post("/api/voice-questions/answer", json={"id": qs[0]["id"], "answer": "peut-être"}).status_code == 400, "réponse inconnue : refusée")
+    r = api.post("/api/voice-questions/answer", json={"id": qs[0]["id"], "answer": "yes", "exclude": [20.0, 50.0, 80.0]})
+    check(r.status_code == 400 and "Non" in r.json()["detail"], "oui avec tous les passages retirés : refusé (répondre « Non »)")
     check(not st()["calls"]["named"], "rien de renommé après les refus")
     gid = f"{W}/{STEM}|confirmée"
     async with async_playwright() as p:
@@ -117,7 +120,23 @@ async def main():
                 await pg.wait_for_function("() => !document.querySelector('#askBox .clip.playing')", timeout=20000)
                 check(True, "fin de l'extrait")
                 await box.screenshot(path="voice-ask.png")
-                # oui, puis annuler
+                # passages retirés (✕) avant de répondre
+                q1 = box.locator(".ask-q").first
+                rows = q1.locator(".clip-row")
+                check(await rows.count() == 3 and await rows.nth(1).locator(".cx").is_visible(), "un ✕ par passage écouté")
+                await rows.nth(1).locator(".cx").click()
+                check(await rows.nth(1).get_attribute("class") == "clip-row refused" and await q1.locator(".a-yes").inner_text() == f"Oui, c'est {NAME} (sans 1 passage)"
+                      and "ne compteront pas dans son empreinte" in await rows.nth(1).inner_text(), "✕ : passage barré, « Oui » le précise")
+                for i in (0, 2):
+                    await rows.nth(i).locator(".cx").click()
+                check(await q1.locator(".a-yes").is_disabled() and "répondez « Non »" in await q1.locator(".ask-tip").inner_text()
+                      and not await q1.locator(".a-no").is_disabled(), "tous retirés : « Oui » grisé, « Non » proposé")
+                for i in (0, 2):
+                    await rows.nth(i).locator(".cx-undo").click()
+                check(not await q1.locator(".a-yes").is_disabled() and await rows.nth(0).get_attribute("class") == "clip-row",
+                      "« Rétablir » : passage remis")
+                await box.screenshot(path="voice-ask-excl.png")
+                # oui (sans le 2e passage), puis annuler
                 await box.locator(".a-yes").click()
                 await pg.wait_for_selector("#askBox .ask-done")
                 s = st()
@@ -125,6 +144,10 @@ async def main():
                 check((s["review"][NAME].get(gid) or {}).get("ok") is True and s["review"][NAME][gid].get("via") == "question",
                       "oui : voix confirmée validée d'avance pour l'empreinte")
                 check(s["calls"]["scheduled"][-1:] == [[NAME]], "oui : recherche des voix programmée (empreinte enrichie)")
+                cr = s["clip_review"][NAME]
+                check(list(cr) == [f"{gid}@50.0"] and cr[f"{gid}@50.0"].get("via") == "question"
+                      and s["answers"][f"{W}/{STEM}|S1"].get("excluded") == [f"{gid}@50.0"],
+                      f"passage retiré : hors de l'empreinte (et des passages qui lui ressemblent) ({list(cr)})")
                 check(await pg.locator("#askCount").inner_text() == "2" and "Vignette Erronée" in await box.inner_text()
                       and "s'appelle maintenant Personne Essai" in await box.inner_text(), "réponse rappelée (avec « Annuler »), question suivante, compteur à 2")
                 await box.screenshot(path="voice-ask-done.png")
@@ -133,6 +156,7 @@ async def main():
                 s = st()
                 check(s["calls"]["named"][-1] == ["S1", None, None] and gid not in (s["review"][NAME] or {}) and not s["answers"],
                       "annuler : nom retiré, voix retirée de l'empreinte, question reposée")
+                check(not s["clip_review"][NAME], "annuler : passage retiré rétabli")
                 # plus tard : question suivante
                 await box.locator(".a-skip").click()
                 await pg.wait_for_function("() => document.querySelector('#askBox .ask-q')?.textContent.includes('Vignette Erronée')")

@@ -1713,6 +1713,7 @@ class VoiceAnswer(BaseModel):
     id: str
     answer: str | None            # yes : c'est bien la personne proposée ; other : c'est `to` ; no ; unknown ; None : annuler
     to: str | None = None
+    exclude: list[float] = []     # passages écoutés qui ne sont pas cette personne (début, en s) : hors de son empreinte
 
 
 async def _vq_name(q: dict, name: str | None, via: str | None):
@@ -1747,8 +1748,12 @@ async def voice_question_answer(body: VoiceAnswer, u: dict = Depends(require_adm
                     and a["answer"] in ("yes", "other") and (a.get("to") or a["name"]) == who]
             vd = vp_load()
             rv = (vd.get(who) or {}).get("review") or {}
+            cr = (vd.get(who) or {}).get("clip_review") or {}
+            changed = bool([cr.pop(k) for k in prev.get("excluded") or [] if k in cr])   # passages retirés : rétablis
             if not same and (rv.get(gid) or {}).get("via") == "question":
                 rv.pop(gid)
+                changed = True
+            if changed:
                 vp_compute(vd[who])
                 vp_save(vd)
                 await voiceprints_push()
@@ -1759,23 +1764,34 @@ async def voice_question_answer(body: VoiceAnswer, u: dict = Depends(require_adm
         log.info("question %s : réponse annulée par %s", body.id, u["login"])
         return {"ok": True}
     who = q["name"] if body.answer == "yes" else body.to if body.answer == "other" else None
+    clips = [c for c in q.get("clips") or [] if any(abs(float(c["t"]) - float(t)) < 0.01 for t in body.exclude)]
+    excluded = []
     if body.answer in ("yes", "other"):
         if who not in ok:
             raise HTTPException(400, f"{who or '?'} : consentement non attesté, cette voix ne peut pas lui être attribuée")
+        if clips and len(clips) >= len(q.get("clips") or []):
+            raise HTTPException(400, "tous les passages écoutés sont retirés : répondez plutôt « Non »")
         await _vq_name(q, who, "question")
         vd = vp_load()
         e = vd.setdefault(who, {})
         e.setdefault("groups", {})
         e.setdefault("review", {})[gid] = {"ok": True, "at": now, "by": u["login"], "via": "question"}
+        cr = e.setdefault("clip_review", {})
+        for c in clips:          # ce passage, et ceux qui lui ressemblent, restent hors de l'empreinte
+            k = f"{gid}@{c['t']}"
+            cr[k] = {"gid": gid, "t": c["t"], "te": c["te"], "text": (c.get("text") or "")[:200], "at": now,
+                     "by": u["login"], "via": "question"}
+            excluded.append(k)
         vp_compute(e)
         vp_save(vd)
         vp_schedule([who], u["login"])          # la voix confirmée rejoint l'empreinte à la recherche suivante
         d = vq_load()
     d["answers"][body.id] = {"answer": body.answer, "name": q["name"], **({"to": who} if body.answer == "other" else {}),
+                             **({"excluded": excluded} if excluded else {}),
                              "label": q.get("label"), "at": now, "by": u["login"]}
     vq_save(d)
-    log.info("question %s (%s ?) : %s%s par %s", body.id, q["name"], body.answer, f" ({who})" if body.answer == "other" else "",
-             u["login"])
+    log.info("question %s (%s ?) : %s%s%s par %s", body.id, q["name"], body.answer, f" ({who})" if body.answer == "other" else "",
+             f", {len(excluded)} passage(s) retiré(s)" if excluded else "", u["login"])
     return {"ok": True, "named": who, "left": len(vq_pending(d, ok))}
 
 

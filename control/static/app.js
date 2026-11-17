@@ -1981,7 +1981,7 @@ async function loadVoices(det, name) {
   catch (e) { list.innerHTML = `<small>Erreur : ${esc(e.message)}</small>`; }
 }
 // « Est-ce X ? » : voix douteuses à confirmer, comme la reconnaissance des visages d'une photothèque
-const askState = { list: [], people: [], skip: new Set(), last: null };
+const askState = { list: [], people: [], skip: new Set(), last: null, excl: new Map() };
 const fmtSim = (x) => (x ?? 0).toLocaleString("fr-FR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 function askWhy(q) {
   if (q.alt) return `hésitation entre ${esc(q.name)} (${fmtSim(q.sim)}) et ${esc(q.alt)} (${fmtSim(q.alt_sim)})`;
@@ -1996,8 +1996,13 @@ function askH(q, pos) {
       ${pos ? `<a class="ask-open" href="#enr/${encodeURIComponent(q.worker)}/${encodeURIComponent(q.meeting + ".mp4")}">Ouvrir la réunion</a>` : ""}</div>
     <p class="ask-t">Est-ce <b>${esc(q.name)}</b> ?</p>
     <div class="vv-m">voix « ${esc(q.label)} » · ${q.n} passage${q.n > 1 ? "s" : ""}, ${fmtMin(q.sec)} · ${askWhy(q)}</div>
-    <div class="vv-clips">${(q.clips || []).map(c => `<button type="button" class="clip${c.odd ? " odd" : ""}" data-url="${esc(url(c))}"><svg class="i"><use href="#i-play"/></svg>
-      <span><b>${fmtT(c.t)}</b>${c.odd ? " · le passage le moins typique de cette voix" : ""}<br>« ${esc(c.text || "")} »</span></button>`).join("")}</div>
+    <div class="vv-clips">${(q.clips || []).map(c => `<div class="clip-row${askExcl(q).has(c.t) ? " refused" : ""}" data-t="${c.t}">
+      <button type="button" class="clip${c.odd ? " odd" : ""}" data-url="${esc(url(c))}"><svg class="i"><use href="#i-play"/></svg>
+      <span><b>${fmtT(c.t)}</b>${c.odd ? " · le passage le moins typique de cette voix" : ""}<br>« ${esc(c.text || "")} »</span></button>
+      <button type="button" class="cx" title="Ce passage n'est pas cette personne" aria-label="Ce passage n'est pas cette personne"><svg class="i"><use href="#i-x"/></svg></button>
+      <div class="clip-ref"><small>✕ pas cette personne : ce passage, et ceux qui lui ressemblent, ne compteront pas dans son empreinte</small>
+        <button type="button" class="ghost cx-undo">Rétablir</button></div></div>`).join("")}</div>
+    <p class="ask-tip">Un passage n'est pas cette personne ? Retirez-le avec ✕ avant de répondre.</p>
     <div class="vv-act">
       <button type="button" class="primary a-yes">Oui, c'est ${esc(q.name)}</button>
       ${q.alt ? `<button type="button" class="a-alt">C'est ${esc(q.alt)}</button>` : ""}
@@ -2006,12 +2011,28 @@ function askH(q, pos) {
       <button type="button" class="ghost a-unk">Je ne sais pas</button>
       ${pos ? `<button type="button" class="ghost a-skip">Plus tard</button>` : ""}</div></div>`;
 }
+// passages écoutés retirés (✕) avant de répondre, par question
+const askExcl = (q) => { if (!askState.excl.has(q.id)) askState.excl.set(q.id, new Set()); return askState.excl.get(q.id); };
+function askSync(el, q) {
+  const ex = askExcl(q), n = ex.size, all = n && n >= (q.clips || []).length;
+  el.querySelectorAll(".clip-row").forEach(r => r.classList.toggle("refused", ex.has(+r.dataset.t)));
+  const sans = n ? ` (sans ${n} passage${n > 1 ? "s" : ""})` : "";
+  $(".a-yes", el).textContent = `Oui, c'est ${q.name}${sans}`;
+  if ($(".a-alt", el)) $(".a-alt", el).textContent = `C'est ${q.alt}${sans}`;
+  el.querySelectorAll(".a-yes, .a-alt, .a-to").forEach(b => { b.disabled = !!all; });
+  $(".ask-tip", el).textContent = all ? "Tous les passages écoutés sont retirés : si aucun n'est cette personne, répondez « Non »."
+    : n ? `${n} passage${n > 1 ? "s" : ""} retiré${n > 1 ? "s" : ""} : la voix prendra quand même ce nom dans la réunion, mais ${n > 1 ? "ces passages n'iront pas" : "ce passage n'ira pas"} dans l'empreinte.`
+    : "Un passage n'est pas cette personne ? Retirez-le avec ✕ avant de répondre.";
+}
 async function askAnswer(q, answer, to, after) {
   if (vpBtn) vpAudio.pause();
   const who = answer === "yes" ? q.name : to;
+  const exclude = who ? [...askExcl(q)] : [];
   try {
-    await api("/api/voice-questions/answer", { method: "POST", json: { id: q.id, answer, to: answer === "other" ? to : null } });
+    await api("/api/voice-questions/answer", { method: "POST", json: { id: q.id, answer, to: answer === "other" ? to : null, exclude } });
+    askState.excl.delete(q.id);
     askState.last = { q, text: who ? `« ${q.label} » s'appelle maintenant ${who} dans la réunion du ${stemDate(q.meeting)} ; son empreinte s'enrichit dans une minute`
+      + (exclude.length ? ` (sans ${exclude.length} passage${exclude.length > 1 ? "s" : ""} retiré${exclude.length > 1 ? "s" : ""})` : "")
       : answer === "no" ? `Noté : « ${q.label} » n'est pas ${q.name}` : "Question écartée" };
   } catch (e) { toast(e.message); }
   after?.();
@@ -2026,6 +2047,12 @@ function wireAsk(root, list, after) {
   root.querySelectorAll(".ask-q").forEach(el => {
     const q = list.find(x => x.id === el.dataset.id); if (!q) return;
     el.querySelectorAll(".clip").forEach(b => { b.onclick = () => playClip(b, b.dataset.url); });
+    el.querySelectorAll(".clip-row").forEach(r => {
+      const t = +r.dataset.t;
+      $(".cx", r).onclick = () => { askExcl(q).add(t); askSync(el, q); };
+      $(".cx-undo", r).onclick = () => { askExcl(q).delete(t); askSync(el, q); };
+    });
+    askSync(el, q);
     $(".a-yes", el).onclick = () => askAnswer(q, "yes", null, after);
     if ($(".a-alt", el)) $(".a-alt", el).onclick = () => askAnswer(q, "other", q.alt, after);
     $(".a-no", el).onclick = () => askAnswer(q, "no", null, after);
