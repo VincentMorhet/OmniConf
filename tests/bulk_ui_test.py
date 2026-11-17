@@ -167,6 +167,17 @@ async def main():
             await pg.wait_for_selector("#recordings .ritem")
             await pg.evaluate("() => { window.__toasts = []; const o = toast; toast = (m, ms) => { window.__toasts.push(String(m)); return o(m, ms); }; }")
             if tag == "pc":
+                # --- menu « ⋯ » : entièrement visible (première et dernière réunion)
+                for i in (0, 5):
+                    await pg.locator("#recordings .ritem").nth(i).locator(".more").click()
+                    v = await pg.evaluate("""() => { const m = document.querySelector('.rmenu:not(.hidden)'); if (!m) return 'pas de menu';
+                    const r = m.getBoundingClientRect(), d = m.querySelector('.del');
+                    if (r.top < 0 || r.left < 0 || r.bottom > innerHeight + 1 || r.right > innerWidth + 1) return 'hors écran ' + JSON.stringify(r);
+                    const b = d.getBoundingClientRect(), hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+                    return hit === d || d.contains(hit) ? 'ok' : 'Supprimer caché par ' + (hit && hit.className); }""")
+                    check(v == "ok", f"ordinateur : menu ⋯ de la réunion {i} entier, « Supprimer » accessible ({v})")
+                    await pg.keyboard.press("Escape")
+                    await pg.mouse.click(5, 5)
                 # --- sélection de plusieurs réunions et partage
                 await pg.click("#selBtn")
                 n_box = await pg.locator("#recordings .ritem .pickbox").count()
@@ -240,6 +251,21 @@ async def main():
                 await pg.wait_for_function("() => document.querySelectorAll('#voiceList .consent input:checked').length === 8")
                 check(True, "liste des consentements rafraîchie (8 cochées)")
             else:
+                # --- menu « ⋯ » sur téléphone : panneau en bas de l'écran (la réunion seule de son jour était coupée)
+                await pg.locator("#recordings .ritem").first.locator(".more").click()
+                await asyncio.sleep(0.3)
+                v = await pg.evaluate("""() => { const m = document.querySelector('.rmenu:not(.hidden)'); if (!m) return 'pas de menu';
+                    const r = m.getBoundingClientRect(), d = m.querySelector('.del');
+                    if (r.top < 0 || r.left < 0 || r.bottom > innerHeight + 1 || r.right > innerWidth + 1) return 'hors écran ' + JSON.stringify(r);
+                    const b = d.getBoundingClientRect(), hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+                    return hit === d || d.contains(hit) ? 'ok' : 'Supprimer caché par ' + (hit && hit.className); }""")
+                head = await pg.evaluate("() => document.querySelector('.rmenu:not(.hidden) .rmenu-h')?.textContent")
+                check(v == "ok" and head == "Réunion d'essai 0", f"téléphone : menu ⋯ entier, avec le titre, « Supprimer » accessible ({v}, {head})")
+                await pg.screenshot(path=str(OUT / "menu-phone.png"))
+                await pg.mouse.click(195, 120)                    # à côté du panneau
+                await asyncio.sleep(0.3)
+                closed = await pg.evaluate("() => !document.querySelector('.rmenu:not(.hidden)') && !document.querySelector('.rmenu-back') && location.hash")
+                check(closed == "#rec", f"toucher à côté : menu fermé, sans ouvrir de réunion ({closed})")
                 await pg.click("#selBtn")
                 await pg.locator("#recordings .ritem", has_text="Réunion d'essai 0").click()
                 await asyncio.sleep(0.3)

@@ -1195,7 +1195,20 @@ function recItem(r, started, opts = {}) {
   if (img) { img.src = url + "/thumb" + (r.recording ? "?t=" + Date.now() : ""); img.onerror = () => img.remove(); }
   const play = (tab, video) => openRec(r, { tab, play: video });
   const menu = $(".rmenu", el);
-  $(".more", el).onclick = (e) => { e.stopPropagation(); const open = menu.classList.contains("hidden"); closeMenus(); menu.classList.toggle("hidden", !open); };
+  menu.insertAdjacentHTML("afterbegin", `<div class="rmenu-h"></div>`);
+  $(".rmenu-h", menu).textContent = title;           // titre de la réunion (panneau du téléphone)
+  $(".more", el).onclick = (e) => {
+    e.stopPropagation();
+    const open = menu.classList.contains("hidden");
+    closeMenus();
+    menu.classList.toggle("hidden", !open);
+    if (open && matchMedia("(max-width: 700px)").matches) {   // téléphone : panneau en bas de l'écran, fond assombri
+      const back = document.createElement("div");
+      back.className = "rmenu-back";
+      back.onclick = (ev) => { ev.stopPropagation(); closeMenus(); };   // toucher à côté ferme, sans ouvrir une réunion
+      document.body.appendChild(back);
+    }
+  };
   menu.addEventListener("click", (e) => { e.stopPropagation(); closeMenus(); });
   el.onclick = () => play();                                     // toute la carte : compte rendu d'abord
   if ($(".play", el)) $(".play", el).onclick = (e) => { e.stopPropagation(); play(undefined, video); };   // lecture immédiate
@@ -1274,7 +1287,10 @@ async function renameRecording(url, title) {
   try { await api(url, { method: "PATCH", json: { title: t } }); loadRecordings(); return true; } catch (e) { toast(e.message); return false; }
 }
 // Menu « ⋯ » des vignettes : un seul ouvert à la fois, fermé au moindre clic ailleurs
-function closeMenus() { document.querySelectorAll(".rmenu:not(.hidden)").forEach(m => m.classList.add("hidden")); }
+function closeMenus() {
+  document.querySelectorAll(".rmenu:not(.hidden)").forEach(m => m.classList.add("hidden"));
+  document.querySelectorAll(".rmenu-back").forEach(b => b.remove());
+}
 document.addEventListener("click", (e) => { if (!e.target.closest(".rmenu, .more")) closeMenus(); });
 async function deleteRecording(url, title) {
   if (!confirm(`Supprimer définitivement « ${title} » ?\n\nLa vidéo, la transcription et le compte rendu seront effacés. Cette action est irréversible.`)) return false;

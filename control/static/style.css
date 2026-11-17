@@ -866,3 +866,14 @@ dialog.dlg .seg label { flex-direction: row; align-items: center; gap: 6px; colo
 .ask .vv-clips .clip-row.refused > button.cx { display: none; }
 .ask .vv-clips .clip-ref button { min-height: 36px; padding: 4px 10px; }
 .ask-tip { margin: 8px 0 0; font-size: 12.5px; color: var(--mute); }
+
+/* menu « ⋯ » d'un enregistrement : titre (téléphone), panneau en bas de l'écran sur téléphone (la liste du jour
+   coupe ce qui dépasse de son cadre) */
+.rmenu .rmenu-h { display: none; }
+@media (max-width: 700px) {
+  #recordings .ritem > .rmenu { position: fixed; left: 10px; right: 10px; top: auto; bottom: calc(10px + env(safe-area-inset-bottom));
+    z-index: 60; min-width: 0; max-height: 80vh; overflow: auto; border-radius: 16px; padding: 8px; }
+  .rmenu .rmenu-h { display: block; padding: 6px 10px 10px; margin-bottom: 4px; border-bottom: 1px solid var(--line); color: var(--mute);
+    font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rmenu-back { position: fixed; inset: 0; z-index: 59; background: rgba(5, 8, 18, .45); }
+}
