@@ -131,6 +131,9 @@ class Transcriber:
         self.tasks: list[asyncio.Task] = []
         self.procs: list[asyncio.subprocess.Process] = []
         self.asr_sem = asyncio.Semaphore(3)
+        # Whisper refusé (429 trop de requêtes, 5xx, réseau) : essais espacés de 1, 2, 4… s, au plus `asr_wait_max`
+        # (en direct ≈ 15 s en tout ; après coup, offline.py est bien plus patient : quelques minutes)
+        self.asr_tries, self.asr_wait_max = int(os.environ.get("TRANSCRIPT_ASR_TRIES", "5")), 8.0
         self.fmt_lock = asyncio.Lock()
         self.diar = Diarizer()
         self.diar.canon = lambda n: lexicon.load().canonical(n)
@@ -298,8 +301,8 @@ class Transcriber:
         asyncio.create_task(self._asr(entry, pcm))
 
     async def _whisper(self, pcm: np.ndarray) -> dict:
-        async with self.asr_sem:
-            for attempt in range(3):
+        async with self.asr_sem:            # l'attente garde la place : moins de requêtes quand OVH sature
+            for attempt in range(self.asr_tries):
                 try:
                     r = await self.http.post(
                         f"{API}/audio/transcriptions",
@@ -308,10 +311,18 @@ class Transcriber:
                         files={"file": ("seg.wav", _wav(pcm), "audio/wav")})
                     r.raise_for_status()
                     return r.json()
-                except httpx.HTTPError:
-                    if attempt == 2:
-                        raise
-                    await asyncio.sleep(1 + attempt * 2)
+                except httpx.HTTPError as e:
+                    resp = getattr(e, "response", None)
+                    status = resp.status_code if resp is not None else None
+                    if attempt >= self.asr_tries - 1 or (status and 400 <= status < 500 and status not in (408, 429)):
+                        raise                   # dernier essai, ou requête refusée pour de bon
+                    wait = min(self.asr_wait_max, 2.0 ** attempt)
+                    try:                        # délai demandé par le service (« Retry-After »)
+                        wait = max(wait, min(float(resp.headers.get("retry-after", 0)), 2 * self.asr_wait_max))
+                    except (AttributeError, TypeError, ValueError):
+                        pass
+                    self.asr_stats["throttled"] = self.asr_stats.get("throttled", 0) + 1
+                    await asyncio.sleep(wait)
 
     def whisper_prompt(self) -> str:
         """« Réunion professionnelle. » + participants vus à l'écran + termes du lexique (≈ 200 jetons au plus)."""

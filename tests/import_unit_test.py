@@ -263,6 +263,10 @@ async def main():
         check(False, "déjà transcrite : refusé")
     except HTTPException as e:
         check(e.status_code == 409, "déjà transcrite : refusé")
+    j = imp.transcribe_existing(stem2, "essai", None, force=True)
+    j, seen = await wait_stage(imp, j["id"])
+    args = json.loads((TMP / "offline-args.json").read_text())
+    check(j["stage"] == "terminé" and "--force" in args, f"« Refaire la transcription » : refaite par-dessus l'ancienne ({seen})")
 
     # --- son seul (MP3) : image fixe, transcription sans lecture d'image
     p = media["mp3"]

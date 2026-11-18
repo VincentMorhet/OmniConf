@@ -970,13 +970,18 @@ async def import_cancel(name: str, jid: str, u: dict = IU):
     return r.json()
 
 
+class TranscribeAgain(BaseModel):
+    force: bool = False           # refaire une transcription existante (incomplète, par exemple)
+
+
 @app.post("/api/recordings/{name}/{file}/transcribe")
-async def recording_transcribe(name: str, file: str, u: dict = CU):
-    """Transcription après coup (puis compte rendu) d'une vidéo restée sans transcription."""
+async def recording_transcribe(name: str, file: str, body: TranscribeAgain | None = None, u: dict = CU):
+    """Transcription après coup (puis compte rendu) d'une vidéo restée sans transcription, ou refaite."""
     meta = await rec_meta(name, file, u, edit=True)
     owner = meta.get("owner") or u["login"]
     r = await wcall(name, "POST", f"/recordings/{file}/transcribe",
-                    json={"owner": owner, "me_name": USERS.names().get(owner) or u.get("name")})
+                    json={"owner": owner, "me_name": USERS.names().get(owner) or u.get("name"),
+                          "force": bool(body and body.force)})
     _rec_cache.pop(name, None)
     log.info("transcription après coup de %s/%s demandée par %s", name, file, u["login"])
     return r.json()

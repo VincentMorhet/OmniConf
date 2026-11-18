@@ -463,6 +463,7 @@ async def main():
 
     tr = Offline(str(REC))
     tr.reset()
+    tr.asr_tries, tr.asr_wait_max = 10, 60.0      # après coup : quelques minutes de patience par passage
     tr.diar.bot_names = set()
     tr.active = True
     tr.base, tr.t0 = base, t0
@@ -540,6 +541,10 @@ async def main():
     await tr.http.aclose()
     await tr.llm.close()
     finalize(base)
+    if tr.errors and (tr.errors >= max(3, 0.02 * len(tr.raw)) or not tr.paragraphs):
+        log.error("transcription incomplète : %d passage(s) sur %d refusés par le service de transcription "
+                  "(réessayer plus tard)", tr.errors, len(tr.raw))
+        sys.exit(3)
 
 
 async def _ffmpeg_probe(mp4: Path):

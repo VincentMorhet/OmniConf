@@ -262,11 +262,12 @@ class Importer:
         self._enqueue(j)
         return j
 
-    def transcribe_existing(self, stem: str, owner: str | None, me_name: str | None) -> dict:
+    def transcribe_existing(self, stem: str, owner: str | None, me_name: str | None, force: bool = False) -> dict:
+        """Transcription après coup d'une vidéo ; `force` : la refaire (transcription incomplète, par exemple)."""
         mp4 = self.rec / (stem + ".mp4")
         if not mp4.exists():
             raise HTTPException(404, "vidéo introuvable")
-        if (self.rec / (stem + ".transcript.json")).exists():
+        if (self.rec / (stem + ".transcript.json")).exists() and not force:
             raise HTTPException(409, "cette réunion a déjà une transcription")
         if self.for_stem(stem):
             raise HTTPException(409, "transcription déjà demandée")
@@ -280,7 +281,7 @@ class Importer:
              "size": mp4.stat().st_size, "received": None, "title": meta.get("title"), "started_at": meta.get("started_at"),
              "platform": meta.get("platform"), "transcribe": True, "stage": "attente", "step": "en attente",
              "pct": None, "error": None, "note": None, "stem": stem, "audio_only": bool(meta.get("audio_only")),
-             "created": time.time()}
+             "created": time.time(), "tr_started": bool(force)}           # refaite : offline.py --force
         self.jobs[j["id"]] = j
         self._save(j)
         self._enqueue(j)
@@ -581,6 +582,7 @@ class ImportReq(BaseModel):
 class TranscribeReq(BaseModel):
     owner: str | None = None
     me_name: str | None = None
+    force: bool = False
 
 
 def router(imp: Importer, deps: list) -> APIRouter:
@@ -626,6 +628,6 @@ def router(imp: Importer, deps: list) -> APIRouter:
     @r.post("/recordings/{name}/transcribe")
     async def transcribe(name: str, req: TranscribeReq):
         stem = os.path.basename(name).removesuffix(".mp4")
-        return imp.public(imp.transcribe_existing(stem, req.owner, req.me_name))
+        return imp.public(imp.transcribe_existing(stem, req.owner, req.me_name, req.force))
 
     return r

@@ -1185,6 +1185,7 @@ function recItem(r, started, opts = {}) {
       ${r.final_cr ? `<a href="${url}/final?fmt=md" target="_blank" rel="noopener">Compte rendu final (Markdown)</a>
         <a href="${url}/final?fmt=pdf" target="_blank" rel="noopener">Compte rendu final (PDF, s'il a été joint)</a>` : ""}
       ${video && !r.transcript && !r.recording && !ij && r.can_edit !== false ? `<button class="trn">Transcrire et faire le compte rendu</button>` : ""}
+      ${video && r.transcript && !r.recording && !ij && r.can_edit !== false && r.kind !== "transcript" ? `<button class="retrn">Refaire la transcription</button>` : ""}
       ${r.can_edit === false ? "" : `<button class="share">Partager avec…</button>
       <button class="ren">Renommer</button>
       <button class="del bad" ${r.recording ? "disabled title=\"Enregistrement en cours\"" : ""}>Supprimer</button>`}
@@ -1214,6 +1215,7 @@ function recItem(r, started, opts = {}) {
   if ($(".play", el)) $(".play", el).onclick = (e) => { e.stopPropagation(); play(undefined, video); };   // lecture immédiate
   if ($(".share", el)) $(".share", el).onclick = () => shareRecording(r, title);
   if ($(".trn", el)) $(".trn", el).onclick = () => transcribeRecording(r, title);
+  if ($(".retrn", el)) $(".retrn", el).onclick = () => transcribeRecording(r, title, true);
   if ($(".ren", el)) $(".ren", el).onclick = () => renameRecording(url, r.meta?.title || r.name);
   if ($(".del", el)) $(".del", el).onclick = () => deleteRecording(url, title);
   if (opts.short) el.querySelectorAll(".more, .rmenu").forEach(x => x.remove());
@@ -1521,9 +1523,11 @@ function renderImports() {
     if ($(".i-resume", el)) $(".i-resume", el).onclick = () => $("#importFile").click();
   });
 }
-async function transcribeRecording(r, title) {
-  if (!(await askConfirm("Transcrire après coup ?", `« ${title} » : le son est transcrit (voix reconnues, noms lus à l'image), puis le compte rendu est rédigé. Comptez environ la moitié de la durée de la réunion ; vous pouvez fermer la page.`, "Transcrire"))) return;
-  try { await api(recUrl(r) + "/transcribe", { method: "POST" }); toast("Transcription demandée : l'avancement s'affiche sur la carte", 4000); }
+async function transcribeRecording(r, title, again = false) {
+  if (!(await askConfirm(again ? "Refaire la transcription ?" : "Transcrire après coup ?", again
+    ? `« ${title} » : la transcription est refaite à partir de la vidéo (utile si elle est incomplète), puis le compte rendu est rédigé de nouveau. Les noms donnés à la main dans cette réunion sont à redonner. Comptez environ la moitié de la durée de la réunion.`
+    : `« ${title} » : le son est transcrit (voix reconnues, noms lus à l'image), puis le compte rendu est rédigé. Comptez environ la moitié de la durée de la réunion ; vous pouvez fermer la page.`, again ? "Refaire" : "Transcrire"))) return;
+  try { await api(recUrl(r) + "/transcribe", { method: "POST", json: { force: again } }); toast("Transcription demandée : l'avancement s'affiche sur la carte", 4000); }
   catch (e) { toast(e.message, 5000); }
   loadRecordings();
 }
