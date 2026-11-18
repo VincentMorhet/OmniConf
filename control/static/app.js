@@ -2099,14 +2099,16 @@ const askDone = (meeting) => askState.last && (!meeting || askState.last.q.meeti
   ? `<div class="ask-done"><small>✓ ${esc(askState.last.text)}</small><button type="button" class="ghost a-undo">Annuler</button></div>` : "";
 async function loadAsk() {
   if (!me?.admin) return $("#askSec").classList.add("hidden");
-  try { const d = await api("/api/voice-questions"); askState.list = d.questions; askState.people = d.people; } catch { return; }
+  try { const d = await api("/api/voice-questions"); askState.list = d.questions; askState.people = d.people; askState.auto = d.recognized; } catch { return; }
   renderAsk();
 }
 function renderAsk() {
   const L = [...askState.list].sort((a, b) => askState.skip.has(a.id) - askState.skip.has(b.id)), box = $("#askBox");
   $("#askSec").classList.toggle("hidden", !L.length && !askState.last);
   $("#askCount").textContent = L.length; $("#askCount").classList.toggle("hidden", !L.length);
-  box.innerHTML = askDone() + (L.length ? askH(L[0], `${L.length} question${L.length > 1 ? "s" : ""}`) : "<small>Plus aucune question pour l'instant.</small>");
+  const au = askState.auto;
+  box.innerHTML = askDone() + (au?.n ? `<p class="ask-auto">✓ Ces 7 derniers jours, ${au.n} voix reconnue${au.n > 1 ? "s" : ""} d'office grâce aux empreintes (${au.people} personne${au.people > 1 ? "s" : ""}, ${au.meetings} réunion${au.meetings > 1 ? "s" : ""}) : plus besoin de les confirmer.</p>` : "")
+    + (L.length ? askH(L[0], `${L.length} question${L.length > 1 ? "s" : ""}`) : "<small>Plus aucune question pour l'instant.</small>");
   wireAsk(box, L, loadAsk);
 }
 // page d'une réunion : ses voix à confirmer

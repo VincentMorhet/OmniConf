@@ -1258,12 +1258,13 @@ def vp_forget(name: str) -> bool:
 # réponse « oui » (ou « c'est Y ») nomme la voix dans la réunion et l'ajoute, validée, à l'empreinte de la personne.
 def vq_load() -> dict:
     """{"items": {"<assistant>/<réunion>|<voix>": {worker, meeting, title, sid, label, name, sim, sure, alt?, alt_sim?,
-    n, sec, clips, found_at}}, "answers": {même clé: {answer: yes|no|other|unknown, name, to?, at, by}}}."""
+    n, sec, clips, found_at}}, "answers": {même clé: {answer: yes|no|other|unknown, name, to?, at, by}},
+    "recognized": [voix nommées d'office dans d'anciennes réunions : {worker, meeting, sid, name, sim, before, at}]}."""
     try:
         d = json.loads(VOICE_Q_FILE.read_text())
     except (FileNotFoundError, ValueError):
         d = {}
-    return {"items": d.get("items") or {}, "answers": d.get("answers") or {}}
+    return {"items": d.get("items") or {}, "answers": d.get("answers") or {}, "recognized": d.get("recognized") or []}
 
 
 def vq_save(d: dict):
@@ -1407,6 +1408,17 @@ def _vp_people(e: dict) -> str:
     return txt + (f" ; empreinte : {round((s['sec'] or 0) / 60, 1)} min de voix validée" if e.get("v") else " ; aucune voix validée")
 
 
+def vq_vetoes(w: str) -> dict[str, dict[str, list[str]]]:
+    """Voix pour lesquelles une personne a été refusée à l'écoute (« Non », « Je ne sais pas ») : jamais reconnues
+    d'office sous ce nom. {réunion: {voix: [noms]}} pour l'assistant `w`."""
+    out: dict[str, dict[str, list[str]]] = {}
+    for qid, a in vq_load()["answers"].items():
+        if a.get("answer") in ("no", "unknown") and qid.startswith(w + "/") and "|" in qid:
+            stem, sid = qid.split("/", 1)[1].rsplit("|", 1)
+            out.setdefault(stem, {}).setdefault(sid, []).append(a.get("name"))
+    return out
+
+
 async def voiceprints_build(names: list[str], by: str):
     """Demande à chaque assistant libre les voix candidates, les enregistre (validations conservées), recalcule
     l'empreinte à partir des voix validées et la diffuse."""
@@ -1424,7 +1436,8 @@ async def voiceprints_build(names: list[str], by: str):
         try:
             r = await http.post(wurl(n) + "/voiceprints/extract", timeout=15,
                                 json={"names": names, "owners": owners, "exclude": exclude, "refs": refs,
-                                      "negatives": negatives, "questions": True})
+                                      "negatives": negatives, "questions": True, "recognize": True,
+                                      "vetoes": vq_vetoes(n)})
             if r.status_code >= 400:
                 job["workers"][n] = "occupé (réunion en cours)" if r.status_code == 409 else f"erreur {r.status_code}"
                 return n, None, None
@@ -1434,6 +1447,8 @@ async def voiceprints_build(names: list[str], by: str):
                 g = (await http.get(wurl(n) + "/voiceprints/extract", timeout=15)).json()
                 if g.get("state") == "done":
                     job["workers"][n] = "terminé"
+                    if isinstance(g.get("recognized"), dict) and g["recognized"]:
+                        recognized[n] = g["recognized"]
                     return n, g.get("result") or {}, g.get("questions") if isinstance(g.get("questions"), dict) else None
                 if g.get("state") in ("error", "fetched", None):
                     job["workers"][n] = f"erreur : {g.get('error') or g.get('state')}"
@@ -1442,10 +1457,21 @@ async def voiceprints_build(names: list[str], by: str):
         except Exception as e:
             job["workers"][n] = f"injoignable ({str(e)[:60]})"
         return n, None, None
+    recognized: dict[str, dict] = {}
     got = await asyncio.gather(*(one(n) for n in WORKERS))
     results = {n: res for n, res, _ in got}
     ok = set(vp_consented())          # consentement retiré pendant le calcul : rien n'est gardé
     vq_store({n: q for n, _, q in got}, ok)
+    if recognized:                    # voix nommées d'office dans d'anciennes réunions : notées, montrées sur l'accueil
+        dq = vq_load()
+        items = [{"worker": w, "meeting": stem, **a, "at": dt.datetime.now().astimezone().isoformat(timespec="seconds")}
+                 for w, per in recognized.items() for stem, L in per.items() for a in L]
+        dq["recognized"] = (items + (dq.get("recognized") or []))[:500]
+        vq_save(dq)
+        for w in recognized:
+            _rec_cache.pop(w, None)
+        job["recognized"] = len(items)
+        log.info("recherche des voix : %d voix reconnues d'office dans d'anciennes réunions", len(items))
     job["questions"] = len(vq_pending(vq_load(), ok))
     d = vp_load()                     # validations faites pendant la recherche : conservées
     now = dt.datetime.now().astimezone().isoformat(timespec="seconds")
@@ -1702,7 +1728,11 @@ async def voice_questions(worker: str | None = None, meeting: str | None = None,
     busy = {(w, _stem(x["name"])) for w, L in zip(WORKERS, await asyncio.gather(*(worker_recordings(w) for w in WORKERS)))
             for x in L if x.get("import_job")}
     qs = [q for q in qs if (q["worker"], q["meeting"]) not in busy]
+    since = (dt.datetime.now().astimezone() - dt.timedelta(days=7)).isoformat(timespec="seconds")
+    recent = [r for r in d.get("recognized") or [] if r.get("at", "") >= since and r.get("name") in ok]
     return {"questions": qs, "people": sorted(ok), "answered": len(d["answers"]),
+            "recognized": {"n": len(recent), "people": len({r["name"] for r in recent}),
+                           "meetings": len({(r["worker"], r["meeting"]) for r in recent})},
             "searching": (vp_state["job"] or {}).get("state") == "running"}
 
 

@@ -189,7 +189,8 @@ def _title(rec_dir: Path, stem: str, meta: dict) -> str | None:
 
 def extract(rec_dir: Path, names: list[str], owners: dict[str, str] | None = None,
             exclude: dict[str, list[str]] | None = None, refs: dict[str, list[float]] | None = None,
-            negatives: dict[str, list] | None = None, asks: dict | None = None) -> dict:
+            negatives: dict[str, list] | None = None, asks: dict | None = None, recognize: dict | None = None,
+            skip: set | None = None, vetoes: dict | None = None) -> dict:
     """Voix candidates de chaque personne sur les enregistrements de l'assistant, une par réunion et par origine
     (le contrôle les fait valider, puis fait la moyenne des voix validées) :
     {nom: {"<réunion>|<origine>": {"meeting", "title", "kind", "label", "sum": [...], "n", "sec", "dropped",
@@ -197,7 +198,10 @@ def extract(rec_dir: Path, names: list[str], owners: dict[str, str] | None = Non
     `exclude` : {nom: [voix refusées]} (écartées de la référence) ; `refs` : {nom: empreinte validée} ;
     `negatives` : {nom: [[réunion, début]]} extraits refusés à l'écoute : ces phrases, et toutes celles qui leur
     ressemblent plus qu'à la personne, sont retirées de ses voix.
-    `asks` (facultatif) : rempli des questions à poser, {réunion: {"title", "questions": [...]}} (voir `ask`)."""
+    `asks` (facultatif) : rempli des questions à poser, {réunion: {"title", "questions": [...]}} (voir `ask`).
+    `recognize` (facultatif, avec `asks`) : les voix reconnues avec certitude sont nommées d'office dans leur réunion
+    (voir `recognize_sure`) et notées ici {réunion: [...]} ; `skip` : réunions à ne pas toucher (en cours de
+    transcription) ; `vetoes` : {réunion: {voix: [noms refusés à l'écoute]}}."""
     import reid
     targets = {key(n): n for n in names if key(n)}
     owners, exclude, refs, negatives = owners or {}, exclude or {}, refs or {}, negatives or {}
@@ -230,6 +234,12 @@ def extract(rec_dir: Path, names: list[str], owners: dict[str, str] | None = Non
         if prints:
             live.add((stem, mt))
             qs = ask(stem, mt, doc, prints, get_pcm)
+            if recognize is not None and stem not in (skip or ()):
+                auto, qs = recognize_sure(doc, qs, (vetoes or {}).get(stem) or {})
+                if auto:
+                    import transcriber as T
+                    T.save_doc(rec_dir / stem, doc)
+                    recognize[stem] = auto
             if qs:
                 asks[stem] = {"title": _title(rec_dir, stem, meta), "questions": qs}
         if not todo:
@@ -290,6 +300,36 @@ def extract(rec_dir: Path, names: list[str], owners: dict[str, str] | None = Non
         if res:
             out[who] = res
     return out
+
+
+def recognize_sure(doc: dict, qs: list[dict], veto: dict | None = None) -> tuple[list[dict], list[dict]]:
+    """Reconnaissance d'office, comme en fin de réunion, avec les empreintes du jour : une voix inconnue
+    (« Intervenant N ») qui ressemble avec certitude à une personne (≥ MATCH, avance ≥ MARGIN) prend son nom (source
+    « voiceprint »). Jamais : une voix nommée (à la main, par « Qui parle ? », à l'écran), une personne déjà nommée ou
+    reconnue dans la réunion, une personne refusée pour cette voix (« Non », « Je ne sais pas »). Une seule voix par
+    personne et par réunion (la plus ressemblante). Renvoie (voix reconnues, questions restantes) ; `doc` modifié."""
+    from transcriber import rename_in_doc
+    sp, veto = doc.get("speakers") or {}, veto or {}
+    known = {key(v.get("name") or v.get("auto") or "") for k, v in sp.items()
+             if k != "ME" and (v.get("name") or v.get("source") in ("voiceprint", "ui"))}
+    best: dict[str, dict] = {}
+    for q in qs:
+        s = sp.get(q.get("sid")) or {}
+        k = key(q.get("name"))
+        if (not q.get("sure") or s.get("name") or s.get("source") != "voice" or not k or k in known
+                or q["name"] in (veto.get(q["sid"]) or ())):
+            continue
+        if k not in best or q["sim"] > best[k]["sim"]:
+            best[k] = q
+    auto = []
+    for q in best.values():
+        s = sp[q["sid"]]
+        before = s.get("label")
+        s.update(auto=q["name"], print_sim=q["sim"])
+        rename_in_doc(doc, q["sid"], None)            # libellés et sources recalculés (« voiceprint »)
+        auto.append({"sid": q["sid"], "name": q["name"], "sim": q["sim"], "before": before})
+    done = {a["sid"] for a in auto}
+    return auto, [q for q in qs if q.get("sid") not in done]
 
 
 def embed_segments(media: Path, segs: list[tuple[float, float]]) -> list[list[float] | None]:

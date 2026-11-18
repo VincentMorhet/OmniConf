@@ -177,6 +177,8 @@ class ExtractReq(BaseModel):
     refs: dict[str, list[float]] = {}       # empreintes validées (référence pour écarter les phrases parasites)
     negatives: dict[str, list] = {}         # extraits refusés à l'écoute : [[réunion, début]] par personne
     questions: bool = False                 # aussi les voix douteuses à faire confirmer (« Est-ce X ? »)
+    recognize: bool = False                 # et nommer d'office les voix reconnues avec certitude (anciennes réunions)
+    vetoes: dict[str, dict[str, list[str]]] = {}   # {réunion: {voix: [noms refusés à l'écoute]}}
 
 
 @app.get("/voiceprints", dependencies=[Depends(auth)])
@@ -195,19 +197,23 @@ async def voiceprints_put(body: PrintsBody):
     return {"version": v, "people": sorted(voiceprints.load())}
 
 
-def _extract_low_priority(names, owners, exclude, refs, negatives, asks):
+def _extract_low_priority(names, owners, exclude, refs, negatives, asks, rec=None, vetoes=None):
     try:   # priorité basse (fil de calcul seul) : une réunion qui démarre sur l'assistant reste prioritaire
         os.setpriority(os.PRIO_PROCESS, __import__("threading").get_native_id(), 15)
     except OSError:
         pass
-    return voiceprints.extract(recorder.dir, names, owners, exclude, refs, negatives, asks)
+    skip = set(importer.busy_stems()) | ({transcriber.base.name} if transcriber.active and transcriber.base else set())
+    return voiceprints.extract(recorder.dir, names, owners, exclude, refs, negatives, asks, rec, skip, vetoes)
 
 
-async def _vp_extract(names, owners, exclude, refs, negatives, questions):
+async def _vp_extract(names, owners, exclude, refs, negatives, questions, recognize=False, vetoes=None):
     asks = {} if questions else None
+    rec = {} if questions and recognize else None
     try:
-        res = await asyncio.to_thread(_extract_low_priority, names, owners, exclude, refs, negatives, asks)
-        vp_job.update(result=res, questions=asks, state="done")
+        res = await asyncio.to_thread(_extract_low_priority, names, owners, exclude, refs, negatives, asks, rec, vetoes)
+        vp_job.update(result=res, questions=asks, recognized=rec, state="done")
+        if rec:
+            log.info("voix reconnues d'office : %s", {s: [a["name"] for a in L] for s, L in rec.items()})
     except Exception as e:
         log.warning("empreintes : %s", e)
         vp_job.update(state="error", error=str(e)[:300])
@@ -225,7 +231,8 @@ async def voiceprints_extract(req: ExtractReq):
     names = [n for n in req.names if n.strip()][:200]
     vp_job.clear()
     vp_job.update(state="running", started=time.time(), names=names)
-    asyncio.create_task(_vp_extract(names, req.owners, req.exclude, req.refs, req.negatives, req.questions))
+    asyncio.create_task(_vp_extract(names, req.owners, req.exclude, req.refs, req.negatives, req.questions,
+                                    req.recognize, req.vetoes))
     return {"state": "running"}
 
 
@@ -253,6 +260,7 @@ async def voiceprints_extract_get():
     if vp_job.get("state") == "done":
         out["result"] = vp_job.pop("result", None)
         out["questions"] = vp_job.pop("questions", None)
+        out["recognized"] = vp_job.pop("recognized", None)
         vp_job["state"] = "fetched"
     return out
 

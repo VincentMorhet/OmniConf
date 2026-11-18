@@ -39,7 +39,10 @@ def serve():
              f"{w}/{stem}|S3": q("S3", "Intervenant 3 (sans vignette)", OTHER, 0.86, 220.0),
              f"{w}/{stem}|S4": q("S4", "Intervenant 4", "Inconnu Total", 0.95, 320.0),       # personne non cochée
              f"{w}/{stem}|S5": q("S5", "Intervenant 5", OTHER, 0.95, 420.0)}     # réunion retranscrite depuis : voix disparue
-    (data / "voice_questions.json").write_text(json.dumps({"items": items, "answers": {}}))
+    import datetime as _dt
+    rec = [{"worker": w, "meeting": stem, "sid": "S9", "name": NAME, "sim": 0.9, "before": "Intervenant 9",
+            "at": _dt.datetime.now().astimezone().isoformat(timespec="seconds")}]      # reconnue d'office cette nuit
+    (data / "voice_questions.json").write_text(json.dumps({"items": items, "answers": {}, "recognized": rec}))
     os.environ.update(ADMIN_LOGIN="essai", ADMIN_NAME="Compte Essai", COOKIE_SECURE="0", SECRET_KEY=os.urandom(16).hex())
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "control"))
     os.chdir(Path(__file__).resolve().parent.parent / "control")
@@ -63,6 +66,10 @@ def serve():
         calls["embeds"].append([c["t"] for c in clips])
         return [[round(1 / 192 ** 0.5, 6)] * 192 for _ in clips]
     A.vq_embed = fake_embed
+
+    @A.app.get("/test/vetoes")
+    async def vetoes():
+        return A.vq_vetoes(w)
 
     @A.app.get("/test/state")
     async def state():
@@ -128,6 +135,8 @@ async def main():
             box = pg.locator("#askBox")
             if w == 1280:
                 check(await pg.locator("#askCount").inner_text() == "3", "accueil : « Qui parle ? » avec 3 questions")
+                check("1 voix reconnue d'office" in await pg.locator("#askBox .ask-auto").inner_text(),
+                      "voix reconnues d'office (anciennes réunions) annoncées")
                 check("Est-ce Personne Essai ?" in await box.inner_text() and "Intervenant 1" in await box.inner_text(),
                       "la plus douteuse d'abord : « Est-ce Personne Essai ? »")
                 await box.locator(".clip").first.click()
@@ -193,6 +202,8 @@ async def main():
                 s = st()
                 check(s["answers"].get(f"{W}/{STEM}|S2", {}).get("answer") == "no" and s["calls"]["named"][-1] == ["S1", None, None],
                       "non : réponse notée, rien de renommé")
+                vt = api.get("/test/vetoes").json()
+                check(vt == {STEM: {"S2": [NAME]}}, f"non : jamais reconnue d'office sous ce nom ({vt})")
                 check("Intervenant 3" in await box.inner_text(), "la question mise de côté revient après les autres")
                 await box.locator(".a-to").select_option(NAME)
                 await pg.wait_for_function("() => document.querySelector('#askCount').textContent === '1'")

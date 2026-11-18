@@ -877,3 +877,6 @@ dialog.dlg .seg label { flex-direction: row; align-items: center; gap: 6px; colo
     font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .rmenu-back { position: fixed; inset: 0; z-index: 59; background: rgba(5, 8, 18, .45); }
 }
+
+.ask-auto { margin: 0 0 12px; padding: 8px 10px; border-radius: 10px; font-size: 13px; color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 10%, transparent); border: 1px solid color-mix(in srgb, var(--ok) 25%, transparent); }
