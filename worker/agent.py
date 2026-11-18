@@ -810,6 +810,7 @@ class SpeakerReq(BaseModel):
     id: str
     name: str | None = None
     via: str | None = None       # « question » : nom donné en répondant à « Est-ce X ? » (voix confirmée)
+    expect: list[float] | None = None   # passages écoutés (début, s) qui doivent appartenir à cette voix
 
 
 @app.post("/transcript/speakers", dependencies=[Depends(auth)])
@@ -828,6 +829,12 @@ async def recording_rename_speaker(name: str, req: SpeakerReq):
     if not p:
         raise HTTPException(404, "pas de transcription")
     doc = json.loads(p.read_text())
+    if req.expect and req.name:
+        # question calculée avant une nouvelle transcription : le même numéro peut désigner une autre voix
+        raw = [r for r in doc.get("raw") or [] if r.get("spk") == req.id]
+        hit = sum(any(r["t"] - 0.5 <= t <= (r.get("te") or r["t"]) + 0.5 for r in raw) for t in req.expect)
+        if hit * 2 < len(req.expect):
+            raise HTTPException(409, "voix changée depuis la question (transcription refaite)")
     if not rename_in_doc(doc, req.id, req.name, req.via):
         raise HTTPException(404, "intervenant inconnu")
     if (transcriber.base and recorder.stem(name) == transcriber.base.name and req.id in transcriber.diar.spk

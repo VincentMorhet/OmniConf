@@ -1698,6 +1698,10 @@ async def voice_questions(worker: str | None = None, meeting: str | None = None,
     """Voix douteuses à confirmer (toutes, ou celles d'une réunion), les plus ressemblantes d'abord."""
     d, ok = vq_load(), set(vp_consented())
     qs = [q for q in vq_pending(d, ok) if (not worker or q["worker"] == worker) and (not meeting or q["meeting"] == meeting)]
+    # réunion en cours de (re)transcription : ses voix changent, ses questions attendent la recherche suivante
+    busy = {(w, _stem(x["name"])) for w, L in zip(WORKERS, await asyncio.gather(*(worker_recordings(w) for w in WORKERS)))
+            for x in L if x.get("import_job")}
+    qs = [q for q in qs if (q["worker"], q["meeting"]) not in busy]
     return {"questions": qs, "people": sorted(ok), "answered": len(d["answers"]),
             "searching": (vp_state["job"] or {}).get("state") == "running"}
 
@@ -1732,8 +1736,38 @@ async def vq_embed(q: dict, clips: list[dict]) -> list:
 async def _vq_name(q: dict, name: str | None, via: str | None):
     """Nomme (ou dénomme) la voix dans la transcription de la réunion, sur l'assistant."""
     await wcall(q["worker"], "PATCH", f"/recordings/{quote(q['meeting'] + '.mp4')}/speakers", timeout=15,
-                json={"id": q["sid"], "name": name, "via": via})
+                json={"id": q["sid"], "name": name, "via": via,
+                      **({"expect": [c["t"] for c in q.get("clips") or []]} if name else {})})
     _rec_cache.pop(q["worker"], None)
+
+
+async def _vq_stale(qid: str, q: dict, attrs: list, vecs: list, now: str, u: dict, ok: set) -> dict:
+    n = 0
+    if attrs:
+        vd = vp_load()
+        for (c, to), v in zip(attrs, vecs):
+            tid = f"{q['worker']}/{q['meeting']}|question@{c['t']}"
+            dur = round(min(float(c["te"]) - float(c["t"]), 12.0), 1)
+            e2 = vd.setdefault(to, {})
+            e2.setdefault("groups", {})[tid] = {
+                "worker": q["worker"], "meeting": q["meeting"], "title": q.get("title"), "label": q.get("label"),
+                "kind": "confirmée", "manual": True, "from": q["name"], "sum": v, "n": 1, "sec": dur, "dropped": 0,
+                "clips": [{"t": c["t"], "te": c["te"], "text": (c.get("text") or "")[:200], "v": v, "d": dur}],
+                "found_at": now}
+            e2.setdefault("review", {})[tid] = {"ok": True, "at": now, "by": u["login"], "via": "question"}
+            vp_compute(e2)
+            n += 1
+        vp_save(vd)
+        await voiceprints_push()
+    d = vq_load()
+    d["items"].pop(qid, None)
+    vq_save(d)
+    vp_schedule(sorted(ok), u["login"], delay=60)       # questions recalculées sur la nouvelle transcription
+    log.info("question %s : réunion retranscrite entre-temps, question retirée (%d passage(s) attribué(s))", qid, n)
+    return {"ok": True, "stale": True, "attributed": n,
+            "message": "Cette réunion a été retranscrite depuis : la voix n'est plus la même, rien n'a été nommé. La "
+                       "question est retirée et sera reposée après la prochaine recherche des voix (quelques minutes)"
+                       + (f". Les {n} passage(s) attribué(s) sont bien enregistrés." if n else ".")}
 
 
 @app.post("/api/voice-questions/answer")
@@ -1814,7 +1848,15 @@ async def voice_question_answer(body: VoiceAnswer, u: dict = Depends(require_adm
             raise HTTPException(400, f"{who or '?'} : consentement non attesté, cette voix ne peut pas lui être attribuée")
         if clips and len(clips) >= len(q.get("clips") or []):
             raise HTTPException(400, "tous les passages écoutés sont retirés : répondez plutôt « Non »")
-        await _vq_name(q, who, "question")
+        try:
+            await _vq_name(q, who, "question")
+        except HTTPException as e:
+            if e.status_code not in (404, 409):
+                raise
+            # réunion retranscrite depuis le calcul de la question : cette voix n'existe plus, ou ce numéro désigne une
+            # autre voix (les passages écoutés n'en sont pas). Les passages attribués
+            # (repérés à l'heure près dans la vidéo) restent valables ; la question est retirée, puis recalculée.
+            return await _vq_stale(body.id, q, attrs, vecs, now, u, ok)
         vd = vp_load()
         e = vd.setdefault(who, {})
         e.setdefault("groups", {})

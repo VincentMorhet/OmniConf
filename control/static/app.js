@@ -2058,8 +2058,9 @@ async function askAnswer(q, answer, to, after) {
   const exclude = who ? [...askExcl(q)] : [];
   const attribute = [...askAttr(q)].map(([t, n]) => ({ t, to: n }));
   try {
-    await api("/api/voice-questions/answer", { method: "POST", json: { id: q.id, answer, to: answer === "other" ? to : null, exclude, attribute } });
+    const res = await api("/api/voice-questions/answer", { method: "POST", json: { id: q.id, answer, to: answer === "other" ? to : null, exclude, attribute } });
     askState.excl.delete(q.id); askState.attr.delete(q.id);
+    if (res?.stale) { askState.last = null; toast(res.message, 8000); after?.(); return; }
     askState.last = { q, text: who ? `« ${q.label} » s'appelle maintenant ${who} dans la réunion du ${stemDate(q.meeting)} ; son empreinte s'enrichit dans une minute`
       + (exclude.length ? ` (sans ${exclude.length} passage${exclude.length > 1 ? "s" : ""} retiré${exclude.length > 1 ? "s" : ""})` : "")
       + (attribute.length ? ` ; ${attribute.length} passage${attribute.length > 1 ? "s" : ""} attribué${attribute.length > 1 ? "s" : ""} à ${[...new Set(attribute.map(a => a.to))].join(", ")}` : "")

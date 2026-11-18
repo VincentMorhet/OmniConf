@@ -37,7 +37,8 @@ def serve():
     items = {f"{w}/{stem}|S1": q("S1", "Intervenant 1", NAME, 0.72, 20.0),
              f"{w}/{stem}|S2": q("S2", "Vignette Erronée (2)", NAME, 0.78, 120.0, alt=OTHER, alt_sim=0.74),
              f"{w}/{stem}|S3": q("S3", "Intervenant 3 (sans vignette)", OTHER, 0.86, 220.0),
-             f"{w}/{stem}|S4": q("S4", "Intervenant 4", "Inconnu Total", 0.95, 320.0)}       # personne non cochée
+             f"{w}/{stem}|S4": q("S4", "Intervenant 4", "Inconnu Total", 0.95, 320.0),       # personne non cochée
+             f"{w}/{stem}|S5": q("S5", "Intervenant 5", OTHER, 0.95, 420.0)}     # réunion retranscrite depuis : voix disparue
     (data / "voice_questions.json").write_text(json.dumps({"items": items, "answers": {}}))
     os.environ.update(ADMIN_LOGIN="essai", ADMIN_NAME="Compte Essai", COOKIE_SECURE="0", SECRET_KEY=os.urandom(16).hex())
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "control"))
@@ -50,6 +51,8 @@ def serve():
         return {w: "essai : non diffusé"}
 
     async def fake_name(qq, name, via):       # pas de renommage sur l'assistant : appel noté
+        if qq["sid"] == "S5":                 # transcription refaite : cette voix n'existe plus sur l'assistant
+            raise A.HTTPException(404, "intervenant inconnu")
         calls["named"].append([qq["sid"], name, via])
     A.voiceprints_push = no_push
     A.vp_start_build = lambda names, by: {"state": "done", "names": [], "workers": {}, "people": {}}   # aucune recherche
@@ -89,7 +92,14 @@ async def main():
     st = lambda: api.get("/test/state").json()
     d = api.get("/api/voice-questions").json()
     qs = d["questions"]
-    check([q["sid"] for q in qs] == ["S1", "S2", "S3"], f"3 questions, les plus douteuses d'abord ; personne non cochée écartée ({[q['sid'] for q in qs]})")
+    check([q["sid"] for q in qs] == ["S1", "S2", "S3", "S5"], f"4 questions, les plus douteuses d'abord ; personne non cochée écartée ({[q['sid'] for q in qs]})")
+    r = api.post("/api/voice-questions/answer", json={"id": f"{W}/{STEM}|S5", "answer": "yes", "attribute": [{"t": 450.0, "to": NAME}]})
+    d5, s5 = r.json(), st()
+    check(r.status_code == 200 and d5.get("stale") and "retranscrite" in d5.get("message", "") and d5.get("attributed") == 1,
+          f"voix disparue (réunion retranscrite) : message clair, pas d'erreur ({r.status_code} {str(d5)[:120]})")
+    check(f"{W}/{STEM}|question@450.0" in s5["groups"][NAME] and f"{W}/{STEM}|S5" not in s5["answers"]
+          and s5["calls"]["scheduled"][-1:] and len(api.get("/api/voice-questions").json()["questions"]) == 3,
+          "question retirée, passage attribué gardé, recherche des voix relancée")
     check(qs[1].get("alt") == OTHER and qs[1].get("alt_sim") == 0.74, "hésitation entre deux personnes transmise")
     check(not any(len(x) >= 64 for q in qs for x in q.values() if isinstance(x, list)), "aucune empreinte envoyée à l'IHM")
     r = api.get("/api/voice-questions/clip", params={"id": qs[0]["id"], "t": 20.0})
@@ -160,7 +170,7 @@ async def main():
                 tid = f"{W}/{STEM}|question@50.0"
                 g = s["groups"][OTHER].get(tid) or {}
                 check(g.get("manual") and len(g.get("sum") or []) == 192 and (s["review"][OTHER].get(tid) or {}).get("ok") is True
-                      and s["embeds"] == [[50.0]] and s["answers"][f"{W}/{STEM}|S1"].get("attributed") == [[OTHER, tid]],
+                      and s["embeds"][-1:] == [[50.0]] and s["answers"][f"{W}/{STEM}|S1"].get("attributed") == [[OTHER, tid]],
                       f"passage attribué : empreinte calculée, ajouté validé à celle de {OTHER}")
                 check(f"1 passage attribué à {OTHER}" in await box.inner_text(), "réponse rappelée avec le passage attribué")
                 check(await pg.locator("#askCount").inner_text() == "2" and "Vignette Erronée" in await box.inner_text()
