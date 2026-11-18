@@ -883,3 +883,7 @@ dialog.dlg .seg label { flex-direction: row; align-items: center; gap: 6px; colo
 
 /* téléphone : pas d'effet d'enfoncement sur une carte (il décalerait le panneau « ⋯ » sous le doigt) */
 @media (max-width: 700px) { #recordings .ritem:active, #recent .ritem:active { transform: none; } }
+
+/* spectateur d'une réunion partagée en direct : regarder et écouter, ni micro ni commandes */
+.viewer .actions, .viewer .b-mic, .viewer .b-ptt, .viewer .lvl, .viewer .tr-toggle, .viewer .an-now, .viewer .screen-hint,
+#tab-focus.viewer #fRecBtn, #tab-focus.viewer #fLeave, #tab-focus.viewer #fHand { display: none !important; }

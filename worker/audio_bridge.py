@@ -79,6 +79,15 @@ async def _pump_to_pulse(track: MediaStreamTrack, device: str):
             proc.kill()
 
 
+async def _discard(track: MediaStreamTrack):
+    """Piste reçue d'un spectateur : lue pour ne pas s'accumuler en mémoire, jamais jouée."""
+    try:
+        while True:
+            await track.recv()
+    except Exception:
+        pass
+
+
 class AudioBridge:
     def __init__(self, ice_servers: list[dict], out_device="meeting_out.monitor", in_device="user_in"):
         self.ice = [RTCIceServer(**s) for s in ice_servers]
@@ -90,7 +99,9 @@ class AudioBridge:
     def listeners(self) -> int:
         return len(self.peers)
 
-    async def handle_offer(self, sdp: str, type_: str) -> dict:
+    async def handle_offer(self, sdp: str, type_: str, listen_only: bool = False) -> dict:
+        """`listen_only` : écoute seule (spectateur) ; ce qu'envoie son navigateur est lu puis jeté, jamais joué
+        dans le micro de l'assistant."""
         pc = RTCPeerConnection(RTCConfiguration(iceServers=self.ice or None))
         pid = uuid.uuid4().hex[:8]
         self.peers[pid] = pc
@@ -101,7 +112,7 @@ class AudioBridge:
         def on_track(track):
             if track.kind == "audio":
                 pc.addTrack(out_track)
-                tasks.append(asyncio.ensure_future(_pump_to_pulse(track, self.in_device)))
+                tasks.append(asyncio.ensure_future(_discard(track) if listen_only else _pump_to_pulse(track, self.in_device)))
 
         @pc.on("connectionstatechange")
         async def on_state():

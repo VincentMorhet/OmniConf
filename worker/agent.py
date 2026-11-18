@@ -47,9 +47,10 @@ recorder = Recorder(os.environ.get("RECORD_DIR", "/srv/webconf/recordings"), DIS
 bridge = AudioBridge(ICE)
 transcriber = Transcriber(os.environ.get("RECORD_DIR", "/srv/webconf/recordings"))
 
-state = {"state": "idle", "platform": None, "url": None, "title": None, "since": None, "error": None,
+state = {"state": "idle", "platform": None, "url": None, "title": None, "since": None, "joined_at": None, "error": None,
          "auto_leave_at": None,
          "owner": None,        # compte OmniConf qui utilise l'assistant (None : libre)
+         "viewers": [],        # comptes à qui le propriétaire montre la réunion en direct (écoute, écran, transcription)
          "session_of": None,   # compte dont la session Zoom est chargée dans le navigateur (lui seul y a accès)
          "last_owner": None,   # dernier utilisateur : la dernière transcription en mémoire lui appartient
          "me_name": None}      # nom de cet utilisateur dans les comptes rendus
@@ -83,11 +84,17 @@ async def _startup():
     importer.start()             # reprend les imports interrompus (redémarrage, mise à jour)
 
 
+def _now_iso() -> str:
+    return dt.datetime.now().astimezone().isoformat()
+
+
 def set_state(s: str, **kw):
     if s != state["state"]:
         log.info("state %s -> %s", state["state"], s)
         state["since"] = dt.datetime.now().astimezone().isoformat()
     state["state"] = s
+    if s == "idle" or "joined_at" in kw:   # partage en direct : le temps d'une réunion seulement
+        state["viewers"] = []
     state.update(kw)
 
 
@@ -133,6 +140,11 @@ def _take(owner: str | None, me_name: str | None = None):
 class Offer(BaseModel):
     sdp: str
     type: str
+    listen_only: bool = False     # spectateur (réunion partagée) : son micro n'est jamais envoyé dans la réunion
+
+
+class ViewersReq(BaseModel):
+    viewers: list[str] = []
 
 
 @app.get("/health")
@@ -562,7 +574,7 @@ async def join(req: JoinReq):
     if req.duration_min:
         leave_at = (dt.datetime.now().astimezone() + dt.timedelta(minutes=req.duration_min)).isoformat()
     last_join = None
-    set_state("joining", platform=platform, url=req.url, title=req.title, error=None, note=None,
+    set_state("joining", platform=platform, url=req.url, title=req.title, error=None, note=None, joined_at=_now_iso(),
               auto_leave_at=leave_at, owner=req.owner, last_owner=req.owner or state.get("last_owner"),
               me_name=req.me_name)
     join_task = asyncio.create_task(_run_join(req, platform))
@@ -620,7 +632,7 @@ async def open_url(req: OpenReq):
         raise HTTPException(409, "session Zoom d'un autre compte chargée")
     await browser.goto(req.url)
     _take(req.owner, req.me_name)
-    set_state("manual", platform=None, url=req.url)
+    set_state("manual", platform=None, url=req.url, joined_at=_now_iso())
     return await status()
 
 
@@ -670,7 +682,7 @@ async def zoom_capture_start(req: CaptureReq):
         state.update(session_of=req.owner, session_kind="capture")
         await browser.goto("https://zoom.us/signin")
     _take(req.owner, req.me_name)
-    set_state("manual", platform=None, url="https://zoom.us/signin", error=None)
+    set_state("manual", platform=None, url="https://zoom.us/signin", error=None, joined_at=_now_iso())
     return await status()
 
 
@@ -1139,7 +1151,17 @@ async def screenshot(w: int = 640):
 
 @app.post("/webrtc/offer", dependencies=[Depends(auth)])
 async def webrtc_offer(o: Offer):
-    return await bridge.handle_offer(o.sdp, o.type)
+    return await bridge.handle_offer(o.sdp, o.type, listen_only=o.listen_only)
+
+
+@app.post("/meeting/viewers", dependencies=[Depends(auth)])
+async def meeting_viewers(req: ViewersReq):
+    """Partage en direct décidé par le propriétaire (le contrôle vérifie les droits) ; oublié à la fin de la réunion."""
+    if state["state"] == "idle":
+        raise HTTPException(409, "aucune réunion en cours")
+    state["viewers"] = sorted({str(x).strip().lower() for x in req.viewers if str(x).strip()} - {state.get("owner")})[:50]
+    log.info("réunion partagée en direct avec %s", ", ".join(state["viewers"]) or "personne")
+    return {"viewers": state["viewers"]}
 
 
 @app.on_event("shutdown")

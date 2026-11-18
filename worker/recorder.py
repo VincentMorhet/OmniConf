@@ -216,7 +216,8 @@ class Recorder:
         t = self.transcript_path(name)
         if not p and not t:
             return False
-        extras = [self.dir / (stem + ".transcript.json"), self.dir / (stem + ".md"), self.dir / (stem + ".report.json"),
+        extras = [self.dir / (stem + ".transcript.json"), self.dir / (stem + ".transcript.avant-reid.json"),
+                  self.dir / (stem + ".md"), self.dir / (stem + ".report.json"),
                   self.dir / (stem + ".speakerdebug.json"), self.dir / (stem + ".cr-final.md"),
                   self.dir / (stem + ".cr-final.pdf"), self.dir / (stem + ".cr-final.json")]
         if p:

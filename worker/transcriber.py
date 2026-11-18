@@ -169,6 +169,7 @@ class Transcriber:
 
     def status(self) -> dict:
         return {"active": self.active, "enabled": self.enabled, "file": self.base.name if self.base else None,
+                "started_at": self.meta.get("started_at"),
                 "lines": len(self.raw), "paragraphs": len(self.paragraphs), "error": self.last_error,
                 "llm": LLM_MODEL, "asr": ASR_MODEL, "n_speakers": len(self.diar.spk),
                 "voice_id": self.diar.extractor is not None, "ui_speaker": self.diar.ui_active,

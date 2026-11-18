@@ -1,11 +1,14 @@
 """Test du pont audio : envoie une sinusoïde 440 Hz comme 'micro' et vérifie
 (1) qu'elle arrive dans user_in.monitor (donc dans le micro virtuel de Chrome)
-(2) qu'un son joué dans meeting_out revient bien au client WebRTC."""
+(2) qu'un son joué dans meeting_out revient bien au client WebRTC.
+LISTEN_ONLY=1 (spectateur d'une réunion partagée) : la sinusoïde ne doit PAS arriver dans user_in, le son de la
+réunion doit toujours revenir."""
 import asyncio, fractions, json, os, subprocess, sys, urllib.request
 import av, numpy as np
 from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
 
 TOKEN = os.environ["AGENT_TOKEN"]; URL = os.environ.get("AGENT", "http://127.0.0.1:8001")
+LISTEN = os.environ.get("LISTEN_ONLY") == "1"
 
 class Sine(MediaStreamTrack):
     kind = "audio"
@@ -32,7 +35,7 @@ async def main():
         asyncio.ensure_future(eat())
     await pc.setLocalDescription(await pc.createOffer())
     req = urllib.request.Request(URL + "/webrtc/offer", method="POST",
-        data=json.dumps({"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}).encode(),
+        data=json.dumps({"sdp": pc.localDescription.sdp, "type": pc.localDescription.type, "listen_only": LISTEN}).encode(),
         headers={"X-Agent-Token": TOKEN, "Content-Type": "application/json"})
     ans = json.loads(urllib.request.urlopen(req).read())
     await pc.setRemoteDescription(RTCSessionDescription(ans["sdp"], ans["type"]))
@@ -47,10 +50,11 @@ async def main():
     tone = subprocess.Popen(["ffmpeg", "-loglevel", "quiet", "-f", "lavfi", "-i", "sine=f=880:d=3", "-f", "pulse", "-device", "meeting_out", "t"], env=env)
     await asyncio.sleep(2.5); tone.wait()
     out_peak = int(max(got)) if got else 0
-    print(json.dumps({"ice": pc.iceConnectionState, "mic_peak_in_user_in": mic_peak,
+    print(json.dumps({"listen_only": LISTEN, "ice": pc.iceConnectionState, "mic_peak_in_user_in": mic_peak,
                       "meeting_audio_peak_received": out_peak, "frames": len(got)}))
     await pc.close()
-    sys.exit(0 if mic_peak > 3000 and out_peak > 3000 else 1)
+    mic_ok = mic_peak < 300 if LISTEN else mic_peak > 3000
+    sys.exit(0 if mic_ok and out_peak > 3000 else 1)
 
 if __name__ == "__main__":
     asyncio.run(main())

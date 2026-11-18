@@ -4,7 +4,8 @@ Pendant la réunion, les voix sont regroupées au fil de l'eau : une même perso
 « voix », et une personne sans vignette à elle (poste partagé, salle) prend le nom de la vignette encadrée à ce
 moment-là. Ici, on reprend toute la réunion d'un coup :
 
-1. empreinte vocale de chaque phrase, calculée sur le son de l'enregistrement (signature du canal retirée) ;
+1. empreinte vocale de chaque phrase, calculée sur le son de l'enregistrement (signature du canal retirée : moyenne
+   des voix, chacune comptant une fois, pour qu'une personne qui parle la plupart du temps ne la fausse pas) ;
 2. regroupement global (lien moyen) des phrases assez longues, puis rattachement des phrases courtes ;
 3. chaque groupe est nommé d'après les noms affichés par la plateforme pendant ses phrases (les noms donnés
    à la main par l'utilisateur l'emportent) ; un groupe qui a reçu plusieurs noms différents sans majorité
@@ -26,10 +27,12 @@ import numpy as np
 log = logging.getLogger("reid")
 
 RATE = 16000
-VERSION = 1
+VERSION = 2               # 2 (18/11) : signature du canal = moyenne des voix (et non des phrases), seuil 0,30
 # TitaNet large (NVIDIA NeMo) : meilleur modèle du banc d'essai (6 réunions, 29 personnes ; voir README)
 MODEL = os.environ.get("REID_MODEL", "/opt/webconf/models/nemo_en_titanet_large.onnx")
-THRESHOLD = float(os.environ.get("REID_THRESHOLD", "0.20"))   # lien moyen, empreintes centrées (réglé sur 12/11 et 10/11)
+# lien moyen sur empreintes centrées. 0,20 avec le centrage « global » (réglé sur 12/11 et 10/11) ; 0,30 avec le centrage
+# « voix » (18/11 : sépare toutes les personnes de la réunion qui avait fusionné 7 intervenants, identique ailleurs)
+THRESHOLD = float(os.environ.get("REID_THRESHOLD", "0.30"))
 MIN_GROUP_SEC = float(os.environ.get("REID_MIN_GROUP_SEC", "20"))  # groupe plus court : rattaché au plus proche
 LONG_SEC = float(os.environ.get("REID_LONG_SEC", "2.5"))       # phrases qui forment les groupes
 MIN_SEC = 1.2                                                   # en dessous : pas d'empreinte fiable
@@ -38,6 +41,7 @@ NAME_SHARE = 0.6           # part des noms affichés pour nommer un groupe
 SPREAD_SHARE = 0.2         # « sans vignette » : au moins deux noms à ≥ 20 % chacun, aucun à ≥ 60 %
 MAX_SEG_SEC = 12.0
 ENABLED = os.environ.get("REID", "1") == "1"
+CENTER = os.environ.get("REID_CENTER", "voix")               # signature du canal : voir channel_mean
 
 
 def load_pcm(media: Path) -> np.ndarray:
@@ -68,6 +72,22 @@ def embed_all(pcm: np.ndarray, spans: list[tuple[float, float]], ex=None) -> lis
         st.input_finished()
         out.append(np.array(ex.compute(st), dtype=np.float32))
     return out
+
+
+def channel_mean(E: np.ndarray, lines: list[dict], how: str | None = None) -> np.ndarray:
+    """Signature du canal (son de la plateforme, micro, codec) à retirer des empreintes.
+    « global » : moyenne de toutes les phrases. Biaisée quand une personne parle la plupart du temps : la moyenne
+    devient surtout sa voix, et une fois retirée, toutes les autres voix se ressemblent (même direction opposée) ;
+    le regroupement les fusionne. « voix » : moyenne des voix (chaque voix de la réunion compte une fois, quelle que
+    soit sa durée), la voix d'une phrase étant le nom affiché pendant celle-ci, sinon la voix du direct."""
+    how = how or CENTER
+    if how == "global":
+        return E.mean(axis=0)
+    by: dict[str, list[int]] = {}
+    for n, e in enumerate(lines):
+        by.setdefault(e.get("ui") or e.get("spk") or "?", []).append(n)
+    means = [E[ns].mean(axis=0) for ns in by.values() if len(ns) >= 3]
+    return np.mean(means, axis=0) if len(means) >= 2 else E.mean(axis=0)
 
 
 def average_linkage(S: np.ndarray, threshold: float) -> list[int]:
@@ -126,7 +146,7 @@ def reidentify(doc: dict, media: Path, pcm: np.ndarray | None = None, ex=None, t
     if len(ok) < 5:
         return {"skipped": "empreintes indisponibles"}
     E = np.array([embs[k] for k in ok])
-    mu = E.mean(axis=0)                                   # signature du canal (moyenne de la séance)
+    mu = channel_mean(E, [raw[idx[k]] for k in ok])       # signature du canal
     Ec = E - mu
     Ec /= np.linalg.norm(Ec, axis=1, keepdims=True) + 1e-9
     emb_c = {k: Ec[n] for n, k in enumerate(ok)}

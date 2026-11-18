@@ -235,14 +235,17 @@ créé au premier démarrage avec `ADMIN_PASSWORD` (dans `/etc/webconf/control.e
 sont regroupées au fil de l'eau et nommées d'après la vignette que la plateforme encadre. Or la plateforme
 désigne un appareil, pas une personne : quelqu'un qui parle depuis le poste d'un autre prend le nom de ce
 poste. Avant chaque compte rendu, toute la réunion est donc reprise :
-1. une empreinte vocale par phrase (modèle NVIDIA TitaNet large), signature du canal retirée ;
-2. un regroupement global (lien moyen, seuil 0,20) ;
+1. une empreinte vocale par phrase (modèle NVIDIA TitaNet large), signature du canal retirée. Cette signature est la
+   moyenne des voix, chacune comptant une fois : avec la moyenne des phrases, une personne qui parle les deux tiers
+   du temps la faussait, et une fois retirée, toutes les autres voix se ressemblaient (7 personnes fusionnées en
+   « sans vignette » le 18/11) ;
+2. un regroupement global (lien moyen, seuil 0,30 ; 0,20 avec l'ancien centrage, `REID_CENTER=global`) ;
 3. chaque groupe est nommé d'après les vignettes encadrées pendant ses phrases ; un renommage fait à la main
    l'emporte. Un groupe qui a reçu plusieurs noms sans majorité devient « Intervenant N (sans vignette) » :
    le compte rendu le signale, et il suffit de le renommer dans l'IHM.
 
 La transcription d'avant est gardée (`*.transcript.avant-reid.json`). Réglages : `REID=0` pour désactiver,
-`REID_MODEL`, `REID_THRESHOLD`.
+`REID_MODEL`, `REID_THRESHOLD`, `REID_CENTER`.
 
 **Empreintes vocales de référence** (`worker/voiceprints.py`), seulement pour les personnes dont le
 consentement est attesté (Réglages > Empreintes vocales), et seulement à partir de voix **écoutées et validées**.

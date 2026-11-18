@@ -156,7 +156,8 @@ const BUSY = ["joining", "lobby", "in_meeting", "leaving", "manual", "error"];
 const isBusy = (st) => st?.online && BUSY.includes(st.state);
 const platLabel = (st) => st.platform === "teams" ? "Teams" : st.platform === "zoom" ? "Zoom"
   : st.url ? siteOf(st.url) : st.platform === "open" ? "Web" : "";
-const vncUrl = (name) => `/novnc/vnc.html?path=vnc/${encodeURIComponent(name)}/websockify&autoconnect=1&resize=scale&reconnect=1&show_dot=1`;
+const vncUrl = (name) => `/novnc/vnc.html?path=vnc/${encodeURIComponent(name)}/websockify&autoconnect=1&resize=scale&reconnect=1&show_dot=1`
+  + (lastStatus[name]?.viewer ? "&view_only=1" : "");
 function toggleVnc(name, on) {
   const el = cards[name]; if (!el) return;
   const f = $(".vnc", el); on = on ?? f.classList.contains("hidden");
@@ -178,6 +179,7 @@ function card(name) {
   $(".b-leave", el).onclick = () => confirmLeave(name);
   $(".b-mute", el).onclick = act("mute");
   $(".b-rec", el).onclick = () => toggleRecording(name);
+  $(".b-live", el).onclick = () => openLiveShare(name);
   $(".b-screen", el).onclick = () => toggleVnc(name);
   $(".shot", el).onclick = () => toggleVnc(name, true);
   $(".b-full", el).onclick = () => { toggleVnc(name, false); window.open(vncUrl(name), "_blank"); };
@@ -229,7 +231,16 @@ function fmtDur(iso) {
 function render(st) {
   const el = card(st.name), prev = lastStatus[st.name];
   lastStatus[st.name] = st;
-  const t = trState(st.name), tr = st.transcript || {};
+  const t = trState(st.name);
+  let tr = st.transcript || {};
+  if (isBusy(st) && !tr.active && tr.file && (st.joined_at && tr.started_at ? new Date(tr.started_at) < new Date(st.joined_at)
+      : (st.recording_file || "").replace(/\.mp4$/, "") !== tr.file)) {
+    // réunion qui démarre sur un assistant qui vient de servir : la transcription (et les points d'étape) qu'il
+    // rapporte encore est celle de la réunion précédente, jusqu'au départ de la nouvelle : on ne la montre pas
+    tr = { ...tr, file: null, analysis: null, lines: 0, paragraphs: 0, n_speakers: 0, slides: 0, error: null };
+    forgetTr(st.name, el);
+  }
+  if (!tr.active && !tr.file) forgetTr(st.name, el);   // plus rien à montrer (fin d'un partage en direct…)
   if (st.recording_file) t.lastRec = st.recording_file;
   if (isBusy(prev) && !isBusy(st)) { t.ended = true; setTimeout(loadRecordings, 4000); if (sessions[st.name]) stopAudio(st.name); }   // fin de réunion
   if (isBusy(st)) t.ended = false;
@@ -245,7 +256,9 @@ function render(st) {
     if (st.since) info.push("depuis " + new Date(st.since).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }));
     if (st.listeners) info.push(`🎧 ${st.listeners} à l'écoute`);
     if (st.auto_leave_at) info.push("départ auto à " + new Date(st.auto_leave_at).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }));
-    if (st.owner_name && !st.mine) info.push("👤 " + esc(st.owner_name));
+    if (st.viewer) info.push("👥 partagée par " + esc(st.owner_name || "son propriétaire"));
+    else if (st.owner_name && !st.mine) info.push("👤 " + esc(st.owner_name));
+    if (st.mine && st.viewers?.length) info.push("👥 partagée avec " + esc(dirNames(st.viewers)));
   } else info.push(!st.online ? "hors ligne" : taken ? "utilisé par un autre utilisateur" : "libre");
   if (st.session_of && !taken) info.push(st.session_kind === "capture" ? "🔒 connexion à Zoom en cours" : "🔒 avec votre compte Zoom");
   $(".winfo", el).innerHTML = info.join(" · ");
@@ -253,9 +266,14 @@ function render(st) {
   let note = "";
   if (st.error) note = `<div class="e">⚠ ${esc(st.error)} — terminez à la main avec « Prendre la main ».</div>`;
   else if (st.note && st.state === "in_meeting") note = `<div class="n">ℹ ${esc(st.note.replace("« Écran »", "« Prendre la main »"))}</div>`;
+  if (st.viewer && !st.error) note = `<div class="n">👀 Vous suivez cette réunion en spectateur : écran, son, transcription et compte rendu en direct. Seul ${esc(st.owner_name || "son propriétaire")} peut y parler ou agir sur l'assistant.</div>`;
   $(".wnote", el).innerHTML = note;
   $(".b-rec", el).innerHTML = st.recording ? "<i class=\"dot sq\"></i>Arrêter l'enregistrement" : "<i class=\"dot\"></i>Enregistrer";
   el.classList.toggle("idle", !isBusy(st) && !st.recording);    // assistant libre : seulement les actions utiles
+  [el, el._side, el._actl].forEach(x => x.classList.toggle("viewer", !!st.viewer));   // spectateur : regarder et écouter
+  $(".b-live", el).classList.toggle("hidden", !st.mine || !isBusy(st));
+  $(".b-mute", el).classList.toggle("hidden", st.talk === false);
+  if (isBusy(st)) t.viewerOf = st.viewer ? (st.owner_name || "") : null;
   $(".b-leave", el).disabled = !isBusy(st);
   $(".audio-ctl", el).classList.toggle("hidden", !isBusy(st) && !sessions[st.name]);
   $(".b-mute", el).disabled = st.state !== "in_meeting";
@@ -266,6 +284,7 @@ function render(st) {
   $(".ended b", el).textContent = !st.online ? "Assistant hors ligne" : taken ? "Assistant occupé" : t.ended ? "Réunion terminée" : "Assistant libre";
   $(".ended-txt", el).textContent = !st.online ? "Il ne répond pas : vérifier le conteneur ou la VM."
     : taken ? "Il est utilisé par un autre utilisateur. Choisissez un autre assistant (ou « Automatique »)."
+    : t.ended && t.viewerOf != null ? `La réunion est terminée. Son enregistrement et son compte rendu restent à ${t.viewerOf || "son propriétaire"}, qui peut vous les partager.`
     : t.ended ? (tr.enabled && tr.file ? "Le compte rendu final est rédigé automatiquement (2 à 10 minutes)." : "L'enregistrement est dans « Enregistrements ».")
     : "Collez un lien sur l'accueil pour l'envoyer en réunion, ou « Ouvrir une page » pour vous connecter à un compte.";
   $(".b-final", el).classList.toggle("hidden", !final || taken);
@@ -309,6 +328,7 @@ function renderTile(st) {
   if (st.transcript?.active) meta.push("📝 transcription");
   if (st.recording) meta.push("⏺ enregistrement");
   if (sessions[st.name]) meta.push("🎧 vous écoutez");
+  if (st.viewer) meta.push("👥 partagée par " + (st.owner_name || "son propriétaire"));
   $(".tmeta", el).textContent = meta.join(" · ");
   const now = t.an?.state?.en_cours, p = $(".tnow", el);
   p.classList.toggle("hidden", !now || !busy);
@@ -334,6 +354,13 @@ function renderHome(list) {
 
 // ------------------------------------------------------------------ transcription en direct
 const trStates = {};
+function forgetTr(name, el) {   // oublie la transcription affichée (celle d'une réunion précédente)
+  const t = trState(name);
+  if (!t.an && !t.file && !t.n && !t.capPars?.length) return;
+  Object.assign(t, { an: null, anV: undefined, file: null, n: 0, slN: 0, capPars: [], capFile: null, speakers: null, aliases: null });
+  el.querySelectorAll(".tr-body, .tr-spk").forEach(b => b.innerHTML = "");
+  if (el._side) el._side.querySelectorAll(".tr-body, .tr-spk, .an-body").forEach(b => b.innerHTML = "");
+}
 function trState(name) { return trStates[name] ||= { open: false, n: 0, file: null, status: {}, view: "an", anV: undefined, anSeen: 0 }; }
 const fmtT = (sec) => { sec = Math.max(0, Math.floor(sec || 0)); const h = Math.floor(sec / 3600), m = Math.floor(sec / 60) % 60;
   return (h ? h + ":" : "") + String(m).padStart(2, "0") + ":" + String(sec % 60).padStart(2, "0"); };
@@ -387,8 +414,8 @@ function renderChips(box, speakers, used, rename) {
   Object.entries(speakers || {}).filter(([id]) => used.has(id)).forEach(([id, s]) => {
     const b = document.createElement("button"); b.type = "button"; b.className = "chip c" + (s.color % 9);
     b.innerHTML = `${esc(s.label)}<small>${s.source === "ui" ? "🖥" : s.source === "voice" ? "🔊" : s.source === "manual" ? "✏️" : s.source === "voiceprint" ? "🎙" : ""}</small>`;
-    b.title = (SRC_FR[s.source] || "") + " — cliquer pour renommer";
-    b.onclick = () => rename(id);
+    b.title = (SRC_FR[s.source] || "") + (rename ? " — cliquer pour renommer" : "");
+    if (rename) b.onclick = () => rename(id);
     box.appendChild(b);
   });
 }
@@ -452,7 +479,7 @@ async function pollTranscript(name) {
       t.speakers = d.speakers; t.aliases = d.aliases;
       t.capPars = (d.file === t.capFile ? (t.capPars || []) : []).concat(d.paragraphs).slice(-3); t.capFile = d.file;
       if (fName === name) renderCaps(name, d.pending);
-      const rename = (id) => askRename(t.speakers, id, async (sid, nm) => {
+      const rename = lastStatus[name]?.viewer ? null : (id) => askRename(t.speakers, id, async (sid, nm) => {
         const r = await api(`/api/workers/${name}/speakers`, { method: "POST", json: { id: sid, name: nm } });
         t.speakers = r.speakers; repaint(); });
       const o = { speakers: d.speakers, aliases: d.aliases, rename };
@@ -541,6 +568,8 @@ function renderFocus(st) {
   rb.classList.toggle("recording", !!st.recording);
   rb.disabled = !st.online || st.state === "taken" || (!busy && !st.recording);
   $("#fLeave").disabled = !busy;
+  $("#tab-focus").classList.toggle("viewer", !!st.viewer);
+  if (st.viewer && fHand) { fHand = false; if (fRfb) fRfb.viewOnly = true; syncFocusButtons(); }
   const t = trState(st.name);
   $("#fEnded").classList.toggle("hidden", busy || !st.online || !t.ended);
   $("#fFinal").classList.toggle("hidden", !(st.transcript?.file || t.lastRec));
@@ -927,9 +956,11 @@ async function startAudio(name) {
   await applySink(audio);
   audio.play().catch(() => { });  // débloque la lecture sur iOS (geste utilisateur)
   let stream = null;
-  try {
-    stream = await getMic();
-  } catch (e) { toast("Micro indisponible : écoute seule (" + e.message + ")", 5000); }
+  if (lastStatus[name]?.talk !== false) {   // seul le propriétaire de la réunion parle par l'assistant
+    try {
+      stream = await getMic();
+    } catch (e) { toast("Micro indisponible : écoute seule (" + e.message + ")", 5000); }
+  }
   const pc = new RTCPeerConnection({ iceServers: cfg.iceServers });
   const s = sessions[name] = { pc, stream, audio, micLatched: false, ptt: false };
   if (stream) pc.addTransceiver(stream.getAudioTracks()[0], { direction: "sendrecv", streams: [stream] });
@@ -1285,6 +1316,33 @@ $("#dlgShareMany").addEventListener("close", async () => {
     setSelMode(false);
   } catch (e) { toast(e.message, 5000); }
   loadRecordings();
+});
+// ------------------------------------------------------------------ partage d'une réunion en direct (propriétaire)
+let userDir = null, lvName = null;
+async function loadDir() { return userDir ||= await api("/api/users/directory"); }
+function dirNames(logins) {   // noms des comptes (annuaire chargé une fois, à la demande)
+  if (!userDir && !loadDir.busy) { loadDir.busy = true; loadDir().catch(() => { }).finally(() => { loadDir.busy = false; }); }
+  return logins.map(l => userDir?.find(x => x.login === l)?.name || l).join(", ");
+}
+async function openLiveShare(name) {
+  let dir;
+  try { dir = await loadDir(); } catch (e) { return toast(e.message); }
+  const st = lastStatus[name] || {}, cur = new Set(st.viewers || []);
+  lvName = name;
+  $("#lvTitle").textContent = st.title || platLabel(st) || "Réunion";
+  $("#lvList").innerHTML = dir.filter(x => x.login !== me.login).map(x =>
+    `<label><input type="checkbox" value="${esc(x.login)}"${cur.has(x.login) ? " checked" : ""}> ${esc(x.name)} <small>(${esc(x.login)})</small></label>`).join("")
+    || "<small>Aucun autre compte.</small>";
+  $("#dlgLive").showModal();
+}
+$("#dlgLive").addEventListener("close", async () => {
+  if ($("#dlgLive").returnValue !== "ok" || !lvName) return;
+  const who = [...$("#lvList").querySelectorAll("input:checked")].map(x => x.value);
+  try {
+    const d = await api(`/api/workers/${lvName}/viewers`, { method: "POST", json: { logins: who } });
+    toast(d.viewers.length ? `Réunion partagée en direct avec ${dirNames(d.viewers)}` : "Partage en direct arrêté", 5000);
+    refresh();
+  } catch (e) { toast(e.message, 5000); }
 });
 async function renameRecording(url, title) {
   const t = prompt("Nouveau titre :", title);

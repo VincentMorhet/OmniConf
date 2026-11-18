@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
 
+import rfb_filter
 from users import Users, bot_name, can_edit, can_see, is_admin
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -295,19 +296,45 @@ def can_read_live(u: dict, st: dict) -> bool:
     return not st.get("owner") and st.get("last_owner") in (None, u["login"])
 
 
-async def worker_for(name: str, u: dict, live: bool = False) -> dict:
+def is_viewer(u: dict, st: dict) -> bool:
+    """Réunion en cours que son propriétaire montre à ce compte (partage en direct) : regarder et écouter seulement."""
+    return (bool(st.get("owner")) and st.get("state") not in (None, "idle", "offline")
+            and u["login"] in (st.get("viewers") or []))
+
+
+def can_view_live(u: dict, st: dict) -> bool:
+    """Lire la transcription, l'analyse, les diapositives, voir l'écran : le propriétaire, ou un spectateur."""
+    return can_read_live(u, st) or is_viewer(u, st)
+
+
+def can_talk(u: dict, st: dict) -> bool:
+    """Micro dans la réunion (parler par l'assistant, le rendre muet ou non) : son propriétaire seul, même pour un
+    administrateur ; assistant sans propriétaire : qui peut s'en servir."""
+    return st.get("owner") == u["login"] if st.get("owner") else can_use_worker(u, st)
+
+
+async def worker_for(name: str, u: dict, live: bool = False, view: bool = False) -> dict:
     st = await worker_status(wurl(name) and name)
-    if not (can_read_live(u, st) if live else can_use_worker(u, st)):
+    ok = can_view_live(u, st) if view else can_read_live(u, st) if live else can_use_worker(u, st)
+    if not ok:
         raise HTTPException(403, "assistant utilisé par un autre utilisateur")
     return st
+
+
+# ce qu'un spectateur voit de l'assistant (ni lien de la réunion, ni fichiers, ni session Zoom)
+VIEWER_KEYS = ("name", "online", "state", "platform", "title", "since", "joined_at", "recording", "recording_since",
+               "listeners", "auto_leave_at", "transcript")
 
 
 def public_status(u: dict, st: dict) -> dict:
     """État d'un assistant tel que ce compte peut le voir."""
     if not can_use_worker(u, st):
+        if is_viewer(u, st):
+            return {**{k: st.get(k) for k in VIEWER_KEYS}, "viewer": True, "mine": False, "talk": False,
+                    "owner_name": USERS.names().get(st["owner"], st["owner"])}
         return {"name": st["name"], "online": st.get("online"), "state": "taken", "other": True,
                 "since": st.get("since")}
-    out = {**st, "mine": bool(st.get("owner")) and st.get("owner") == u["login"]}
+    out = {**st, "mine": bool(st.get("owner")) and st.get("owner") == u["login"], "talk": can_talk(u, st)}
     if is_admin(u) and st.get("owner"):
         out["owner_name"] = USERS.names().get(st["owner"], st["owner"])
     if not can_read_live(u, st):    # dernière transcription d'un autre compte : rien n'en est montré
@@ -456,6 +483,27 @@ async def api_start(m: StartMeeting, u: dict = CU):
     return await start_meeting(m, u)
 
 
+class Viewers(BaseModel):
+    logins: list[str] = []
+
+
+@app.post("/api/workers/{name}/viewers")
+async def worker_viewers(name: str, body: Viewers, u: dict = CU):
+    """Partager la réunion en cours (écran, son, transcription, compte rendu en direct) : son propriétaire seul.
+    Les spectateurs ne peuvent ni parler, ni agir sur l'assistant ; le partage s'arrête avec la réunion."""
+    st = await worker_status(wurl(name) and name)
+    if not st.get("owner") or st["owner"] != u["login"]:
+        raise HTTPException(403, "seul le propriétaire de la réunion peut la partager")
+    known = {x["login"] for x in USERS.all()}
+    logins = sorted({x.strip().lower() for x in body.logins if x.strip()} - {u["login"]})
+    bad = [x for x in logins if x not in known]
+    if bad:
+        raise HTTPException(400, "compte(s) inconnu(s) : " + ", ".join(bad))
+    r = await wcall(name, "POST", "/meeting/viewers", json={"viewers": logins})
+    log.info("%s partage la réunion de %s en direct avec %s", u["login"], name, ", ".join(logins) or "personne")
+    return r.json()
+
+
 @app.post("/api/workers/{name}/{action}")
 async def worker_action(name: str, action: str, request: Request, u: dict = CU):
     paths = {"leave": "/meeting/leave", "mute": "/meeting/mute", "rec-start": "/recording/start",
@@ -464,8 +512,16 @@ async def worker_action(name: str, action: str, request: Request, u: dict = CU):
              "speakers": "/transcript/speakers", "analyze": "/transcript/analyze"}
     if action not in paths:
         raise HTTPException(404)
-    await worker_for(name, u, live=action in ("speakers", "analyze"))
+    st = await worker_for(name, u, live=action in ("speakers", "analyze"), view=action == "offer")
+    if action == "mute" and not can_talk(u, st):
+        raise HTTPException(403, "seul le propriétaire de la réunion peut activer ou couper le micro")
     body = await request.body()
+    if action == "offer":                 # le micro n'est transmis que pour le propriétaire (sinon : écoute seule)
+        try:
+            d = json.loads(body or b"{}")
+        except ValueError:
+            raise HTTPException(400, "JSON invalide")
+        body = json.dumps({"sdp": d.get("sdp"), "type": d.get("type"), "listen_only": not can_talk(u, st)}).encode()
     if action in ("open", "rec-start", "tr-start"):   # l'assistant devient celui de ce compte
         try:
             d = json.loads(body or b"{}")
@@ -479,14 +535,14 @@ async def worker_action(name: str, action: str, request: Request, u: dict = CU):
 
 @app.get("/api/workers/{name}/transcript")
 async def live_transcript(name: str, after: int = 0, u: dict = CU):
-    await worker_for(name, u, live=True)
+    await worker_for(name, u, view=True)
     r = await wcall(name, "GET", f"/transcript?after={after}", timeout=5)
     return JSONResponse(r.json(), headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/workers/{name}/slides")
 async def live_slides(name: str, after: int = 0, u: dict = CU):
-    await worker_for(name, u, live=True)
+    await worker_for(name, u, view=True)
     r = await wcall(name, "GET", f"/transcript/slides?after={after}", timeout=5)
     return JSONResponse(r.json(), headers={"Cache-Control": "no-store"})
 
@@ -498,7 +554,7 @@ async def slide_image(name: str, stem: str, n: int, u: dict = CU):
         if not can_see(u, rec.get("meta")):
             raise HTTPException(403, "réunion d'un autre utilisateur")
     else:                                   # réunion en cours, pas encore listée : celle de ce compte
-        st = await worker_for(name, u, live=True)
+        st = await worker_for(name, u, view=True)
         if _stem(((st.get("transcript") or {}).get("file") or "")) != stem and not is_admin(u):
             raise HTTPException(403, "diapositive inconnue")
     r = await wcall(name, "GET", f"/slides/{stem}/{n}", timeout=10)
@@ -513,7 +569,7 @@ async def recording_slides(name: str, file: str, u: dict = CU):
 
 @app.get("/api/workers/{name}/analysis")
 async def live_analysis(name: str, u: dict = CU):
-    await worker_for(name, u, live=True)
+    await worker_for(name, u, view=True)
     r = await wcall(name, "GET", "/transcript/analysis", timeout=5)
     return JSONResponse(r.json(), headers={"Cache-Control": "no-store"})
 
@@ -607,7 +663,7 @@ async def sessions_collect():
 
 @app.get("/api/workers/{name}/screenshot")
 async def screenshot(name: str, w: int = 640, u: dict = CU):
-    await worker_for(name, u)
+    await worker_for(name, u, view=True)
     r = await wcall(name, "GET", f"/screenshot?w={w}")
     return Response(r.content, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
@@ -2038,9 +2094,11 @@ async def startup():
 @app.websocket("/vnc/{name}/websockify")
 async def vnc_proxy(ws: WebSocket, name: str):
     u = session_user(ws.session)
-    if not u or name not in WORKERS or not can_use_worker(u, await worker_status(name)):
+    st = await worker_status(name) if u and name in WORKERS else {}
+    if not u or not st or not (can_use_worker(u, st) or is_viewer(u, st)):
         await ws.close(code=4401)
         return
+    view_only = not can_use_worker(u, st)   # spectateur : il voit l'écran, ni clavier ni souris
     host = httpx.URL(WORKERS[name]).host
     # Port VNC annoncé par le worker (plusieurs conteneurs par hôte) ; 6080 par défaut (VM)
     vnc_port = int((await worker_status(name)).get("vnc_port") or 6080)
@@ -2057,12 +2115,24 @@ async def vnc_proxy(ws: WebSocket, name: str):
                     else:
                         await ws.send_text(msg)
 
+            filt = rfb_filter.ViewOnlyFilter() if view_only else None
+
             async def upstream():
                 while True:
                     m = await ws.receive()
                     if m["type"] == "websocket.disconnect":
                         return
-                    if m.get("bytes") is not None:
+                    if filt:                       # lecture seule : seules les demandes d'images passent
+                        if m.get("bytes") is None:
+                            return
+                        try:
+                            data = filt.feed(m["bytes"])
+                        except rfb_filter.RfbViolation as e:
+                            log.info("vnc %s (spectateur %s) fermé : %s", name, u["login"], e)
+                            return
+                        if data:
+                            await up.send(data)
+                    elif m.get("bytes") is not None:
                         await up.send(m["bytes"])
                     elif m.get("text") is not None:
                         await up.send(m["text"])

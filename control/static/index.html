@@ -333,6 +333,7 @@
         <div class="actions">
           <button class="b-screen" title="Prendre la main sur l'écran de l'assistant (ici)"><svg class="i"><use href="#i-hand"/></svg>Prendre la main</button>
           <button class="b-full icon" title="Ouvrir l'écran dans un nouvel onglet"><svg class="i"><use href="#i-expand"/></svg></button>
+          <button class="b-live hidden" title="Montrer la réunion en direct à d'autres comptes (sans micro ni commandes)">👥 Partager en direct</button>
           <button class="b-rec">⏺ Enregistrer</button>
           <button class="b-mute" title="Bascule le micro de l'assistant dans la réunion"><svg class="i"><use href="#i-mic-off"/></svg>Muet</button>
           <button class="b-open" title="Ouvrir une page (ex : se connecter à son compte Teams ou Zoom)"><svg class="i"><use href="#i-globe"/></svg>Ouvrir une page</button>
@@ -492,6 +493,18 @@
     <p class="hint">Gardez cette page ouverte pendant l'envoi. S'il est coupé, choisissez de nouveau le même fichier :
       l'envoi reprend où il s'était arrêté.</p>
     <div class="row end"><button value="cancel" class="ghost" formnovalidate>Annuler</button><button id="impOk" value="ok" class="primary">Importer</button></div>
+  </form>
+</dialog>
+<dialog id="dlgLive" class="dlg">
+  <form method="dialog">
+    <h2>👥 Partager en direct</h2>
+    <p class="hint" id="lvTitle"></p>
+    <p class="hint">Les comptes cochés peuvent suivre la réunion pendant qu'elle a lieu : voir l'écran, l'entendre, lire la
+      transcription et le compte rendu en direct. Ils ne peuvent ni parler (seul votre micro passe dans la réunion), ni
+      agir sur l'assistant. Le partage s'arrête avec la réunion ; l'enregistrement et le compte rendu restent à vous
+      (« Partager avec… » pour les leur donner ensuite).</p>
+    <div id="lvList" class="checklist"></div>
+    <div class="row end"><button value="cancel" class="ghost">Annuler</button><button value="ok" class="primary">Enregistrer</button></div>
   </form>
 </dialog>
 <dialog id="dlgShareMany" class="dlg">
