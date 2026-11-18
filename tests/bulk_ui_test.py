@@ -167,6 +167,18 @@ async def main():
             await pg.wait_for_selector("#recordings .ritem")
             await pg.evaluate("() => { window.__toasts = []; const o = toast; toast = (m, ms) => { window.__toasts.push(String(m)); return o(m, ms); }; }")
             if tag == "pc":
+                # --- page d'une réunion : un clic dans la marge ne la ferme pas
+                await pg.locator("#recordings .ritem .rtitle").first.click()
+                await pg.wait_for_selector("#player:not(.hidden)")
+                h = await pg.evaluate("() => location.hash")
+                await pg.mouse.click(1265, 450)
+                await asyncio.sleep(0.5)
+                still = await pg.evaluate("() => !document.querySelector('#player').classList.contains('hidden') && location.hash")
+                check(still == h and h.startswith("#enr/"), f"clic dans la marge de la page d'une réunion : elle reste ouverte ({still})")
+                await pg.click("#player .back")
+                await pg.wait_for_selector("#player", state="hidden")
+                await pg.goto(BASE + "/#rec")
+                await pg.wait_for_selector("#recordings .ritem")
                 # --- menu « ⋯ » : entièrement visible (première et dernière réunion)
                 for i in (0, 5):
                     await pg.locator("#recordings .ritem").nth(i).locator(".more").click()

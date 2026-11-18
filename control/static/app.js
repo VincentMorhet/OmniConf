@@ -1738,7 +1738,8 @@ $("#playerSlides").onclick = async () => {
   };
   poll();
 };
-$("#player").onclick = (e) => { if (e.target.id === "player") closePlayer(); };
+// clic sur le fond : ferme seulement une fenêtre superposée, jamais la page d'une réunion (ses marges sont ce fond)
+$("#player").onclick = (e) => { if (e.target.id === "player" && !$("#player").classList.contains("page")) closePlayer(); };
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !document.querySelector("dialog[open]")) { closeMenus(); if (player.url) closePlayer(); } });
 
 // ------------------------------------------------------------------ démarrage
