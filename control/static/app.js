@@ -1108,6 +1108,9 @@ async function loadRecordings() {
 }
 
 function renderRecordings() {
+  // menu « ⋯ » ouvert : la liste n'est pas redessinée (il disparaîtrait sous le doigt) ; elle le sera à sa fermeture
+  if (document.querySelector("#recordings .rmenu:not(.hidden)")) { renderRecordings.later = true; return; }
+  renderRecordings.later = false;
   const q = $("#r-search").value.trim().toLowerCase();
   const pf = $("#r-platform").value, wf = $("#r-worker").value;
   const items = recItems.filter(r => {
@@ -1292,6 +1295,8 @@ async function renameRecording(url, title) {
 function closeMenus() {
   document.querySelectorAll(".rmenu:not(.hidden)").forEach(m => m.classList.add("hidden"));
   document.querySelectorAll(".rmenu-back").forEach(b => b.remove());
+  if (renderRecordings.later)       // rafraîchissement reporté pendant que le menu était ouvert
+    setTimeout(() => { if (renderRecordings.later && !document.querySelector("#recordings .rmenu:not(.hidden)")) renderRecordings(); }, 0);
 }
 document.addEventListener("click", (e) => { if (!e.target.closest(".rmenu, .more")) closeMenus(); });
 async function deleteRecording(url, title) {

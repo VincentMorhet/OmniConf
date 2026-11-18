@@ -274,6 +274,15 @@ async def main():
                 head = await pg.evaluate("() => document.querySelector('.rmenu:not(.hidden) .rmenu-h')?.textContent")
                 check(v == "ok" and head == "Réunion d'essai 0", f"téléphone : menu ⋯ entier, avec le titre, « Supprimer » accessible ({v}, {head})")
                 await pg.screenshot(path=str(OUT / "menu-phone.png"))
+                await pg.evaluate("() => renderRecordings()")      # rafraîchissement périodique pendant que le menu est ouvert
+                await pg.tap(".rmenu:not(.hidden) .share")
+                await pg.wait_for_selector("#dlgShare[open]", timeout=8000)
+                check("Compte Autre" in await pg.text_content("#shList"), "téléphone : menu toujours là après un rafraîchissement, « Partager avec… » ouvre le choix")
+                await pg.click("#dlgShare button[value=cancel]")
+                await asyncio.sleep(0.3)
+                check(not await pg.evaluate("() => renderRecordings.later"), "menu fermé : rafraîchissement reporté fait")
+                await pg.locator("#recordings .ritem").first.locator(".more").click()
+                await asyncio.sleep(0.3)
                 await pg.mouse.click(195, 120)                    # à côté du panneau
                 await asyncio.sleep(0.3)
                 closed = await pg.evaluate("() => !document.querySelector('.rmenu:not(.hidden)') && !document.querySelector('.rmenu-back') && location.hash")

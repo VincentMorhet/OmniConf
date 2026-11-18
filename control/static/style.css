@@ -880,3 +880,6 @@ dialog.dlg .seg label { flex-direction: row; align-items: center; gap: 6px; colo
 
 .ask-auto { margin: 0 0 12px; padding: 8px 10px; border-radius: 10px; font-size: 13px; color: var(--ok);
   background: color-mix(in srgb, var(--ok) 10%, transparent); border: 1px solid color-mix(in srgb, var(--ok) 25%, transparent); }
+
+/* téléphone : pas d'effet d'enfoncement sur une carte (il décalerait le panneau « ⋯ » sous le doigt) */
+@media (max-width: 700px) { #recordings .ritem:active, #recent .ritem:active { transform: none; } }
