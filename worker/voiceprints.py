@@ -292,6 +292,28 @@ def extract(rec_dir: Path, names: list[str], owners: dict[str, str] | None = Non
     return out
 
 
+def embed_segments(media: Path, segs: list[tuple[float, float]]) -> list[list[float] | None]:
+    """Empreinte (normée) de quelques passages d'une réunion, lus un à un dans la vidéo (pas tout le son en mémoire) :
+    pour un passage écouté et attribué à une personne (« Qui parle ? »). None : passage trop court."""
+    import subprocess
+
+    import reid
+    ex, out = None, []
+    for a, b in segs:
+        b = min(b, a + reid.MAX_SEG_SEC)
+        if b - a < reid.MIN_SEC:
+            out.append(None)
+            continue
+        raw = subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-ss", f"{a:.3f}", "-t", f"{b - a:.3f}",
+                              "-i", str(media), "-vn", "-ac", "1", "-ar", str(reid.RATE), "-f", "s16le", "-"],
+                             capture_output=True, check=True, timeout=120).stdout
+        pcm = np.frombuffer(raw, np.int16).astype(np.float32) / 32768
+        ex = ex or reid._extractor()
+        v = reid.embed_all(pcm, [(0.0, len(pcm) / reid.RATE)], ex)[0]
+        out.append(None if v is None else [round(float(x), 6) for x in _unit(v)])
+    return out
+
+
 def ask(stem: str, mt: float, doc: dict, prints: dict[str, np.ndarray], get_pcm) -> list[dict]:
     """Questions à poser sur une réunion : voix ni nommées à la main ni reconnues par une empreinte, qui ressemblent
     à l'une d'elles (≥ ASK_MIN) sans porter déjà ce nom. [{"sid", "label", "name", "sim", "sure", "alt"?,

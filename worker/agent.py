@@ -229,6 +229,23 @@ async def voiceprints_extract(req: ExtractReq):
     return {"state": "running"}
 
 
+class EmbedReq(BaseModel):
+    meeting: str
+    segs: list[list[float]]
+
+
+@app.post("/voiceprints/embed", dependencies=[Depends(auth)])
+async def voiceprints_embed(req: EmbedReq):
+    """Empreinte de quelques passages d'une réunion (passage attribué à quelqu'un en répondant à « Qui parle ? »)."""
+    media = recorder.dir / (os.path.basename(req.meeting) + ".mp4")
+    if not media.exists():
+        raise HTTPException(404, "réunion inconnue")
+    if not req.segs or len(req.segs) > 20:
+        raise HTTPException(400, "1 à 20 passages")
+    segs = [(float(s[0]), float(s[1])) for s in req.segs]
+    return {"vectors": await asyncio.to_thread(voiceprints.embed_segments, media, segs)}
+
+
 @app.get("/voiceprints/extract", dependencies=[Depends(auth)])
 async def voiceprints_extract_get():
     """État du calcul ; le résultat (empreintes par voix, extraits, questions) n'est rendu qu'une fois, puis oublié."""

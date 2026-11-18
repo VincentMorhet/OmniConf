@@ -1283,7 +1283,7 @@ def vq_pending(d: dict, ok: set) -> list[dict]:
         out.append({"id": qid, **{k: q.get(k) for k in ("worker", "meeting", "title", "sid", "label", "name", "sim",
                                                         "sure", "n", "sec", "clips")},
                     **({"alt": q["alt"], "alt_sim": q.get("alt_sim")} if q.get("alt") in ok else {})})
-    out.sort(key=lambda q: (-(q["sim"] or 0), q["id"]))
+    out.sort(key=lambda q: (bool(q.get("sure")), q["sim"] or 0, q["id"]))    # les moins sûres d'abord
     return out
 
 
@@ -1719,6 +1719,14 @@ class VoiceAnswer(BaseModel):
     answer: str | None            # yes : c'est bien la personne proposée ; other : c'est `to` ; no ; unknown ; None : annuler
     to: str | None = None
     exclude: list[float] = []     # passages écoutés qui ne sont pas cette personne (début, en s) : hors de son empreinte
+    attribute: list[dict] = []    # passages écoutés qui sont quelqu'un d'autre de la liste : [{"t": début, "to": nom}]
+
+
+async def vq_embed(q: dict, clips: list[dict]) -> list:
+    """Empreinte des passages, calculée par l'assistant qui a la réunion (rien n'en est gardé côté questions)."""
+    r = await wcall(q["worker"], "POST", "/voiceprints/embed", timeout=120,
+                    json={"meeting": q["meeting"], "segs": [[c["t"], c["te"]] for c in clips]})
+    return r.json()["vectors"]
 
 
 async def _vq_name(q: dict, name: str | None, via: str | None):
@@ -1745,6 +1753,16 @@ async def voice_question_answer(body: VoiceAnswer, u: dict = Depends(require_adm
         prev = d["answers"].get(body.id)
         if not prev:
             return {"ok": True}
+        if prev.get("attributed"):          # passages attribués à d'autres : retirés de leurs empreintes
+            vd = vp_load()
+            for to, tid in prev["attributed"]:
+                e2 = vd.get(to) or {}
+                (e2.get("groups") or {}).pop(tid, None)
+                (e2.get("review") or {}).pop(tid, None)
+                if e2:
+                    vp_compute(e2)
+            vp_save(vd)
+            await voiceprints_push()
         if prev["answer"] in ("yes", "other"):
             who = prev.get("to") or prev["name"]
             await _vq_name(q, None, None)
@@ -1769,7 +1787,27 @@ async def voice_question_answer(body: VoiceAnswer, u: dict = Depends(require_adm
         log.info("question %s : réponse annulée par %s", body.id, u["login"])
         return {"ok": True}
     who = q["name"] if body.answer == "yes" else body.to if body.answer == "other" else None
-    clips = [c for c in q.get("clips") or [] if any(abs(float(c["t"]) - float(t)) < 0.01 for t in body.exclude)]
+    attrs = []                    # (passage, personne) : passages écoutés qui sont quelqu'un d'autre
+    for a in body.attribute:
+        c = next((c for c in q.get("clips") or [] if abs(float(c["t"]) - float(a.get("t", -1))) < 0.01), None)
+        to = str(a.get("to") or "")
+        if not c:
+            raise HTTPException(404, "passage inconnu (recherche refaite entre-temps ?)")
+        if to not in ok:
+            raise HTTPException(400, f"{to or '?'} : consentement non attesté, ce passage ne peut pas lui être attribué")
+        if to != who:
+            attrs.append((c, to))
+    vecs = []
+    if attrs:
+        try:
+            vecs = await vq_embed(q, [c for c, _ in attrs])
+        except HTTPException as e:
+            raise HTTPException(409, f"empreinte du passage impossible pour l'instant ({e.detail}) : réessayez")
+        if any(v is None for v in vecs):
+            raise HTTPException(400, "passage trop court pour une empreinte : retirez-le (✕) sans l'attribuer")
+    same = [float(a.get("t", -1)) for a in body.attribute if str(a.get("to") or "") == who]   # « c'est bien lui »
+    excl_t = [float(t) for t in body.exclude if not any(abs(float(t) - x) < 0.01 for x in same)] + [float(c["t"]) for c, _ in attrs]
+    clips = [c for c in q.get("clips") or [] if any(abs(float(c["t"]) - t) < 0.01 for t in excl_t)]
     excluded = []
     if body.answer in ("yes", "other"):
         if who not in ok:
@@ -1791,12 +1829,31 @@ async def voice_question_answer(body: VoiceAnswer, u: dict = Depends(require_adm
         vp_save(vd)
         vp_schedule([who], u["login"])          # la voix confirmée rejoint l'empreinte à la recherche suivante
         d = vq_load()
+    attributed = []
+    if attrs:                     # chaque passage attribué compte, validé, dans l'empreinte de cette personne
+        vd = vp_load()
+        for (c, to), v in zip(attrs, vecs):
+            tid = f"{q['worker']}/{q['meeting']}|question@{c['t']}"
+            dur = round(min(float(c["te"]) - float(c["t"]), 12.0), 1)
+            e2 = vd.setdefault(to, {})
+            e2.setdefault("groups", {})[tid] = {
+                "worker": q["worker"], "meeting": q["meeting"], "title": q.get("title"), "label": q.get("label"),
+                "kind": "confirmée", "manual": True, "from": q["name"], "sum": v, "n": 1, "sec": dur, "dropped": 0,
+                "clips": [{"t": c["t"], "te": c["te"], "text": (c.get("text") or "")[:200], "v": v, "d": dur}],
+                "found_at": now}
+            e2.setdefault("review", {})[tid] = {"ok": True, "at": now, "by": u["login"], "via": "question"}
+            vp_compute(e2)
+            attributed.append([to, tid])
+        vp_save(vd)
+        await voiceprints_push()
+        d = vq_load()
     d["answers"][body.id] = {"answer": body.answer, "name": q["name"], **({"to": who} if body.answer == "other" else {}),
-                             **({"excluded": excluded} if excluded else {}),
+                             **({"excluded": excluded} if excluded else {}), **({"attributed": attributed} if attributed else {}),
                              "label": q.get("label"), "at": now, "by": u["login"]}
     vq_save(d)
     log.info("question %s (%s ?) : %s%s%s par %s", body.id, q["name"], body.answer, f" ({who})" if body.answer == "other" else "",
-             f", {len(excluded)} passage(s) retiré(s)" if excluded else "", u["login"])
+             f", {len(excluded)} passage(s) retiré(s)" + (f", {len(attributed)} attribué(s)" if attributed else "")
+             if excluded or attributed else "", u["login"])
     return {"ok": True, "named": who, "left": len(vq_pending(d, ok))}
 
 

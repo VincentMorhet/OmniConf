@@ -34,9 +34,9 @@ def serve():
                           {"t": t0 + 30, "te": t0 + 36, "text": "Deuxième extrait d'essai."},
                           {"t": t0 + 60, "te": t0 + 64, "text": "Troisième extrait d'essai.", "odd": True}],
                 "worker": w, "meeting": stem, "title": "Réunion d'essai", "found_at": "2026-11-15T09:00:00+01:00", **kw}
-    items = {f"{w}/{stem}|S1": q("S1", "Intervenant 1", NAME, 0.91, 20.0),
+    items = {f"{w}/{stem}|S1": q("S1", "Intervenant 1", NAME, 0.72, 20.0),
              f"{w}/{stem}|S2": q("S2", "Vignette Erronée (2)", NAME, 0.78, 120.0, alt=OTHER, alt_sim=0.74),
-             f"{w}/{stem}|S3": q("S3", "Intervenant 3 (sans vignette)", OTHER, 0.74, 220.0),
+             f"{w}/{stem}|S3": q("S3", "Intervenant 3 (sans vignette)", OTHER, 0.86, 220.0),
              f"{w}/{stem}|S4": q("S4", "Intervenant 4", "Inconnu Total", 0.95, 320.0)}       # personne non cochée
     (data / "voice_questions.json").write_text(json.dumps({"items": items, "answers": {}}))
     os.environ.update(ADMIN_LOGIN="essai", ADMIN_NAME="Compte Essai", COOKIE_SECURE="0", SECRET_KEY=os.urandom(16).hex())
@@ -44,7 +44,7 @@ def serve():
     os.chdir(Path(__file__).resolve().parent.parent / "control")
     import app as A
     import uvicorn
-    calls = {"named": [], "scheduled": []}
+    calls = {"named": [], "scheduled": [], "embeds": []}
 
     async def no_push(names=None):            # rien n'est envoyé aux assistants
         return {w: "essai : non diffusé"}
@@ -56,11 +56,17 @@ def serve():
     A.vp_schedule = lambda names, by, delay=60: calls["scheduled"].append(list(names))
     A._vq_name = fake_name
 
+    async def fake_embed(qq, clips):          # empreinte d'un passage : calculée par l'assistant en vrai, imitée ici
+        calls["embeds"].append([c["t"] for c in clips])
+        return [[round(1 / 192 ** 0.5, 6)] * 192 for _ in clips]
+    A.vq_embed = fake_embed
+
     @A.app.get("/test/state")
     async def state():
         return {"calls": calls, "answers": A.vq_load()["answers"],
                 "review": {n: e.get("review") for n, e in A.vp_load().items()},
-                "clip_review": {n: e.get("clip_review") or {} for n, e in A.vp_load().items()}}
+                "clip_review": {n: e.get("clip_review") or {} for n, e in A.vp_load().items()},
+                "groups": {n: e.get("groups") or {} for n, e in A.vp_load().items()}, "embeds": calls["embeds"]}
     uvicorn.run(A.app, host="127.0.0.1", port=int(os.environ.get("TEST_PORT", "8099")), log_level="warning")
 
 
@@ -83,7 +89,7 @@ async def main():
     st = lambda: api.get("/test/state").json()
     d = api.get("/api/voice-questions").json()
     qs = d["questions"]
-    check([q["sid"] for q in qs] == ["S1", "S2", "S3"], f"3 questions, la plus ressemblante d'abord ; personne non cochée écartée ({[q['sid'] for q in qs]})")
+    check([q["sid"] for q in qs] == ["S1", "S2", "S3"], f"3 questions, les plus douteuses d'abord ; personne non cochée écartée ({[q['sid'] for q in qs]})")
     check(qs[1].get("alt") == OTHER and qs[1].get("alt_sim") == 0.74, "hésitation entre deux personnes transmise")
     check(not any(len(x) >= 64 for q in qs for x in q.values() if isinstance(x, list)), "aucune empreinte envoyée à l'IHM")
     r = api.get("/api/voice-questions/clip", params={"id": qs[0]["id"], "t": 20.0})
@@ -113,7 +119,7 @@ async def main():
             if w == 1280:
                 check(await pg.locator("#askCount").inner_text() == "3", "accueil : « Qui parle ? » avec 3 questions")
                 check("Est-ce Personne Essai ?" in await box.inner_text() and "Intervenant 1" in await box.inner_text(),
-                      "la plus ressemblante d'abord : « Est-ce Personne Essai ? »")
+                      "la plus douteuse d'abord : « Est-ce Personne Essai ? »")
                 await box.locator(".clip").first.click()
                 await pg.wait_for_function("() => { const b = document.querySelector('#askBox .clip'); return b && !b.classList.contains('loading') && b.classList.contains('playing'); }", timeout=20000)
                 check(True, "extrait en lecture")
@@ -135,8 +141,11 @@ async def main():
                     await rows.nth(i).locator(".cx-undo").click()
                 check(not await q1.locator(".a-yes").is_disabled() and await rows.nth(0).get_attribute("class") == "clip-row",
                       "« Rétablir » : passage remis")
+                await rows.nth(1).locator(".cx-to").select_option(OTHER)
+                check(f"c'est {OTHER}, ce passage comptera dans son empreinte" in await rows.nth(1).inner_text()
+                      and "dont 1 attribué" in await q1.locator(".ask-tip").inner_text(), f"passage attribué à {OTHER} (« C'est… »)")
                 await box.screenshot(path="voice-ask-excl.png")
-                # oui (sans le 2e passage), puis annuler
+                # oui (sans le 2e passage, attribué à l'autre personne), puis annuler
                 await box.locator(".a-yes").click()
                 await pg.wait_for_selector("#askBox .ask-done")
                 s = st()
@@ -148,6 +157,12 @@ async def main():
                 check(list(cr) == [f"{gid}@50.0"] and cr[f"{gid}@50.0"].get("via") == "question"
                       and s["answers"][f"{W}/{STEM}|S1"].get("excluded") == [f"{gid}@50.0"],
                       f"passage retiré : hors de l'empreinte (et des passages qui lui ressemblent) ({list(cr)})")
+                tid = f"{W}/{STEM}|question@50.0"
+                g = s["groups"][OTHER].get(tid) or {}
+                check(g.get("manual") and len(g.get("sum") or []) == 192 and (s["review"][OTHER].get(tid) or {}).get("ok") is True
+                      and s["embeds"] == [[50.0]] and s["answers"][f"{W}/{STEM}|S1"].get("attributed") == [[OTHER, tid]],
+                      f"passage attribué : empreinte calculée, ajouté validé à celle de {OTHER}")
+                check(f"1 passage attribué à {OTHER}" in await box.inner_text(), "réponse rappelée avec le passage attribué")
                 check(await pg.locator("#askCount").inner_text() == "2" and "Vignette Erronée" in await box.inner_text()
                       and "s'appelle maintenant Personne Essai" in await box.inner_text(), "réponse rappelée (avec « Annuler »), question suivante, compteur à 2")
                 await box.screenshot(path="voice-ask-done.png")
@@ -157,6 +172,7 @@ async def main():
                 check(s["calls"]["named"][-1] == ["S1", None, None] and gid not in (s["review"][NAME] or {}) and not s["answers"],
                       "annuler : nom retiré, voix retirée de l'empreinte, question reposée")
                 check(not s["clip_review"][NAME], "annuler : passage retiré rétabli")
+                check(tid not in s["groups"][OTHER] and tid not in (s["review"][OTHER] or {}), f"annuler : passage retiré de l'empreinte de {OTHER}")
                 # plus tard : question suivante
                 await box.locator(".a-skip").click()
                 await pg.wait_for_function("() => document.querySelector('#askBox .ask-q')?.textContent.includes('Vignette Erronée')")
