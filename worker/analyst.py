@@ -40,7 +40,7 @@ log = logging.getLogger("analyst")
 
 API = os.environ.get("OVH_AI_BASE_URL", "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1")
 TOKEN = os.environ.get("OVH_AI_ENDPOINTS_ACCESS_TOKEN", "")
-LIVE_MODEL = os.environ.get("ANALYSIS_MODEL", os.environ.get("TRANSCRIPT_LLM_MODEL", "Qwen3.8-27B") + ":low")
+LIVE_MODEL = os.environ.get("ANALYSIS_MODEL", "Qwen3.8-27B:low")      # points d'étape (toutes les 5 min)
 LIVE_EVERY = float(os.environ.get("ANALYSIS_EVERY", "300"))
 LIVE_MIN_WORDS = int(os.environ.get("ANALYSIS_MIN_WORDS", "40"))
 REPORT_MODELS = [m.strip() for m in os.environ.get(
@@ -511,6 +511,116 @@ async def live_analysis(llm: LLM, doc: dict, prev: dict | None, since: float) ->
                     "points": [x for x in flash.get("points") or [] if x]}
     out["_secs"] = res["secs"]
     return fix_dates(out, doc)
+
+
+# ============================================================================ « En ce moment » (fréquent, modèle rapide)
+# Seule la partie « En ce moment » est recalculée toutes les ~20 s, sur la fin de la transcription : le sujet en
+# cours est un chemin de 1 à 3 niveaux (sujet › sous-sujet › point précis) et tout changement, à n'importe quel
+# niveau, est signalé avec son heure. Le reste du compte rendu en direct garde son rythme (ANALYSIS_EVERY).
+NOW_MODEL = os.environ.get("NOW_MODEL", "Qwen3.8-27B:none")
+NOW_EVERY = float(os.environ.get("NOW_EVERY", "20"))
+NOW_WINDOW = float(os.environ.get("NOW_WINDOW", "150"))     # fin de transcription relue (secondes)
+NOW_MIN_WORDS = int(os.environ.get("NOW_MIN_WORDS", "12"))  # mots nouveaux avant de relancer
+NOW_LEVELS = 3
+
+NOW_SYSTEM = """Tu suis une réunion EN COURS, en direct. Toutes les 20 secondes environ, tu dis de quoi on parle À
+L'INSTANT et tu repères le moindre changement de sujet, à n'importe quel niveau.
+Le sujet est un chemin de 3 niveaux, du plus général au plus précis :
+1. le sujet : point de l'ordre du jour, grande partie d'une présentation ;
+2. le sous-sujet : partie de ce sujet, section de la présentation, question traitée ;
+3. le point précis discuté à l'instant : un cas, un chiffre, un exemple, une diapositive, une objection.
+Intitulés courts et concrets (2 à 8 mots), sans nom de personne, jamais génériques (« Réunion »,
+« Discussion », « Échanges », « Présentation du contexte » qui durerait toute la réunion).
+Tu reçois le chemin actuel et la fin de la transcription. SEULES les phrases après « ▶ NOUVEAU » (les
+dernières secondes) disent où on en est ; ce qui précède n'est que du contexte.
+Pour chaque niveau du chemin actuel, demande-toi : décrit-il encore exactement ce dont parlent les phrases
+NOUVEAU ?
+- Oui pour les trois : "garde": [true, true, true] et recopie le chemin à l'identique.
+- Sinon, le premier niveau qui ne convient plus et ceux en dessous changent : "garde" vaut false à partir de
+  ce niveau ; recopie à l'identique les niveaux gardés, donne les nouveaux intitulés des autres ; "depuis" =
+  horodatage de la première phrase du nouveau sujet.
+Signale le changement dès qu'il est net, sans attendre que l'ancien sujet ait disparu de la transcription :
+annonce (« passons à », « deuxième point », « diapositive suivante »), nouvelle partie d'une présentation,
+nouvelle question qui lance un échange, retour à un sujet précédent.
+Pas de changement pour une phrase isolée, une simple reformulation ou un aparté de quelques secondes (son, écran).
+Un sujet déjà repéré dans la réunion garde son intitulé.
+"en_cours" : une phrase de 25 mots au plus sur ce qui se dit à l'instant ; intervenants désignés par leur
+identifiant entre accolades ({S1}, {ME}) ; uniquement ce qui est dit, sans rien inventer.
+Réponds UNIQUEMENT par ce JSON :
+{"garde": [true, true, false], "chemin": ["sujet", "sous-sujet", "point précis"], "depuis": "mm:ss", "en_cours": "…"}"""
+
+_ws = lambda s: re.sub(r"\s+", " ", str(s or "")).strip().strip(" .;:›>")
+_nk = lambda s: re.sub(r"\W+", " ", _ws(s).lower()).strip()
+
+
+def now_user(lines: list[tuple], lab: dict, prev: dict | None, since: float | None, topics: list[str]) -> str:
+    """Message du modèle : sujets déjà repérés, chemin précédent, fin de la transcription (marque ▶ NOUVEAU)."""
+    out = []
+    if topics:
+        out.append("Sujets déjà repérés dans la réunion : " + " ; ".join(topics[-15:]) + ".")
+    if prev and prev.get("chemin"):
+        out.append(f"Chemin actuel (depuis {fmt_t(prev.get('depuis'))}) : "
+                   + " › ".join(f"{i}. {x}" for i, x in enumerate(prev["chemin"], 1)))
+    else:
+        out.append("Pas de chemin actuel : établis-le d'après la transcription (\"garde\": []).")
+    out.append("\nFin de la transcription :")
+    marked = since is None
+    for t, sid, text in lines:
+        if not marked and t >= since:
+            out.append("▶ NOUVEAU")
+            marked = True
+        out.append(f"[{fmt_t(t)}] {{{sid}}} {lab.get(sid, sid)} : {text}")
+    return "\n".join(out)
+
+
+def merge_now(prev: dict | None, data: dict, t_new: float, t_min: float, t_max: float) -> dict:
+    """Réponse du modèle -> nouvel état. Les niveaux qui ne changent pas gardent leur intitulé (affichage stable) ;
+    « niveau » = niveau le plus général qui a changé (None : même sujet, ou premier point de la réunion).
+    `t_new` : première phrase nouvelle ; [t_min, t_max] : bornes de la fenêtre relue (pour « depuis »)."""
+    new = [_ws(x)[:90] for x in (data.get("chemin") or []) if _ws(x)][:NOW_LEVELS]
+    if not new:
+        raise ValueError("chemin vide")
+    old = list((prev or {}).get("chemin") or [])
+    garde = data.get("garde")
+    if isinstance(garde, list) and old:
+        # niveau du changement = premier niveau du chemin actuel qui ne décrit plus ce qui se dit
+        k = next((i + 1 for i, g in enumerate(garde[:len(old)]) if g is False or str(g).lower() == "false"), 0)
+    else:
+        try:
+            k = int(data.get("changement") or 0)
+        except (TypeError, ValueError):
+            k = 0
+    k = max(0, min(k, len(new)))
+    t = parse_t(data.get("depuis"))
+    t = t_new if t is None else min(max(t, t_min), t_max)
+    phrase = _ws(data.get("en_cours"))[:300]
+    if not old:
+        return {"chemin": new, "niveau": None, "depuis": t, "en_cours": phrase}
+    same = lambda a, b: [_nk(x) for x in a] == [_nk(x) for x in b]
+    if k == 0:
+        # même sujet : chemin précédent gardé ; un niveau plus précis qui apparaît est un nouveau point
+        if len(new) > len(old) and same(new[:len(old)], old):
+            return {"chemin": old + new[len(old):], "niveau": len(old) + 1, "depuis": t, "en_cours": phrase}
+        return {"chemin": old, "niveau": None, "depuis": prev.get("depuis"), "en_cours": phrase}
+    chemin = old[:k - 1] + new[k - 1:] if len(old) >= k - 1 else new
+    # niveau réel du changement : premier intitulé qui diffère (un niveau annoncé comme changé mais recopié tel quel
+    # ne compte pas : « Présentation › Options » -> « Présentation › Budget » est un nouveau sous-sujet)
+    diff = next((i for i in range(max(len(chemin), len(old)))
+                 if i >= len(chemin) or i >= len(old) or _nk(chemin[i]) != _nk(old[i])), None)
+    if diff is None or diff >= len(chemin):   # mêmes intitulés (ou seulement un niveau en moins) : rien ne change
+        return {"chemin": old, "niveau": None, "depuis": prev.get("depuis"), "en_cours": phrase}
+    return {"chemin": old[:diff] + chemin[diff:], "niveau": diff + 1, "depuis": t, "en_cours": phrase}
+
+
+async def live_now(llm: LLM, lines: list[tuple], lab: dict, prev: dict | None, since: float | None,
+                   topics: list[str] | None = None) -> dict:
+    """« En ce moment » : `lines` = [(t, voix, texte)] de la fin de la transcription (mise en forme et en attente)."""
+    data, res = await llm.chat_json(NOW_MODEL, NOW_SYSTEM, now_user(lines, lab, prev, since, topics or []),
+                                    reasoning="none", max_tokens=800, temperature=0.1, deadline=45)
+    t_new = next((t for t, _, _ in lines if since is None or t >= since), lines[-1][0])
+    out = merge_now(prev, data, t_new, lines[0][0], lines[-1][0])
+    out["_secs"] = res["secs"]
+    return out
 
 
 # ============================================================================ compte rendu final

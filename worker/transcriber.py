@@ -34,7 +34,11 @@ log = logging.getLogger("transcriber")
 API = os.environ.get("OVH_AI_BASE_URL", "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1")
 TOKEN = os.environ.get("OVH_AI_ENDPOINTS_ACCESS_TOKEN", "")
 ASR_MODEL = os.environ.get("TRANSCRIPT_ASR_MODEL", "whisper-large-v3")
-LLM_MODEL = os.environ.get("TRANSCRIPT_LLM_MODEL", "Qwen3.8-27B")
+# mise en forme (nettoyage de la transcription brute) : petit modèle rapide (MoE, ~3 milliards de paramètres actifs :
+# 1,3 s par tronçon au lieu de 5,3 s, résultat identique à 99 % au banc d'essai du 20/11) ; si sa réponse est
+# inutilisable (JSON, identifiants des voix changés), le tronçon est refait une fois avec le modèle de secours
+LLM_MODEL = os.environ.get("TRANSCRIPT_LLM_MODEL", "qwen3.6-35b-a3b")
+LLM_FALLBACK = os.environ.get("TRANSCRIPT_LLM_FALLBACK", "Qwen3.8-27B")
 LANG = os.environ.get("TRANSCRIPT_LANG", "fr")
 GLOSSARY = os.environ.get("TRANSCRIPT_GLOSSARY", "")
 ME = os.environ.get("TRANSCRIPT_ME_LABEL", "Moi")
@@ -162,6 +166,9 @@ class Transcriber:
         # points d'étape (analyse en direct) : état cumulé + un « flash » par tranche de ~5 min
         self.analysis = {"v": 0, "state": None, "flashes": [], "upto": 0.0, "at": None, "running": False,
                          "error": None, "last_run": time.time()}
+        # « En ce moment » : recalculé toutes les ~20 s (modèle rapide) ; hist = changements de sujet détectés
+        self.now = {"v": 0, "state": None, "hist": [], "upto": None, "at": None, "running": False, "error": None,
+                    "secs": None}
 
     @property
     def enabled(self) -> bool:
@@ -180,7 +187,17 @@ class Transcriber:
         a = self.analysis
         nxt = max(0, round(a["last_run"] + analyst.LIVE_EVERY - time.time())) if self.active else None
         return {"v": a["v"], "running": a["running"], "at": a["at"], "next_in": nxt, "error": a["error"],
-                "count": len(a["flashes"]), "model": analyst.LIVE_MODEL, "every": analyst.LIVE_EVERY}
+                "count": len(a["flashes"]), "model": analyst.LIVE_MODEL, "every": analyst.LIVE_EVERY,
+                "now": self.now_status()}
+
+    def now_status(self) -> dict | None:
+        """« En ce moment » (petit : envoyé avec chaque état de l'assistant) : sujet en cours, derniers changements."""
+        n = self.now
+        if not self.active and not n["state"]:
+            return None
+        return {**(n["state"] or {}), "v": n["v"], "at": n["at"], "running": n["running"], "error": n["error"],
+                "secs": n["secs"], "every": analyst.NOW_EVERY, "model": analyst.NOW_MODEL, "hist": n["hist"][-8:],
+                "live": self.active}
 
     # ------------------------------------------------------------------ cycle de vie
     async def start(self, base: Path, t0: float, meta: dict, bot_names: tuple = (), me_name: str | None = None):
@@ -198,6 +215,8 @@ class Transcriber:
         for source, speaker in (("meeting_out.monitor", "meet"), ("user_in.monitor", "ME")):
             self.tasks.append(asyncio.create_task(self._capture(source, speaker)))
         self.tasks.append(asyncio.create_task(self._format_loop()))
+        if analyst.NOW_EVERY > 0:
+            self.tasks.append(asyncio.create_task(self._now_loop()))
         if slides_mod.ENABLED:   # diapositives partagées : lues par un modèle d'image
             self.slide_reader = slides_mod.SlideReader(self.http, API, base, self.slides, on_change=self._save)
             self.tasks.append(asyncio.create_task(self.slide_reader.live(
@@ -223,7 +242,7 @@ class Transcriber:
             t.cancel()
         if self.an_task and not self.an_task.done():
             self.an_task.cancel()  # le compte rendu final prend le relais
-        self.analysis["running"] = False
+        self.analysis["running"] = self.now["running"] = False
         self.tasks, self.procs = [], []
         self._merge()
         await self._format(final=True)
@@ -551,27 +570,28 @@ class Transcriber:
             raw_txt = "\n".join(f"[{_fmt_t(e['t'])}] [{e['spk']}] {name(e['spk'])} : {e['text']}" for e in useful)
             user = (f"Contexte déjà mis en forme (ne pas le répéter) :\n{context}\n\n" if context else "") + \
                    f"Transcription brute à mettre en forme :\n{raw_txt}"
-            paras = None
-            try:
-                r = await self.http.post(f"{API}/chat/completions", json={
-                    "model": LLM_MODEL, "temperature": 0.2, "max_tokens": 4000, "reasoning_effort": "none",
-                    "messages": [{"role": "system", "content": SYSTEM_PROMPT.format(lang=LANG, glossary=self.format_glossary())},
-                                 {"role": "user", "content": user}]})
-                r.raise_for_status()
-                content = r.json()["choices"][0]["message"]["content"] or ""
-                m = re.search(r"\{.*\}", content, re.S)
-                paras = json.loads(m.group(0))["paragraphs"] if m else None
-            except Exception as e:
-                self.last_error = f"Qwen : {str(e)[:150]}"
-                log.warning("format: %s", e)
             valid = {e["spk"] for e in useful}
+            system = SYSTEM_PROMPT.format(lang=LANG, glossary=self.format_glossary())
+            paras, err = None, None
+            for model in dict.fromkeys(m for m in (LLM_MODEL, LLM_FALLBACK) if m):
+                try:
+                    paras = await self._format_call(model, system, user, valid)
+                    break
+                except Exception as e:
+                    err = f"mise en forme ({model}) : {str(e)[:150]}"
+                    log.warning("format (%s) : %s", model, e)
+            if paras is None and err:          # aucun modèle n'a répondu : texte brut gardé, erreur affichée
+                self.last_error = err
             out = []
-            if paras and all(str(p.get("id")) in valid for p in paras if p.get("text")):
+            if paras:
                 for p in paras:
                     text = str(p.get("text", "")).strip()
                     if not text:
                         continue
                     t = _parse_t(p.get("t", ""))
+                    if out and out[-1]["spk"] == str(p["id"]):   # même voix à la suite : un seul paragraphe
+                        out[-1]["text"] += " " + text            # (le petit modèle ne regroupe pas toujours)
+                        continue
                     out.append({"t": t if t is not None else useful[0]["t"], "spk": str(p["id"]), "text": text})
             else:  # LLM indisponible ou locuteurs mélangés : on garde le brut, regroupé par locuteur
                 for e in useful:
@@ -585,6 +605,25 @@ class Transcriber:
             for e in lines:
                 e["done"] = True
             self._save()
+
+    async def _format_call(self, model: str, system: str, user: str, valid: set) -> list[dict]:
+        """Un appel de mise en forme ; ValueError si la réponse est inutilisable (le suivant prend le relais)."""
+        body = {"model": model, "temperature": 0.2, "max_tokens": 4000,
+                "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
+        if "qwen" in model.lower():
+            body["reasoning_effort"] = "none"
+        elif "gpt-oss" in model.lower():
+            body["reasoning_effort"] = "low"
+        r = await self.http.post(f"{API}/chat/completions", json=body)
+        r.raise_for_status()
+        content = r.json()["choices"][0]["message"].get("content") or ""
+        m = re.search(r"\{.*\}", content, re.S)
+        paras = json.loads(m.group(0))["paragraphs"] if m else None
+        if not paras:
+            raise ValueError("réponse sans paragraphes")
+        if not all(str(p.get("id")) in valid for p in paras if p.get("text")):
+            raise ValueError("identifiants des voix changés")
+        return paras
 
     # ------------------------------------------------------------------ points d'étape (analyse)
     def maybe_analyze(self, force: bool = False) -> bool:
@@ -628,6 +667,68 @@ class Transcriber:
         finally:
             a["running"] = False
 
+    # ------------------------------------------------------------------ « En ce moment » (toutes les ~20 s)
+    async def _now_loop(self):
+        try:
+            while True:
+                await asyncio.sleep(analyst.NOW_EVERY)
+                try:
+                    await self._now()
+                except Exception as e:      # jamais d'arrêt de la boucle
+                    self.now["error"] = f"en ce moment : {str(e)[:150]}"
+                    log.warning("en ce moment : %s", e)
+        except asyncio.CancelledError:
+            pass
+
+    def _now_lines(self, t_from: float, max_chars: int = 9000) -> list[tuple]:
+        """Fin de la transcription : paragraphes mis en forme puis lignes encore brutes (plus récentes), ainsi le
+        sujet suit la parole sans attendre la mise en forme. [(t, voix, texte)] chronologique."""
+        paras = [p for p in self.paragraphs if p.get("text")]
+        out = [(p["t"], p["spk"], p["text"]) for p in paras if p["t"] >= t_from] or \
+              [(p["t"], p["spk"], p["text"]) for p in paras[-3:]]
+        last = max((p["t"] for p in paras), default=-1.0)
+        out += [(e["t"], e["spk"], e["text"]) for e in sorted(self.raw, key=lambda e: e["t"])
+                if not e["done"] and e["text"] and e["t"] > last and e["t"] >= t_from]
+        out.sort(key=lambda x: x[0])
+        while len(out) > 2 and sum(len(x[2]) for x in out) > max_chars:
+            out.pop(0)
+        return out
+
+    async def _now(self):
+        n = self.now
+        if not self.active or n["running"]:
+            return
+        lines = self._now_lines(time.time() - self.t0 - analyst.NOW_WINDOW)
+        if not lines:
+            return
+        fresh = sum(len(x[2].split()) for x in lines if n["upto"] is None or x[0] >= n["upto"])
+        if fresh < analyst.NOW_MIN_WORDS:
+            return
+        lab = {k: v.get("label", k) for k, v in self.labels().items()}
+        topics = []
+        for s in (self.analysis["state"] or {}).get("sujets") or []:
+            if isinstance(s, dict) and s.get("titre"):
+                topics.append(str(s["titre"]))
+        topics += [h["chemin"][0] for h in n["hist"] if h.get("chemin")]
+        topics = list(dict.fromkeys(topics))
+        n["running"] = True
+        try:
+            res = await analyst.live_now(self.llm, lines, lab, n["state"], n["upto"], topics)
+        finally:
+            n["running"] = False
+        if not self.active:
+            return
+        now_iso = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+        n["secs"] = res.pop("_secs", None)
+        if res["niveau"] or not n["state"]:
+            res["changed_at"] = now_iso
+            n["hist"].append({"t": res["depuis"], "chemin": res["chemin"], "niveau": res["niveau"], "at": now_iso})
+        else:
+            res["changed_at"] = n["state"].get("changed_at")
+        n["state"], n["upto"] = res, lines[-1][0] + 0.01
+        n["v"] += 1
+        n["at"], n["error"] = now_iso, None
+
     def analysis_doc(self) -> dict:
         a = self.analysis
         return {**self.analysis_status(), "state": a["state"], "flashes": a["flashes"], "upto": a["upto"],
@@ -653,7 +754,8 @@ class Transcriber:
                 "asr_stats": self.asr_stats,
                 "raw": [{k: e[k] for k in ("t", "te", "spk", "ui", "text", "conf", "suspect", "retranscrit") if k in e}
                         for e in self.raw if e["text"]],
-                "analysis": {"state": a["state"], "flashes": a["flashes"], "upto": a["upto"], "at": a["at"]}}
+                "analysis": {"state": a["state"], "flashes": a["flashes"], "upto": a["upto"], "at": a["at"],
+                             "now": self.now["state"], "now_hist": self.now["hist"]}}
 
     def _save(self):
         if self.base:

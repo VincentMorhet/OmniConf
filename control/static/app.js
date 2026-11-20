@@ -294,6 +294,7 @@ function render(st) {
   $(".trb", el).classList.toggle("hidden", !tr.active);
   t.status = tr;
   if (tr.analysis && tr.analysis.v !== t.anV && !t.anLoading) fetchAnalysis(st.name);
+  else if (t.an && (tr.analysis?.now?.v ?? 0) !== t.nowV) { t.nowV = tr.analysis?.now?.v ?? 0; paintAnalysis(st.name); }  // « En ce moment » seul
   renderTr(st.name);
   renderTile(st);
   if (fName === st.name) renderFocus(st);
@@ -330,9 +331,13 @@ function renderTile(st) {
   if (sessions[st.name]) meta.push("🎧 vous écoutez");
   if (st.viewer) meta.push("👥 partagée par " + (st.owner_name || "son propriétaire"));
   $(".tmeta", el).textContent = meta.join(" · ");
-  const now = t.an?.state?.en_cours, p = $(".tnow", el);
-  p.classList.toggle("hidden", !now || !busy);
-  if (now) p.innerHTML = "🎯 " + whoH(now, t.speakers || t.an.speakers, t.aliases || t.an.aliases);
+  const nw = t.status?.analysis?.now, path = nw?.live && nw.chemin?.length ? nw : null;
+  const now = path ? (nw.en_cours || "") : t.an?.state?.en_cours, p = $(".tnow", el);
+  const spT = t.speakers || t.an?.speakers, alT = t.aliases || t.an?.aliases;
+  p.classList.toggle("hidden", !(path || now) || !busy);
+  if (path) p.innerHTML = (nowRecent(nw) ? `<span class="now-badge">${esc(NOW_LVL[nw.niveau])}</span> ` : "🎯 ")
+    + `<b>${esc(nw.chemin.join(" › "))}</b>` + (now && spT ? " — " + whoH(now, spT, alT) : "");   // phrase : une fois les noms des voix connus
+  else if (now) p.innerHTML = "🎯 " + whoH(now, spT, alT);
   el.classList.toggle("err", st.state === "error");
   const c = chips[st.name];
   c.className = "wchip s-" + (st.online ? st.state : "offline");
@@ -643,13 +648,36 @@ const secH = (title, inner, cls = "") => inner ? `<section class="an-sec ${cls}"
 const ulH = (items, f) => { items = (items || []).filter(Boolean); return items.length ? "<ul>" + items.map(x => `<li>${f(x)}</li>`).join("") + "</ul>" : ""; };
 function bindSeek(box, seek) { box.addEventListener("click", (e) => { const ts = e.target.closest(".ts.seek"); if (ts && seek) seek(+ts.dataset.t); }); }
 
+// « En ce moment » : sujet en cours (sujet › sous-sujet › point précis), recalculé toutes les ~20 s ; le niveau qui
+// vient de changer est mis en évidence pendant 2 minutes
+const NOW_LVL = { 1: "🔀 Nouveau sujet", 2: "↪ Nouveau sous-sujet", 3: "• Nouveau point" };
+const nowRecent = (n) => !!(n?.niveau && n.changed_at && Date.now() - Date.parse(n.changed_at) < 120000);
+function nowH(n, st, W) {
+  if (!n?.live || !n.chemin?.length) return secH("🎯 En ce moment", st?.en_cours ? `<p>${W(st.en_cours)}</p>` : "");
+  const recent = nowRecent(n);
+  const path = n.chemin.map((x, i) => `<span class="lvl l${i + 1}${recent && i + 1 >= n.niveau ? " chg" : ""}">${esc(x)}</span>`)
+    .join('<span class="sep">›</span>');
+  return secH("🎯 En ce moment", (recent ? `<span class="now-badge">${esc(NOW_LVL[n.niveau] || "")}</span>` : "")
+    + `<div class="now-path">${path}</div>`
+    + (n.en_cours ? `<p>${W(n.en_cours)}</p>` : "")
+    + `<div class="meta">depuis${tsH(n.depuis)}${n.error ? " · ⚠️ " + esc(n.error) : ""}</div>`, "now");
+}
+function nowHistH(hist) {
+  hist = (hist || []).filter(h => h?.chemin?.length);
+  if (hist.length < 2) return "";
+  return secH("🔀 Fil des sujets", `<ul class="now-hist">${hist.slice().reverse().map(h => {
+    const k = h.niveau || 1, head = h.chemin.slice(0, k - 1).join(" › ");
+    return `<li class="n${k}">${tsH(h.t)} ${head ? `<span class="meta">${esc(head)} › </span>` : ""}<b>${esc(h.chemin.slice(k - 1).join(" › "))}</b></li>`;
+  }).join("")}</ul>`);
+}
+
 function analysisHtml(a, sp, al) {
   const W = (x) => whoH(x, sp, al), st = a?.state;
-  if (!st) return `<p class="empty">${a?.running ? "Rédaction du premier point en cours…" :
+  if (!st) return nowH(a?.now, null, W) + `<p class="empty">${a?.running ? "Rédaction du premier point en cours…" :
     a?.next_in != null ? `Le compte rendu en direct apparaîtra ici dans ~${Math.max(1, Math.round(a.next_in / 60))} min, puis sera mis à jour toutes les ${Math.round((a.every || 300) / 60)} minutes (ou tout de suite avec « ↻ Mettre à jour »).<br><br>En attendant, l'onglet « 📝 Transcription » défile en direct.`
       : "Aucun point d'étape pour cette réunion."}</p>`;
   const qs = (st.questions || []).slice().sort((x, y) => (x.statut === "répondue") - (y.statut === "répondue"));
-  return secH("🎯 En ce moment", st.en_cours ? `<p>${W(st.en_cours)}</p>` : "")
+  return nowH(a.now, st, W)
     + secH("🙋 Pour toi", ulH(st.pour_moi, x => W(x.texte) + tsH(x.t)), "me")
     + secH("🧭 Où en est-on", st.synthese ? `<p>${W(st.synthese)}</p>` : "")
     + secH("⭐ À retenir", ulH(st.a_retenir, W))
@@ -659,6 +687,7 @@ function analysisHtml(a, sp, al) {
     + secH("⚠️ Points de vigilance", ulH(st.vigilance, x => W(x.texte) + tsH(x.t)), "warn")
     + secH("🗂 Sujets abordés", (st.sujets || []).length ? `<div class="topics">${st.sujets.map(x =>
         `<span class="topic ${x.statut === "en cours" ? "cur" : x.statut === "reporté" ? "later" : ""}" title="${esc(x.statut || "")}">${W(x.titre)}${tsH(x.t)}</span>`).join("")}</div>` : "")
+    + nowHistH(a.now?.hist || a.now_hist)
     + secH("🕒 Fil de la réunion", (a.flashes || []).slice().reverse().map(f =>
         `<div class="flash"><div class="fh"><span class="ts seek" data-t="${f.de}">${fmtT(f.de)} → ${fmtT(f.a)}</span> <b>${W(f.titre)}</b></div>
          <p>${W(f.resume)}</p>${ulH(f.points, W)}</div>`).join(""));

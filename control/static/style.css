@@ -347,6 +347,21 @@ select.sink { max-width: 220px; min-height: 36px; padding: 6px 8px; font-size: 1
 .an-sec li { margin: 0 0 .3em; }
 .an-sec.me { background: rgba(59,130,246,.10); border: 1px solid rgba(59,130,246,.35); border-radius: 8px; padding: 2px 10px 6px; }
 .an-sec.warn h4 { color: #fbbf24; }
+/* « En ce moment » : chemin du sujet, niveau qui vient de changer en évidence */
+.an-sec.now .now-path { font-size: 15px; line-height: 1.45; margin: 2px 0 4px; }
+.now-path .lvl { border-radius: 6px; padding: 0 3px; }
+.now-path .lvl.l1 { font-weight: 700; }
+.now-path .lvl.l2 { font-weight: 600; }
+.now-path .lvl.l3 { color: var(--mute); }
+.now-path .lvl.chg { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--fg); animation: nowflash 1.2s ease-out 2; }
+.now-path .sep { color: var(--mute); margin: 0 5px; }
+.now-badge { display: inline-block; background: var(--accent); color: #fff; border-radius: 999px; padding: 1px 8px; font-size: 11.5px; font-weight: 600; margin: 0 0 4px; }
+.tnow .now-badge { margin: 0 2px 0 0; vertical-align: 1px; }
+.now-hist { list-style: none; padding-left: 0 !important; }
+.now-hist li.n2 { padding-left: 1em; }
+.now-hist li.n3 { padding-left: 2em; font-size: 13px; }
+@keyframes nowflash { from { background: color-mix(in srgb, var(--accent) 55%, transparent); } }
+@media (prefers-reduced-motion: reduce) { .now-path .lvl.chg { animation: none; } }
 .an-body .meta, .an-body .ts { color: var(--mute); font-size: 12px; }
 .an-body .ts.seek { cursor: pointer; text-decoration: underline dotted; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .an-body .ts.seek:hover { color: var(--accent); }

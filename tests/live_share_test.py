@@ -20,6 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 OUT = Path(os.environ.get("TEST_DIR", "/tmp/wk"))
 VNC_PORT = int(os.environ.get("TEST_VNC_PORT", "8096"))
+REAL_VNC = int(os.environ.get("REAL_VNC_PORT", "0"))   # serveur : écran réel d'un assistant d'essai (websockify) pour wA
 
 
 def iso(sec_ago: float) -> str:
@@ -123,9 +124,12 @@ def serve():
         except Exception:
             pass
 
-    @A.app.on_event("startup")
-    async def _vnc():
-        A.app.state.vnc = await websockets.serve(vnc_handler, "127.0.0.1", VNC_PORT, subprotocols=["binary"])
+    if REAL_VNC:
+        W["wA"]["vnc_port"] = REAL_VNC
+    else:
+        @A.app.on_event("startup")
+        async def _vnc():
+            A.app.state.vnc = await websockets.serve(vnc_handler, "127.0.0.1", VNC_PORT, subprotocols=["binary"])
 
     @A.app.post("/test/{w}/{what}")
     async def test_set(w: str, what: str):
@@ -164,6 +168,37 @@ async def login(pg, base, login_, pw, hash_="#home"):
     await pg.wait_for_selector("#tab-home:not(.hidden), .worker.meet:not(.hidden)", timeout=15000)
 
 
+async def real_vnc(me, pws):
+    """Écran réel (x11vnc d'un assistant d'essai) vu par un spectateur, avec le vrai noVNC en lecture seule."""
+    from playwright.async_api import async_playwright
+    BASE = os.environ["BASE"]
+    check(me.post("/api/workers/wA/viewers", json={"logins": ["bruno"]}).status_code == 200, "essai partage la réunion avec Bruno")
+    async with async_playwright() as p:
+        b = await p.chromium.launch(channel="chrome", headless=True)
+        ctx = await b.new_context(viewport={"width": 1280, "height": 900}, locale="fr-FR")
+        pg = await ctx.new_page()
+        await login(pg, BASE, "bruno", pws["bruno"])
+        await pg.goto(BASE + "/novnc/vnc.html?path=vnc/wA/websockify&autoconnect=1&resize=scale&view_only=1")
+        ok_ = False
+        for _ in range(30):
+            await asyncio.sleep(1)
+            st = await pg.evaluate("() => { const c = document.querySelector('#noVNC_container canvas, canvas'); return { w: c ? c.width : 0, status: (document.querySelector('#noVNC_status') || {}).textContent || '' }; }")
+            if st["w"] > 100:
+                ok_ = True
+                break
+        check(ok_, f"noVNC en lecture seule : écran réel reçu à travers le filtre ({st})")
+        await asyncio.sleep(3)
+        await pg.mouse.click(400, 300)
+        await pg.keyboard.type("abc")
+        await asyncio.sleep(2)
+        st2 = await pg.evaluate("() => { const c = document.querySelector('canvas'); return { w: c ? c.width : 0, status: (document.querySelector('#noVNC_status') || {}).textContent || '' }; }")
+        check(st2["w"] > 100 and "connect" not in st2["status"].lower().replace("connecté", ""), f"toujours connecté après clic et frappe ({st2})")
+        await pg.screenshot(path=str(OUT / "live-real-vnc.png"))
+        await b.close()
+    print(f"\n{ok} ok, {fails} échec(s)")
+    sys.exit(1 if fails else 0)
+
+
 async def main():
     import httpx
     from playwright.async_api import async_playwright
@@ -181,6 +216,8 @@ async def main():
         pws[login_] = new
     S = lambda: me.get("/test/state").json()
     ws_of = lambda c: {x["name"]: x for x in c.get("/api/workers").json()}
+    if os.environ.get("REAL_VNC") == "1":
+        return await real_vnc(me, pws)
 
     # --- avant le partage : rien pour Bruno
     check(ws_of(bru)["wA"]["state"] == "taken", "avant le partage, Bruno voit l'assistant occupé")

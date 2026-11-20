@@ -105,8 +105,9 @@ créé au premier démarrage avec `ADMIN_PASSWORD` (dans `/etc/webconf/control.e
        (diagnostic : `GET /debug/speakers` sur le worker).
    - Les phrases sont découpées sur les silences et transcrites par **Whisper large v3**, en 1 à 2 s après
      la fin de chaque phrase. Elles apparaissent d'abord en italique (texte brut).
-   - Toutes les ~20 s, **Qwen3.8-27B** les remet en forme : ponctuation, hésitations supprimées, termes
-     corrigés d'après le glossaire (`TRANSCRIPT_GLOSSARY`), paragraphes. Il ne résume rien.
+   - Toutes les ~20 s, un **petit modèle rapide** (`qwen3.6-35b-a3b`, ~1,3 s par passe) les remet en forme :
+     ponctuation, hésitations supprimées, termes corrigés d'après le glossaire (`TRANSCRIPT_GLOSSARY`) et le
+     lexique, paragraphes. Il ne résume rien. Réponse inutilisable : la passe est refaite avec Qwen3.8-27B.
    - Les deux modèles passent par **OVH AI Endpoints** ; la clé est dans `worker.env`.
    - Boutons : ⏹/▶ pour arrêter ou relancer en cours de réunion, 📋 pour copier le texte.
    - Fichiers à côté du MP4 : `<nom>.transcript.json` (brut et mis en forme) et `<nom>.md`. Les horodatages
@@ -114,11 +115,18 @@ créé au premier démarrage avec `ADMIN_PASSWORD` (dans `/etc/webconf/control.e
    - Sans enregistrement, la transcription apparaît seule dans 📁 Enregistrements (vignette 📝).
    - **🧠 Points d'étape** (onglet du panneau, pastille « nouveau ») : toutes les **5 minutes**, Qwen relit
      toute la transcription depuis le début et met à jour :
-     🎯 le sujet en cours, 🙋 **ce qui te concerne** (questions qui te sont posées, actions et engagements
+     🙋 **ce qui te concerne** (questions qui te sont posées, actions et engagements
      qui te reviennent), 🧭 où en est la réunion, ⭐ points à retenir, ✅ décisions, 📌 actions (qui, quand),
      ❓ questions ouvertes et répondues, ⚠️ points de vigilance (désaccords, risques, chiffres qui changent),
      🗂 sujets abordés, et 🕒 le **fil de la réunion** (un résumé par tranche de 5 min).
      « ↻ Analyser » fait un point tout de suite. Un clic sur un horodatage ramène au passage de la transcription.
+   - **🎯 En ce moment**, seule partie mise à jour bien plus souvent (toutes les **~20 s**, sur les 2 dernières
+     minutes et demie, y compris les phrases pas encore mises en forme) : le sujet en cours sous forme de chemin
+     **sujet › sous-sujet › point précis**, une phrase sur ce qui se dit à l'instant, et l'heure du dernier
+     changement. Tout changement de sujet, **quel que soit le niveau**, est signalé (« 🔀 Nouveau sujet »,
+     « ↪ Nouveau sous-sujet », « • Nouveau point ») et le niveau qui a changé reste en évidence 2 minutes, sur
+     la carte et sur l'accueil. Les niveaux qui ne changent pas gardent leur intitulé (affichage stable).
+     Le **🔀 fil des sujets** garde chaque changement avec son heure (aussi dans la transcription enregistrée).
 6. **📋 Compte rendu final**, rédigé automatiquement à la fin de la réunion (environ 6 à 15 min selon la
    durée de la réunion et la charge d'OVH) :
    - **plusieurs modèles se contrôlent** :
@@ -300,7 +308,8 @@ Les combinaisons de modèles ne font pas mieux. Sur deux réunions de référenc
 | `TRANSCRIPT_GLOSSARY` | (vide) | termes à bien orthographier (Whisper et Qwen), séparés par des virgules |
 | `TRANSCRIPT_LANG` | `fr` | langue de la réunion |
 | `TRANSCRIPT_ME_LABEL` / `TRANSCRIPT_OTHERS_LABEL` | `Moi` / `Participants` | noms des deux locuteurs |
-| `TRANSCRIPT_LLM_MODEL` | `Qwen3.8-27B` | modèle de mise en forme (`Qwen3.6-27B` aussi disponible) |
+| `TRANSCRIPT_LLM_MODEL` | `qwen3.6-35b-a3b` | modèle de mise en forme (nettoyage de la transcription brute) : petit modèle rapide (~3 milliards de paramètres actifs), 1,3 s par tronçon au lieu de 5,3 s avec `Qwen3.8-27B`, résultat identique à 99 % (banc d'essai du 20/11/2026 sur de vraies réunions) |
+| `TRANSCRIPT_LLM_FALLBACK` | `Qwen3.8-27B` | modèle de secours : un tronçon dont la réponse est inutilisable (JSON, identifiants des voix changés) est refait une fois avec lui (vide : pas de secours) |
 | `TRANSCRIPT_ASR_MODEL` | `whisper-large-v3` | `whisper-large-v3-turbo` est plus rapide mais moins fidèle |
 | `TRANSCRIPT_FORMAT_EVERY` | `20` | secondes entre deux passes de mise en forme |
 | `TRANSCRIPT_VAD_DB` | `-45` | seuil de détection de parole (dBFS) |
@@ -312,6 +321,9 @@ Les combinaisons de modèles ne font pas mieux. Sur deux réunions de référenc
 | `SLIDES_EVERY` / `SLIDES_MIN_GAP` / `SLIDES_MAX` | `3` / `6` / `400` | secondes entre deux coups d'œil à l'écran / entre deux lectures ; lectures maximum par réunion |
 | `ANALYSIS_EVERY` | `300` | secondes entre deux points d'étape |
 | `ANALYSIS_MODEL` | `Qwen3.8-27B:low` | modèle des points d'étape (`:none`/`:low`/`:medium`/`:high` = niveau de réflexion) |
+| `NOW_EVERY` | `20` | secondes entre deux mises à jour de « En ce moment » (seule cette partie : sujet en cours, `0` = désactivé) |
+| `NOW_MODEL` | `Qwen3.8-27B:none` | modèle de « En ce moment » : chemin du sujet (sujet › sous-sujet › point précis) et niveau du changement |
+| `NOW_WINDOW` / `NOW_MIN_WORDS` | `150` / `12` | secondes de fin de transcription relues ; mots nouveaux avant de relancer |
 | `REPORT_MODELS` | `Qwen3.8-27B:low,Qwen3.5-397B-A17B:none,gpt-oss-120b:low` | rédacteurs indépendants du compte rendu |
 | `REPORT_JUDGE` / `REPORT_AUDITOR` | `Qwen3.8-27B:medium` / `Qwen3.5-397B-A17B:low` | arbitre des versions / contrôleur qualité |
 | `REPORT_JUDGE_SECS` / `REPORT_JUDGE_RETRY_SECS` | `480` / `300` | délai de l'arbitre ; s'il est dépassé (OVH lent), nouvel essai avec une réflexion courte, puis à défaut le projet le plus complet est retenu (signalé dans « Méthode et contrôle ») |
