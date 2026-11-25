@@ -101,8 +101,34 @@ function formMeeting() {
     as_me: $("#asMeRow").classList.contains("hidden") ? null : $("#f-asme").checked,
   };
 }
+// « Plus tard » rempli : le formulaire planifie (bouton principal ou Entrée), il ne lance jamais tout de suite
+const whenDate = () => { const v = $("#f-when").value; const d = v ? new Date(v) : null; return d && !isNaN(d) ? d : null; };
+const whenLabel = (d) => `${d.toLocaleDateString("fr-FR", { weekday: "short", day: "numeric", month: "numeric" })} à ${d.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}`;
+function syncWhen() {
+  const d = whenDate();
+  $("#btnStart").textContent = d ? "Planifier · " + whenLabel(d) : "Envoyer l'assistant";
+  $("#btnStart").title = d ? "Date remplie dans « Plus tard » : l'assistant rejoindra la réunion à cette heure" : "";
+  $("#btnWhenClear").classList.toggle("hidden", !$("#f-when").value);
+}
+["input", "change"].forEach(ev => $("#f-when").addEventListener(ev, syncWhen));
+$("#btnWhenClear").onclick = () => { $("#f-when").value = ""; syncWhen(); };
+async function scheduleMeeting() {
+  const m = formMeeting(), d = whenDate();
+  if (!m.url) { $("#f-url").focus(); return toast("Collez d'abord le lien de la réunion"); }
+  if (!d) { $("#opts").open = true; $("#f-when").focus(); return toast("Choisissez la date et l'heure dans « Plus tard »"); }
+  if (d < Date.now() - 60000) return toast("Cette heure est passée : changez-la, ou videz « Plus tard » pour lancer tout de suite", 6000);
+  const btn = $("#btnStart"); btn.disabled = $("#btnSchedule").disabled = true;
+  try {
+    await api("/api/schedule", { method: "POST", json: { ...m, when: d.toISOString() } });
+    toast(`Réunion planifiée ${whenLabel(d)} : l'assistant la rejoindra à l'heure`, 5000);
+    $("#opts").open = false; $("#f-url").value = ""; $("#f-title").value = ""; $("#f-when").value = "";
+    nameEdited = false; prefillName(); syncWhen(); await loadSchedule();
+  } catch (err) { toast("Erreur : " + err.message, 5000); }
+  btn.disabled = $("#btnSchedule").disabled = false;
+}
 $("#startForm").onsubmit = async (e) => {
   e.preventDefault();
+  if ($("#f-when").value) return scheduleMeeting();
   const btn = $("#btnStart"); btn.disabled = true;
   try {
     const r = await api("/api/meetings", { method: "POST", json: formMeeting() });
@@ -112,14 +138,7 @@ $("#startForm").onsubmit = async (e) => {
   } catch (err) { toast("Erreur : " + err.message, 5000); }
   btn.disabled = false;
 };
-$("#btnSchedule").onclick = async () => {
-  const m = formMeeting(); const w = $("#f-when").value;
-  if (!m.url || !w) return toast("Lien et date requis");
-  try {
-    await api("/api/schedule", { method: "POST", json: { ...m, when: new Date(w).toISOString() } });
-    toast("Réunion planifiée"); loadSchedule();
-  } catch (err) { toast("Erreur : " + err.message, 5000); }
-};
+$("#btnSchedule").onclick = scheduleMeeting;
 // Nom affiché pré-rempli selon la plateforme (tant qu'il n'a pas été modifié à la main)
 const platOf = r => ["teams", "zoom"].includes(r.meta?.platform) ? r.meta.platform : "web";
 function siteOf(u) { try { return new URL(u).hostname.replace(/^www\./, ""); } catch (e) { return u; } }
@@ -1050,6 +1069,11 @@ function meter(name, stream) {
 }
 
 // ------------------------------------------------------------------ planification
+function schedState(it) {
+  if (it.status === "started") return `lancée${it.result ? " sur " + it.result : ""}`;
+  if (it.status === "missed") return `manquée${it.result ? " (" + it.result + ")" : ""}`;
+  return it.result ? `prévue · ${it.result.replace(/^en attente: /, "en attente : ")}` : "prévue";
+}
 async function loadSchedule() {
   const items = await api("/api/schedule");
   const ul = $("#schedule"); ul.innerHTML = "";
@@ -1058,8 +1082,9 @@ async function loadSchedule() {
     const li = document.createElement("li");
     li.innerHTML = `<div class="t"><b></b><small></small></div><button>Supprimer</button>`;
     $("b", li).textContent = it.title || it.url;
-    $("small", li).textContent = `${new Date(it.when).toLocaleString()} · ${it.status}${it.result ? " (" + it.result + ")" : ""}`
+    $("small", li).textContent = `${whenLabel(new Date(it.when))} · ${schedState(it)}`
       + (me?.admin && it.owner_name && it.owner !== me.login ? ` · 👤 ${it.owner_name}` : "");
+    $("button", li).textContent = it.status === "pending" ? "Annuler" : "Retirer";
     $("button", li).onclick = async () => { await api(`/api/schedule/${it.id}`, { method: "DELETE" }); loadSchedule(); };
     ul.appendChild(li);
   }

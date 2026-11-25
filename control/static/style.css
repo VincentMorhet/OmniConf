@@ -152,6 +152,9 @@ svg.i.chev { width: 18px; height: 18px; color: var(--mute); }
 .opts-grid .when { grid-column: 1 / -1; }
 .opts-grid .when .row { gap: 8px; }
 .opts-grid .when button { flex: 0 0 auto; }
+.opts-grid .when .row { flex-wrap: wrap; min-width: 0; }
+.opts-grid .when .row input { flex: 1 1 200px; width: auto; min-width: 0; }
+.opts-grid .when #btnWhenClear { padding: 6px 10px; }
 h2.sec { font-size: 18px; margin: 0 0 12px; display: flex; align-items: center; gap: 10px; }
 h2.sec.small { font-size: 14px; color: var(--mute); font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
 h2.sec .hint { text-transform: none; letter-spacing: 0; font-weight: 400; font-size: 12.5px; }
