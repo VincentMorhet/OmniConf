@@ -490,7 +490,8 @@ class Viewers(BaseModel):
 @app.post("/api/workers/{name}/viewers")
 async def worker_viewers(name: str, body: Viewers, u: dict = CU):
     """Partager la réunion en cours (écran, son, transcription, compte rendu en direct) : son propriétaire seul.
-    Les spectateurs ne peuvent ni parler, ni agir sur l'assistant ; le partage s'arrête avec la réunion."""
+    Les spectateurs ne peuvent ni parler, ni agir sur l'assistant ; le direct s'arrête avec la réunion, mais
+    l'enregistrement, la transcription et le compte rendu leur restent partagés (l'assistant les ajoute à « shared_with »)."""
     st = await worker_status(wurl(name) and name)
     if not st.get("owner") or st["owner"] != u["login"]:
         raise HTTPException(403, "seul le propriétaire de la réunion peut la partager")
@@ -500,6 +501,7 @@ async def worker_viewers(name: str, body: Viewers, u: dict = CU):
     if bad:
         raise HTTPException(400, "compte(s) inconnu(s) : " + ", ".join(bad))
     r = await wcall(name, "POST", "/meeting/viewers", json={"viewers": logins})
+    _rec_cache.pop(name, None)            # l'enregistrement de la réunion leur reste partagé ensuite
     log.info("%s partage la réunion de %s en direct avec %s", u["login"], name, ", ".join(logins) or "personne")
     return r.json()
 

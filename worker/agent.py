@@ -58,6 +58,7 @@ join_task: asyncio.Task | None = None
 watch_task: asyncio.Task | None = None
 speaker_task: asyncio.Task | None = None
 last_join: tuple | None = None   # (JoinReq, plateforme) d'une entrée échouée : reprise si on la termine à la main
+meeting_files: set[str] = set()  # vidéos et transcriptions (radicaux) de la réunion en cours : partage en direct gardé après
 bot_name: str = BOT_NAME
 REPORT_AUTO = os.environ.get("REPORT_AUTO", "1") == "1"
 reports: dict[str, dict] = {}   # stem -> {state: running|done|error|skipped, step, started, error}
@@ -93,8 +94,10 @@ def set_state(s: str, **kw):
         log.info("state %s -> %s", state["state"], s)
         state["since"] = dt.datetime.now().astimezone().isoformat()
     state["state"] = s
-    if s == "idle" or "joined_at" in kw:   # partage en direct : le temps d'une réunion seulement
+    if s == "idle" or "joined_at" in kw:   # suivi en direct : le temps d'une réunion seulement (ses fichiers restent partagés)
         state["viewers"] = []
+    if "joined_at" in kw:
+        meeting_files.clear()
     state.update(kw)
 
 
@@ -347,7 +350,7 @@ async def _after_join(req: JoinReq, platform: str, note: str | None = None, late
     """Dans la réunion : enregistrement et transcription demandés au départ.
     `late` : entrée terminée à la main après un échec (le début de la réunion manque, signalé dans le CR)."""
     set_state("in_meeting", note=note, error=None)
-    meta = {"platform": platform, "url": req.url, "worker": NAME, "site": _site(req.url, platform)}
+    meta = {"platform": platform, "url": req.url, "worker": NAME, "site": _site(req.url, platform), **_live_share_meta()}
     if req.owner:
         meta["owner"] = req.owner
     if late:
@@ -358,6 +361,7 @@ async def _after_join(req: JoinReq, platform: str, note: str | None = None, late
         await recorder.start(req.title or _site(req.url, platform), meta)
     if req.transcribe and transcriber.enabled:
         await _start_transcript(req.title or _site(req.url, platform), meta)
+    _note_meeting_files()
 
 
 async def _join_debug(error: str):
@@ -733,8 +737,9 @@ async def reset():
 async def rec_start(req: RecReq):
     _take(req.owner, req.me_name)
     name = await recorder.start(req.title or state["title"] or state["platform"] or "enregistrement",
-                                {"platform": state["platform"], "url": state["url"], "worker": NAME,
+                                {"platform": state["platform"], "url": state["url"], "worker": NAME, **_live_share_meta(),
                                  **({"owner": state["owner"]} if state.get("owner") else {})})
+    _note_meeting_files()
     return {"file": name}
 
 
@@ -755,8 +760,9 @@ async def transcript_start(req: TransReq):
         raise HTTPException(400, "clé OVH AI Endpoints non configurée sur ce worker")
     _take(req.owner, req.me_name)
     await _start_transcript(req.title or state["title"] or _site(state["url"] or "", state["platform"] or "web"),
-                            {"platform": state["platform"], "url": state["url"], "worker": NAME,
+                            {"platform": state["platform"], "url": state["url"], "worker": NAME, **_live_share_meta(),
                              **({"owner": state["owner"]} if state.get("owner") else {})})
+    _note_meeting_files()
     return transcriber.status()
 
 
@@ -1109,7 +1115,7 @@ async def recording_meta(name: str, req: MetaReq):
     fields = {k: v for k, v in req.model_dump().items() if v is not None}
     if "shared_with" in fields:
         fields["shared_with"] = sorted({str(x).strip().lower() for x in fields["shared_with"] if str(x).strip()})[:50]
-    if not fields or not recorder.update_meta(name, fields):
+    if not fields or not _update_file_meta(recorder.stem(name), fields):
         raise HTTPException(404)
     return {"ok": True, **fields}
 
@@ -1159,9 +1165,64 @@ async def meeting_viewers(req: ViewersReq):
     """Partage en direct décidé par le propriétaire (le contrôle vérifie les droits) ; oublié à la fin de la réunion."""
     if state["state"] == "idle":
         raise HTTPException(409, "aucune réunion en cours")
+    old = set(state.get("viewers") or [])
     state["viewers"] = sorted({str(x).strip().lower() for x in req.viewers if str(x).strip()} - {state.get("owner")})[:50]
-    log.info("réunion partagée en direct avec %s", ", ".join(state["viewers"]) or "personne")
-    return {"viewers": state["viewers"]}
+    files = _apply_live_share(old, set(state["viewers"]))
+    log.info("réunion partagée en direct avec %s (%d fichier(s) mis à jour)", ", ".join(state["viewers"]) or "personne", files)
+    return {"viewers": state["viewers"], "files": files}
+
+
+# ---------------------------------------------------------------- partage en direct -> partage de la réunion enregistrée
+# Les comptes à qui le propriétaire montre la réunion en direct gardent ensuite l'accès à son enregistrement, à sa
+# transcription et à son compte rendu (« shared_with », comme « Partager avec… »). « live_viewers » retient ceux venus
+# du partage en direct : retirés du direct pendant la réunion, ils perdent aussi l'accès (pas un partage fait à la main).
+def _live_share_meta() -> dict:
+    v = sorted(state.get("viewers") or [])
+    return {"shared_with": v, "live_viewers": v} if v else {}
+
+
+def _note_meeting_files():
+    if recorder.active and recorder.file:
+        meeting_files.add(recorder.stem(recorder.file.name))
+    if transcriber.active and transcriber.base:
+        meeting_files.add(transcriber.base.name)
+
+
+def _file_meta(stem: str) -> dict:
+    if recorder.active and recorder.file and recorder.stem(recorder.file.name) == stem:
+        return recorder.meta
+    if transcriber.active and transcriber.base and transcriber.base.name == stem:
+        return transcriber.meta
+    for f, inner in ((recorder.dir / (stem + ".mp4.json"), False), (recorder.dir / (stem + ".transcript.json"), True)):
+        try:
+            d = json.loads(f.read_text())
+            return (d.get("meta") or {}) if inner else d
+        except (OSError, ValueError):
+            continue
+    return {}
+
+
+def _update_file_meta(stem: str, fields: dict) -> bool:
+    """Métadonnées d'une réunion : vidéo, transcription sur disque, et copies en mémoire si elle est en cours (sinon la
+    prochaine sauvegarde de la transcription en cours effacerait le changement)."""
+    ok = recorder.update_meta(stem + (".mp4" if (recorder.dir / (stem + ".mp4")).exists() else ".transcript.json"), fields)
+    if transcriber.active and transcriber.base and transcriber.base.name == stem:
+        transcriber.meta.update(fields)
+        ok = True
+    return ok
+
+
+def _apply_live_share(old: set, new: set) -> int:
+    _note_meeting_files()
+    removed, n = old - new, 0
+    for stem in sorted(meeting_files):
+        meta = _file_meta(stem)
+        lv = set(meta.get("live_viewers") or [])
+        shared = (set(meta.get("shared_with") or []) - (removed & lv)) | new
+        fields = {"shared_with": sorted(shared - {meta.get("owner")})[:50], "live_viewers": sorted((lv - removed) | new)}
+        if fields["shared_with"] != sorted(meta.get("shared_with") or []) or fields["live_viewers"] != sorted(lv):
+            n += _update_file_meta(stem, fields)
+    return n
 
 
 @app.on_event("shutdown")

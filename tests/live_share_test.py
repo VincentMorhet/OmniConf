@@ -65,6 +65,13 @@ def serve():
             "20261118-093000_zoom": ("Sujet de Chloé", "Bonjour à tous."),
             "20261118-100500_web": (None, "Nouvelle réunion : bonjour.")}
     calls = {"offers": [], "mute": [], "actions": [], "vnc": {}}
+    # enregistrements simulés ; comme le vrai assistant, le partage en direct est gardé sur ceux de la réunion
+    REC = {"wA": [{"name": "20261118-090000_teams.mp4", "kind": "video", "transcript": True, "report": True, "size": 1,
+                   "mtime": time.time(), "duration": 600, "recording": True,
+                   "meta": {"owner": "essai", "title": "Point d'équipe (essai)", "platform": "teams", "worker": "wA"}}]}
+
+    async def worker_recordings(n, fresh=False):
+        return [{**json.loads(json.dumps(x)), "worker": n} for x in REC.get(n, [])]
 
     async def worker_status(name):
         return {**json.loads(json.dumps(W[name])), "name": name, "online": True}
@@ -100,7 +107,13 @@ def serve():
         if path == "/meeting/viewers":
             if w["state"] == "idle":
                 return R({"detail": "aucune réunion"})
-            w["viewers"] = sorted(set(body["viewers"]) - {w["owner"]})
+            old, new = set(w["viewers"]), set(body["viewers"]) - {w["owner"]}
+            w["viewers"] = sorted(new)
+            for x in REC.get(name, []):
+                m = x["meta"]
+                lv = set(m.get("live_viewers") or [])
+                m["shared_with"] = sorted(((set(m.get("shared_with") or []) - ((old - new) & lv)) | new) - {m["owner"]})
+                m["live_viewers"] = sorted((lv - (old - new)) | new)
             return R({"viewers": w["viewers"]})
         if path == "/webrtc/offer":
             calls["offers"].append({"worker": name, **body})
@@ -113,7 +126,7 @@ def serve():
         calls["actions"].append([name, path])
         return R({"ok": True})
 
-    A.worker_status, A.wcall = worker_status, wcall
+    A.worker_status, A.wcall, A.worker_recordings = worker_status, wcall, worker_recordings
 
     async def vnc_handler(ws, *a):                       # serveur VNC simulé : note les octets reçus
         key = str(len(calls["vnc"]))
@@ -354,10 +367,28 @@ async def main():
               "Bruno retiré : il ne voit plus rien")
         check(ws_of(chl)["wA"].get("viewer"), "Chloé est spectatrice")
 
-        # --- fin de réunion : le partage s'arrête
+        # --- fin de réunion : le direct s'arrête, l'enregistrement et le compte rendu restent partagés
+        recs = lambda c: [x["name"] for x in c.get("/api/recordings").json() if x["worker"] == "wA"]
+        pcv = await page("chloe", pws["chloe"], hash_="#m/wA")
+        await pcv.wait_for_selector(".worker.meet.viewer:not(.hidden)", timeout=10000)
+        await asyncio.sleep(2)
         me.post("/test/wA/end")
         check(chl.get("/api/workers/wA/transcript").status_code == 403 and not ws_of(chl)["wA"].get("viewer"),
-              "fin de réunion : la spectatrice n'a plus accès à la transcription")
+              "fin de réunion : la spectatrice ne suit plus le direct")
+        check(recs(chl) == ["20261118-090000_teams.mp4"], f"fin de réunion : l'enregistrement reste partagé avec Chloé ({recs(chl)})")
+        check(recs(bru) == [], "Bruno, retiré du direct pendant la réunion, n'a pas l'enregistrement")
+        mine = next(x for x in me.get("/api/recordings").json() if x["worker"] == "wA")
+        check(mine["shared_with"] == ["chloe"] and mine["mine"], f"propriétaire : partage visible sur l'enregistrement ({mine['shared_with']})")
+        await pcv.wait_for_function("() => document.querySelector('.worker.meet:not(.hidden) .ended:not(.hidden) .ended-txt')?.innerText.includes('vous l')", timeout=15000)
+        e = await pcv.evaluate("""() => { const c = document.querySelector('.worker.meet:not(.hidden)'), b = c.querySelector('.ended .b-final');
+          return { txt: c.querySelector('.ended-txt').innerText, btn: b.offsetParent !== null ? b.innerText : null }; }""")
+        check("Compte Essai vous l'a partagée" in e["txt"] and "Enregistrements" in e["txt"] and e["btn"] == "Voir le compte rendu final",
+              f"écran de fin de la spectatrice : réunion partagée, bouton vers le compte rendu ({e})")
+        await pcv.screenshot(path=str(OUT / "live-viewer-ended.png"))
+        await pcv.locator(".worker.meet:not(.hidden) .ended .b-final").click()
+        await pcv.wait_for_function("() => location.hash.startsWith('#enr/wA/20261118-090000_teams')", timeout=10000)
+        check(True, "le bouton ouvre la page de l'enregistrement partagé")
+        await pcv.context.close()
 
         # --- assistant qui vient de servir : la transcription précédente n'est pas montrée au départ d'une réunion
         await po.goto(BASE + "/#m/wB")

@@ -292,23 +292,23 @@ function render(st) {
   [el, el._side, el._actl].forEach(x => x.classList.toggle("viewer", !!st.viewer));   // spectateur : regarder et écouter
   $(".b-live", el).classList.toggle("hidden", !st.mine || !isBusy(st));
   $(".b-mute", el).classList.toggle("hidden", st.talk === false);
-  if (isBusy(st)) t.viewerOf = st.viewer ? (st.owner_name || "") : null;
+  if (isBusy(st)) { t.viewerOf = st.viewer ? (st.owner_name || "") : null; t.viewerFile = st.viewer ? (tr.file || t.viewerFile) : null; }
   $(".b-leave", el).disabled = !isBusy(st);
   $(".audio-ctl", el).classList.toggle("hidden", !isBusy(st) && !sessions[st.name]);
   $(".b-mute", el).disabled = st.state !== "in_meeting";
   // écran « réunion terminée » / « assistant libre »
   const idle = st.online && !isBusy(st), endedBox = $(".ended", el);
   endedBox.classList.toggle("hidden", !(idle || !st.online));
-  const final = idle && (t.ended || t.lastRec) && (tr.file || t.lastRec);
+  const final = idle && (t.ended || t.lastRec) && (tr.file || t.lastRec || (t.ended && t.viewerFile));
   $(".ended b", el).textContent = !st.online ? "Assistant hors ligne" : taken ? "Assistant occupé" : t.ended ? "Réunion terminée" : "Assistant libre";
   $(".ended-txt", el).textContent = !st.online ? "Il ne répond pas : vérifier le conteneur ou la VM."
     : taken ? "Il est utilisé par un autre utilisateur. Choisissez un autre assistant (ou « Automatique »)."
-    : t.ended && t.viewerOf != null ? `La réunion est terminée. Son enregistrement et son compte rendu restent à ${t.viewerOf || "son propriétaire"}, qui peut vous les partager.`
+    : t.ended && t.viewerOf != null ? `La réunion est terminée. ${t.viewerOf || "Son propriétaire"} vous l'a partagée : son enregistrement et son compte rendu (rédigé en 2 à 10 minutes) restent dans vos « Enregistrements ».`
     : t.ended ? (tr.enabled && tr.file ? "Le compte rendu final est rédigé automatiquement (2 à 10 minutes)." : "L'enregistrement est dans « Enregistrements ».")
     : "Collez un lien sur l'accueil pour l'envoyer en réunion, ou « Ouvrir une page » pour vous connecter à un compte.";
   $(".b-final", el).classList.toggle("hidden", !final || taken);
   el.querySelectorAll(".ended button:not(.b-final)").forEach(x => x.disabled = taken);
-  $(".b-final", el).textContent = tr.file ? "Voir le compte rendu final" : "Voir l'enregistrement";
+  $(".b-final", el).textContent = tr.file || (t.ended && t.viewerFile) ? "Voir le compte rendu final" : "Voir l'enregistrement";
   el.classList.toggle("offline", !st.online);
   $(".trb", el).classList.toggle("hidden", !tr.active);
   t.status = tr;
@@ -1394,7 +1394,7 @@ $("#dlgLive").addEventListener("close", async () => {
   const who = [...$("#lvList").querySelectorAll("input:checked")].map(x => x.value);
   try {
     const d = await api(`/api/workers/${lvName}/viewers`, { method: "POST", json: { logins: who } });
-    toast(d.viewers.length ? `Réunion partagée en direct avec ${dirNames(d.viewers)}` : "Partage en direct arrêté", 5000);
+    toast(d.viewers.length ? `Réunion partagée en direct avec ${dirNames(d.viewers)} ; l'enregistrement et le compte rendu leur resteront partagés` : "Partage en direct arrêté", 6000);
     refresh();
   } catch (e) { toast(e.message, 5000); }
 });
@@ -1426,7 +1426,7 @@ function renderRecent() {
 // Fin d'une réunion : ouvre l'enregistrement correspondant sur le compte rendu
 async function openFinal(name) {
   await loadRecordings();
-  const t = trState(name), f = t.status?.file, rec = t.lastRec;
+  const t = trState(name), f = t.status?.file || (t.viewerOf != null ? t.viewerFile : null), rec = t.lastRec;
   const mine = recItems.filter(x => x.worker === name);
   const r = mine.find(x => f && x.name.startsWith(f) && x.kind !== "transcript") || mine.find(x => rec && x.name === rec)
     || mine.find(x => f && x.name.startsWith(f));
