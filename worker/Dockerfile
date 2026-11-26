@@ -8,7 +8,7 @@ RUN apt-get update -q \
  && apt-get install -y -q --no-install-recommends \
       xvfb pulseaudio pulseaudio-utils ffmpeg x11vnc novnc websockify python3-venv \
       fonts-noto fonts-noto-color-emoji fonts-liberation matchbox-window-manager \
-      supervisor curl ca-certificates tzdata \
+      supervisor curl ca-certificates tzdata libatomic1 \
  && curl -fsSL -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
  && apt-get install -y -q /tmp/chrome.deb \
  && rm -rf /tmp/chrome.deb /var/lib/apt/lists/*
