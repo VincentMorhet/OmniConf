@@ -1,6 +1,8 @@
 """Planifier une réunion depuis l'accueil : une date remplie dans « Plus tard » planifie TOUJOURS (bouton « Planifier »,
 bouton principal ou touche Entrée), elle ne lance jamais l'assistant tout de suite ; puis la planification démarre bien à
-l'heure. Contrôle d'essai avec un assistant simulé (données fictives, aucun vrai assistant).
+l'heure. Liste « Planifiées » (26/11) : en haut à côté de « Réunions en cours », rien ne dépasse à droite, les réunions
+passées (lancées, ou manquées depuis plus de 2 h) n'y sont plus, et un lien Outlook « vrai-lien<safelinks…> » est coupé au
+« < ». Contrôle d'essai avec un assistant simulé (données fictives, aucun vrai assistant).
 
     TEST_DATA_DIR=/tmp/schedui/data TEST_PORT=8099 ADMIN_PASSWORD=… python tests/schedule_ui_test.py serve   # contrôle
     PW=… BASE=http://127.0.0.1:8099 python tests/schedule_ui_test.py                                         # navigateur
@@ -59,6 +61,11 @@ def serve():
     @A.app.get("/test/state")
     async def test_state():
         return {"started": started, "schedule": A.load_schedule()}
+
+    @A.app.post("/test/inject")
+    async def test_inject(items: list[dict]):     # planifications fictives (passées, manquées, lien Outlook très long)
+        A.save_schedule(A.load_schedule() + items)
+        return {"ok": True}
 
     uvicorn.run(A.app, host="127.0.0.1", port=int(os.environ.get("TEST_PORT", "8099")), log_level="warning")
 
@@ -174,8 +181,53 @@ async def run():
         at = dt.datetime.fromisoformat(s[0]["at"]) if s else None
         check(bool(s) and s[0]["title"] == "Point d'essai" and s[0]["by"] == "essai" and at >= soon
               and (at - soon).total_seconds() < 25, f"lancée à l'heure par le planificateur ({s[0]['at'] if s else 'jamais'})")
-        await pg.wait_for_function("() => [...document.querySelectorAll('#schedule li')].some(l => l.innerText.includes('lancée sur wA'))", timeout=40000)
-        check(True, "liste : « lancée sur wA »")
+        await pg.wait_for_function("() => ![...document.querySelectorAll('#schedule li')].some(l => l.innerText.includes(\"Point d'essai\"))", timeout=40000)
+        check(True, "lancée : elle quitte la liste « Planifiées » (elle est dans « Réunions en cours »)")
+
+        # lien copié d'un courriel Outlook en texte brut, planifié depuis le formulaire : enregistré propre
+        T = "https://teams.microsoft.com/meet/1234567890123456?p=AbCdEf0123456789xy"
+        polluted = (T + "%3Chttps://fra01.safelinks.protection.outlook.com/ap/t-0000abcd/?url=https%3A%2F%2Fteams.microsoft.com"
+                    "%2Fmeet%2F1234567890123456%3Fp%3DAbCdEf0123456789xy&data=05%7C02%7C" + "x" * 300 + "&reserved=0")
+        await fill(pg, polluted, local(later + dt.timedelta(hours=1)))
+        await pg.click("#btnSchedule")
+        await toast(pg, "planifiée")
+        st = state()
+        check(any(x["url"] == T for x in st["schedule"]), "lien « vrai-lien%3Csafelinks… » : enregistré coupé au « < » (code p= intact)")
+
+        now = dt.datetime.now(dt.timezone.utc)
+        g = "https://www.google.com/url?q=https://fra01.safelinks.protection.outlook.com/ap/t-0000abcd/?url%3Dhttps%253A%252F%252Fteams.microsoft.com%252Fl%252Fmeetup-join%252F19%25253ameeting_" + "Z" * 400
+        rj = ctl.post("/test/inject", json=[
+            {"id": "passee1", "url": "https://teams.example/hier", "title": "Réunion d'hier", "when": (now - dt.timedelta(days=1)).isoformat(),
+             "status": "started", "result": "wA", "owner": "essai"},
+            {"id": "manq_old", "url": "https://teams.example/vieille", "title": "Manquée il y a 5 h", "when": (now - dt.timedelta(hours=5)).isoformat(),
+             "status": "missed", "result": "trop tard (> 30 min)", "owner": "essai"},
+            {"id": "manq_new", "url": "https://teams.example/recente", "title": "Manquée il y a 40 min", "when": (now - dt.timedelta(minutes=40)).isoformat(),
+             "status": "missed", "result": "trop tard (> 30 min)", "owner": "essai"},
+            {"id": "long1", "url": g, "when": (now + dt.timedelta(hours=3)).isoformat(), "status": "pending", "owner": "essai"},
+        ])
+        check(rj.status_code == 200, f"planifications fictives ajoutées ({rj.status_code} {rj.text[:200]})")
+        await pg.reload()                                   # (goto vers la même adresse #home ne recharge pas la page)
+        await pg.wait_for_function("() => document.querySelectorAll('#schedule li').length === 5", timeout=10000)
+        txt = await pg.locator("#schedule").inner_text()
+        if os.environ.get("DEBUG"):
+            print("DEBUG état :", [(x["id"], x["status"]) for x in state()["schedule"]])
+            print("DEBUG api :", await pg.evaluate("() => fetch('/api/schedule').then(r => r.json()).then(a => a.map(x => x.id + ':' + x.status))"))
+            print("DEBUG liste :", txt.replace("\n", " | ")[:600])
+        check("Réunion d'hier" not in txt and "Point d'essai" not in txt and "lancée" not in txt, "réunions passées et lancées absentes de la liste")
+        check("Manquée il y a 5 h" not in txt, "manquée depuis plus de 2 h : absente")
+        check("Manquée il y a 40 min" in txt and "⚠️ manquée : trop tard" in txt, "manquée depuis 40 min : encore signalée (⚠️ manquée)")
+        check("safelinks" not in txt and "google.com" not in txt and "Réunion Teams" in txt,
+              "lien sans titre : « Réunion Teams » au lieu du lien illisible")
+        lay = await pg.evaluate("""() => { const r = q => document.querySelector(q).getBoundingClientRect();
+            const live = r('#topRow > section:first-child'), sch = r('#schedSec'), main = r('main');
+            const lis = [...document.querySelectorAll('#schedule li')].map(l => l.getBoundingClientRect());
+            const btns = [...document.querySelectorAll('#schedule li button')].map(b => b.getBoundingClientRect());
+            return { side: sch.left >= live.right - 1 && Math.abs(sch.top - live.top) < 2,
+                     above: sch.bottom <= r('#recentSec').top || document.querySelector('#recentSec').classList.contains('hidden'),
+                     inside: lis.every(b => b.right <= main.right + 1) && btns.every(b => b.right <= sch.right + 1 && b.width > 0),
+                     noscroll: document.documentElement.scrollWidth <= innerWidth + 1 }; }""")
+        check(lay["side"], "ordinateur : « Planifiées » en haut, à droite de « Réunions en cours »")
+        check(lay["inside"] and lay["noscroll"], "ordinateur : rien ne dépasse à droite (boutons visibles), pas de défilement horizontal")
         await pg.screenshot(path=str(OUT / "sched-desktop.png"))
 
         ph = await page(390, 844)
@@ -184,6 +236,14 @@ async def run():
             const inside = ['#f-when', '#btnWhenClear', '#btnSchedule'].every(q => document.querySelector(q).getBoundingClientRect().right <= g.right + 1);
             return document.documentElement.scrollWidth <= innerWidth + 1 && b.scrollWidth <= b.clientWidth + 1 && inside; }""")
         check(ov, "téléphone : bouton « Planifier · … » lisible, date et boutons dans le cadre, pas de défilement horizontal")
+        lay = await ph.evaluate("""() => { const r = q => document.querySelector(q).getBoundingClientRect();
+            const live = r('#topRow > section:first-child'), sch = r('#schedSec');
+            const ask = document.querySelector('#askSec'), rec = document.querySelector('#recentSec');
+            const after = [ask, rec].filter(e => !e.classList.contains('hidden')).every(e => e.getBoundingClientRect().top >= sch.bottom - 1);
+            const items = [...document.querySelectorAll('#schedule li, #schedule li button')].every(e => e.getBoundingClientRect().right <= innerWidth + 1);
+            return { below: sch.top >= live.bottom - 1 && after, items, noscroll: document.documentElement.scrollWidth <= innerWidth + 1 }; }""")
+        check(lay["below"], "téléphone : « Planifiées » juste sous « Réunions en cours », avant le reste")
+        check(lay["items"] and lay["noscroll"], "téléphone : lignes et boutons de « Planifiées » dans l'écran")
         await ph.screenshot(path=str(OUT / "sched-phone.png"), full_page=True)
         await br.close()
     print(f"\n{ok} ok, {fails} échec(s)")

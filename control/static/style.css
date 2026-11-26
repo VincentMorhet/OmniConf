@@ -190,8 +190,8 @@ h2.sec .more { margin-left: auto; font-size: 14px; font-weight: 500; text-decora
 .wchip small { color: var(--mute); }
 .wchip.s-in_meeting i { background: var(--bad); } .wchip.s-joining i, .wchip.s-lobby i, .wchip.s-leaving i, .wchip.s-manual i { background: var(--warn); }
 .wchip.s-error i { background: var(--bad); } .wchip.s-offline i { background: #475069; }
-.list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
-.list li { display: flex; gap: 8px; align-items: center; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; flex-wrap: wrap; }
+.list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; grid-template-columns: minmax(0, 1fr); }
+.list li { min-width: 0; display: flex; gap: 8px; align-items: center; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; flex-wrap: wrap; }
 .list li .t { flex: 1 1 200px; min-width: 0; }
 .list li .t b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .list li .t small { color: var(--mute); }
@@ -909,3 +909,10 @@ dialog.dlg .seg label { flex-direction: row; align-items: center; gap: 6px; colo
 .ai-check { margin: 0; }
 .ai-act { flex-wrap: wrap; }
 .ai-act > button { flex: 1 1 160px; }
+
+/* « Planifiées » en haut, à côté de « Réunions en cours » (en dessous sur un écran étroit) */
+.toprow { display: grid; gap: 24px; grid-template-columns: minmax(0, 1fr); }
+.toprow > * { min-width: 0; }
+@media (min-width: 900px) { .toprow.with-sched { grid-template-columns: minmax(0, 1fr) minmax(260px, 340px); } }
+.list.sched li .t small { display: block; }
+.list.sched li.missed { border-color: color-mix(in srgb, var(--bad) 45%, var(--line)); }

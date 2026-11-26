@@ -38,8 +38,18 @@ DEFAULT_NAMES = json.loads(os.environ.get("DEFAULT_NAMES") or
 DEFAULT_DURATION = int(os.environ.get("DEFAULT_DURATION_MIN", "180"))
 
 
+# Lien copié d'un courriel Outlook en texte brut : « https://vrai-lien<https://xx.safelinks…> ». Un « < », un « > »
+# ou un espace n'existent jamais dans un lien : on coupe là (sinon le code secret « p=… » de Teams devient faux).
+_LINK_TAIL = re.compile(r"(?:\s|<|>|%3c(?=https?(?::|%3a))).*$", re.I | re.S)
+
+
+def clean_link(url: str) -> str:
+    return _LINK_TAIL.sub("", (url or "").strip().lstrip("<").strip())
+
+
 def unwrap_url(url: str) -> str:
     """Lien réel derrière un lien de protection (Outlook « safelinks ») ou une redirection Google."""
+    url = clean_link(url)
     for _ in range(3):
         try:
             u = httpx.URL(url)
@@ -47,9 +57,9 @@ def unwrap_url(url: str) -> str:
             return url
         host, q = (u.host or "").lower(), u.params
         if host.endswith("safelinks.protection.outlook.com") and q.get("url"):
-            url = q["url"]
+            url = clean_link(q["url"])
         elif (host.startswith("www.google.") or host.startswith("google.")) and u.path == "/url" and (q.get("q") or q.get("url")):
-            url = q.get("q") or q.get("url")
+            url = clean_link(q.get("q") or q.get("url"))
         else:
             break
     return url
@@ -1217,17 +1227,32 @@ def _sched_owner(x: dict) -> str | None:
     return x.get("owner") or USERS.first_admin()   # planifications d'avant les comptes : au premier administrateur
 
 
+SCHED_MISSED_SHOWN = dt.timedelta(hours=2)
+
+
+def _sched_shown(x: dict, now: dt.datetime) -> bool:
+    """À venir (ou encore en essai) : affichée. Lancée : elle est dans « Réunions en cours » puis les enregistrements.
+    Manquée : montrée 2 h (pour savoir pourquoi l'assistant n'est pas venu), puis cachée."""
+    if x.get("status") == "pending":
+        return True
+    try:
+        return x.get("status") == "missed" and now - dt.datetime.fromisoformat(x["when"]) < SCHED_MISSED_SHOWN
+    except (KeyError, ValueError, TypeError):
+        return False
+
+
 @app.get("/api/schedule")
 async def schedule_list(u: dict = CU):
-    names = USERS.names()
+    names, now = USERS.names(), dt.datetime.now(dt.timezone.utc)
     return sorted(({**x, "owner_name": names.get(_sched_owner(x))} for x in load_schedule()
-                   if is_admin(u) or _sched_owner(x) == u["login"]), key=lambda x: x["when"])
+                   if (is_admin(u) or _sched_owner(x) == u["login"]) and _sched_shown(x, now)), key=lambda x: x["when"])
 
 
 @app.post("/api/schedule")
 async def schedule_add(item: ScheduleItem, u: dict = CU):
     if item.when.tzinfo is None:
         raise HTTPException(400, "date sans fuseau horaire")
+    item.url = unwrap_url(item.url)        # le vrai lien, propre (affiché dans « Planifiées »)
     items = load_schedule()
     entry = {**json.loads(item.model_dump_json()), "id": uuid.uuid4().hex[:10], "status": "pending", "owner": u["login"]}
     items.append(entry)

@@ -142,15 +142,22 @@ $("#btnSchedule").onclick = scheduleMeeting;
 // Nom affiché pré-rempli selon la plateforme (tant qu'il n'a pas été modifié à la main)
 const platOf = r => ["teams", "zoom"].includes(r.meta?.platform) ? r.meta.platform : "web";
 function siteOf(u) { try { return new URL(u).hostname.replace(/^www\./, ""); } catch (e) { return u; } }
+// lien copié d'un courriel Outlook en texte brut : « https://vrai-lien<https://xx.safelinks…> » -> on coupe au « < »
+const cleanLink = (u) => (u || "").trim().replace(/^<\s*/, "").replace(/(?:\s|<|>|%3c(?=https?(?::|%3a))).*$/is, "");
 function unwrapUrl(u) {   // lien Outlook « safelinks » ou redirection Google -> vrai lien
+  u = cleanLink(u);
   for (let i = 0; i < 3; i++) {
     try { const x = new URL(u), h = x.hostname.toLowerCase();
-      if (h.endsWith("safelinks.protection.outlook.com") && x.searchParams.get("url")) u = x.searchParams.get("url");
-      else if (/^(www\.)?google\./.test(h) && x.pathname === "/url" && (x.searchParams.get("q") || x.searchParams.get("url"))) u = x.searchParams.get("q") || x.searchParams.get("url");
+      if (h.endsWith("safelinks.protection.outlook.com") && x.searchParams.get("url")) u = cleanLink(x.searchParams.get("url"));
+      else if (/^(www\.)?google\./.test(h) && x.pathname === "/url" && (x.searchParams.get("q") || x.searchParams.get("url"))) u = cleanLink(x.searchParams.get("q") || x.searchParams.get("url"));
       else break;
     } catch (e) { break; }
   }
   return u;
+}
+function meetingLabel(u) {   // « Réunion Teams », « Réunion Zoom », « Réunion sur meet.jit.si »… plutôt qu'un lien illisible
+  const p = detectPlatform(u);
+  return p === "teams" ? "Réunion Teams" : p === "zoom" ? "Réunion Zoom" : p === "web" ? `Réunion sur ${siteOf(unwrapUrl(u))}` : u;
 }
 function detectPlatform(u) {
   try { const h = new URL(unwrapUrl(u)).hostname;
@@ -1072,18 +1079,21 @@ function meter(name, stream) {
 // ------------------------------------------------------------------ planification
 function schedState(it) {
   if (it.status === "started") return `lancée${it.result ? " sur " + it.result : ""}`;
-  if (it.status === "missed") return `manquée${it.result ? " (" + it.result + ")" : ""}`;
+  if (it.status === "missed") return `manquée${it.result ? " : " + it.result : ""}`;
   return it.result ? `prévue · ${it.result.replace(/^en attente: /, "en attente : ")}` : "prévue";
 }
 async function loadSchedule() {
-  const items = await api("/api/schedule");
+  const items = await api("/api/schedule");   // à venir seulement (et une réunion manquée pendant 2 h)
   const ul = $("#schedule"); ul.innerHTML = "";
   $("#schedSec").classList.toggle("hidden", !items.length);
+  $("#topRow").classList.toggle("with-sched", items.length > 0);
   for (const it of items) {
     const li = document.createElement("li");
     li.innerHTML = `<div class="t"><b></b><small></small></div><button>Supprimer</button>`;
-    $("b", li).textContent = it.title || it.url;
-    $("small", li).textContent = `${whenLabel(new Date(it.when))} · ${schedState(it)}`
+    li.classList.toggle("missed", it.status === "missed");
+    $("b", li).textContent = it.title || meetingLabel(it.url);
+    $("b", li).title = unwrapUrl(it.url);
+    $("small", li).textContent = `${whenLabel(new Date(it.when))} · ${it.status === "missed" ? "⚠️ " : ""}${schedState(it)}`
       + (me?.admin && it.owner_name && it.owner !== me.login ? ` · 👤 ${it.owner_name}` : "");
     $("button", li).textContent = it.status === "pending" ? "Annuler" : "Retirer";
     $("button", li).onclick = async () => { await api(`/api/schedule/${it.id}`, { method: "DELETE" }); loadSchedule(); };
