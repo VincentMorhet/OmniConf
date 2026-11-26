@@ -679,7 +679,8 @@ function nowH(n, st, W) {
   return secH("🎯 En ce moment", (recent ? `<span class="now-badge">${esc(NOW_LVL[n.niveau] || "")}</span>` : "")
     + `<div class="now-path">${path}</div>`
     + (n.en_cours ? `<p>${W(n.en_cours)}</p>` : "")
-    + `<div class="meta">depuis${tsH(n.depuis)}${n.error ? " · ⚠️ " + esc(n.error) : ""}</div>`, "now");
+    + `<div class="meta">depuis${tsH(n.depuis)}${n.error ? " · ⚠️ " + esc(n.error) : ""}${n.claude_error
+      ? " · ⚠️ Claude : " + esc(n.claude_error) + " (modèle OVH)" : /^Claude/.test(n.model || "") ? " · " + esc(n.model) : ""}</div>`, "now");
 }
 function nowHistH(hist) {
   hist = (hist || []).filter(h => h?.chemin?.length);
@@ -2374,6 +2375,55 @@ async function loadZoom() {
   };
 }
 $("#zoomBox").addEventListener("toggle", () => { if ($("#zoomBox").open) loadZoom(); });
+
+// Claude : clé d'API Anthropic de ce compte (jamais réaffichée) et modèles choisis
+const AI_HINT = { "claude-fable-5-2": "recommandé", "claude-haiku-5-5": "rapide, peu coûteux", "claude-sonnet-5-5": "plus précis" };
+async function loadAi() {
+  let d;
+  try { d = await api("/api/me/ai"); } catch (e) { $("#aiMine").textContent = "Erreur : " + e.message; return; }
+  const opt = (models, cur, ovh) => Object.entries(models).map(([k, v]) =>
+    `<option value="${esc(k)}"${k === cur ? " selected" : ""}>${esc(v)}${AI_HINT[k] ? " (" + AI_HINT[k] + ")" : ""}</option>`).join("")
+    + `<option value=""${!cur ? " selected" : ""}>${ovh}</option>`;
+  const chk = d.check ? Object.entries(d.check).map(([m, r]) => r === "ok" ? `✅ ${esc(m)}` : `❌ ${esc(m)} : ${esc(r)}`).join(" · ") : "";
+  const box = $("#aiMine");
+  box.innerHTML = `<p class="zoom-st">${d.configured ? `🔑 Clé enregistrée (${esc(d.hint || "")}) le ${fmtWhen(d.saved_at)}`
+      : "Aucune clé : vos réunions utilisent les modèles OVH."}</p>
+    ${chk ? `<p class="hint ai-check">Essai du ${fmtWhen(d.checked_at)} : ${chk}</p>` : ""}
+    <div class="opts-grid ai-grid">
+      <label>Clé d'API Anthropic<input id="aiKey" type="password" autocomplete="off" spellcheck="false"
+        placeholder="${d.configured ? "Nouvelle clé (vide : garder l'actuelle)" : "sk-ant-…"}"></label>
+      <label>Compte rendu final<select id="aiReport">${opt(d.models.report, d.report, "Modèles OVH (comme avant)")}</select></label>
+      <label>« En ce moment »<select id="aiNow">${opt(d.models.now, d.now, "Modèle OVH (comme avant)")}</select></label>
+    </div>
+    <div class="row ai-act"><button type="button" class="primary ai-save">Enregistrer</button>
+      ${d.configured ? `<button type="button" class="ai-test">Tester la clé</button><button type="button" class="ghost danger ai-del">Retirer la clé</button>` : ""}</div>`;
+  const test = async (btn) => {
+    if (btn) { btn.disabled = true; btn.textContent = "Essai en cours…"; }
+    try { const r = await api("/api/me/ai/test", { method: "POST" });
+      const bad = Object.values(r.check || {}).filter(x => x !== "ok");
+      toast(bad.length ? "Clé essayée : " + bad.join(" ; ") : "Clé essayée : Claude répond", bad.length ? 8000 : 4000); }
+    catch (e) { toast(e.message, 6000); }
+    loadAi();
+  };
+  $(".ai-save", box).onclick = async (e) => {
+    const key = $("#aiKey").value.trim();
+    e.target.disabled = true;
+    try {
+      await api("/api/me/ai", { method: "PUT", json: { ...(key ? { key } : {}), report: $("#aiReport").value, now: $("#aiNow").value } });
+      $("#aiKey").value = "";
+      toast(key ? "Clé enregistrée : essai en cours…" : "Réglage Claude enregistré");
+      if (key) return test();
+    } catch (x) { toast(x.message, 6000); }
+    loadAi();
+  };
+  if ($(".ai-test", box)) $(".ai-test", box).onclick = (e) => test(e.target);
+  if ($(".ai-del", box)) $(".ai-del", box).onclick = async () => {
+    if (!confirm("Retirer votre clé d'API Anthropic ? Vos réunions utiliseront de nouveau les modèles OVH.")) return;
+    try { await api("/api/me/ai", { method: "DELETE" }); toast("Clé retirée : modèles OVH"); } catch (x) { toast(x.message); }
+    loadAi();
+  };
+}
+$("#aiBox").addEventListener("toggle", () => { if ($("#aiBox").open) loadAi(); });
 $("#csAttest").onchange = () => { $("#csOk").disabled = !$("#csAttest").checked; };
 $("#dlgConsent").addEventListener("close", async () => {
   const x = consentTarget; consentTarget = null;

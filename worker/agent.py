@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 import analyst
+import claude_api
 import importer as importer_mod
 import lexicon
 import reid
@@ -59,6 +60,10 @@ watch_task: asyncio.Task | None = None
 speaker_task: asyncio.Task | None = None
 last_join: tuple | None = None   # (JoinReq, plateforme) d'une entrée échouée : reprise si on la termine à la main
 meeting_files: set[str] = set()  # vidéos et transcriptions (radicaux) de la réunion en cours : partage en direct gardé après
+# Claude (clé d'API Anthropic de chaque compte, envoyée par le contrôle avant ce qui peut en avoir besoin) : en mémoire
+# seulement, jamais sur disque ni dans un journal ; oubliée après AI_TTL sans nouvel envoi
+ai_keys: dict[str, tuple[dict, float]] = {}
+AI_TTL = float(os.environ.get("AI_KEY_TTL_HOURS", "72")) * 3600
 bot_name: str = BOT_NAME
 REPORT_AUTO = os.environ.get("REPORT_AUTO", "1") == "1"
 reports: dict[str, dict] = {}   # stem -> {state: running|done|error|skipped, step, started, error}
@@ -440,7 +445,8 @@ async def _report_job(stem: str):
             job.update(state="skipped", step=None, error="réunion trop courte pour un compte rendu")
             return
         doc = await _reidentify(stem, doc, job)
-        rep = await analyst.build_report(transcriber.llm, doc, lambda st: job.update(step=st))
+        rep = await analyst.build_report(transcriber.llm, doc, lambda st: job.update(step=st),
+                                         ai=ai_for((doc.get("meta") or {}).get("owner")))
         rep["id"] = f"{NAME}:{stem}"
         (recorder.dir / (stem + ".report.json")).write_text(json.dumps(rep, ensure_ascii=False, indent=1))
         job.update(state="done", step=None, secs=rep["secs"])
@@ -1223,6 +1229,66 @@ def _apply_live_share(old: set, new: set) -> int:
         if fields["shared_with"] != sorted(meta.get("shared_with") or []) or fields["live_viewers"] != sorted(lv):
             n += _update_file_meta(stem, fields)
     return n
+
+
+# ---------------------------------------------------------------- Claude : clé d'API de chaque compte
+class AiReq(BaseModel):
+    owner: str
+    ai: dict | None = None        # {"key", "report", "now"} ; None : oublier
+
+    def __repr__(self):
+        return f"AiReq(owner={self.owner!r}, ai={'oui' if self.ai else 'non'})"
+    __str__ = __repr__
+
+
+class AiCheckReq(BaseModel):
+    key: str
+    models: list[str] = []
+
+    def __repr__(self):
+        return f"AiCheckReq(models={self.models!r})"
+    __str__ = __repr__
+
+
+def _ai_clean(ai: dict | None) -> dict | None:
+    if not isinstance(ai, dict) or not isinstance(ai.get("key"), str) or len(ai["key"].strip()) < 20:
+        return None
+    out = {"key": ai["key"].strip(),
+           "report": ai.get("report") if ai.get("report") in claude_api.REPORT_MODELS else None,
+           "now": ai.get("now") if ai.get("now") in claude_api.NOW_MODELS else None}
+    return out if out["report"] or out["now"] else None
+
+
+def ai_for(owner: str | None) -> dict | None:
+    hit = ai_keys.get(owner or "")
+    if not hit:
+        return None
+    if time.time() - hit[1] > AI_TTL:
+        ai_keys.pop(owner, None)
+        return None
+    return hit[0]
+
+
+@app.post("/ai/remember", dependencies=[Depends(auth)])
+async def ai_remember(req: AiReq):
+    """Réglage Claude d'un compte (clé, modèles), envoyé par le contrôle ; None : oublié aussitôt."""
+    ai = _ai_clean(req.ai)
+    if ai:
+        ai_keys[req.owner] = (ai, time.time())
+    else:
+        ai_keys.pop(req.owner, None)
+    return {"ok": True, "report": ai and ai["report"], "now": ai and ai["now"]}
+
+
+@app.post("/ai/check", dependencies=[Depends(auth)])
+async def ai_check(req: AiCheckReq):
+    """Essai d'une clé sur les modèles choisis (question minuscule) : « ok » ou l'erreur, modèle par modèle."""
+    if len(req.key.strip()) < 20:
+        raise HTTPException(400, "clé trop courte")
+    return {"models": await claude_api.check(req.key.strip(), req.models)}
+
+
+transcriber.ai_lookup = lambda: ai_for(state.get("owner") or (transcriber.meta or {}).get("owner"))
 
 
 @app.on_event("shutdown")

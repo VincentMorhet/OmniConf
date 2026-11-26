@@ -7,6 +7,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -71,6 +72,7 @@ VOICEPRINT_FILE = DATA / "voiceprints.json"   # empreintes de référence (perso
 VOICE_Q_FILE = DATA / "voice_questions.json"  # « Est-ce X ? » : voix douteuses à confirmer, et réponses données
 SESSIONS_FILE = DATA / "sessions.json"        # sessions Zoom des comptes (chiffrées), chargées le temps d'une réunion
 SESSIONS_KEY = DATA / "sessions.key"          # clé de chiffrement de ces sessions (mode 600)
+AI_FILE = DATA / "ai_keys.json"                # clés d'API Anthropic des comptes (chiffrées avec SESSIONS_KEY, mode 600)
 USERS = Users(DATA / "users.json", admin_password=PASSWORD, admin_login=os.environ.get("ADMIN_LOGIN"),
               admin_name=os.environ.get("ADMIN_NAME"),
               bot_names=json.loads(os.environ["DEFAULT_NAMES"]) if os.environ.get("DEFAULT_NAMES") else None)   # lexique de l'installation (noms, corrections, sigles, registre), poussé aux workers
@@ -472,6 +474,7 @@ async def start_meeting(m: StartMeeting, u: dict) -> dict:
     body["display_name"] = m.display_name or bot_name(u, platform, DEFAULT_NAMES)
     body["owner"], body["me_name"] = u["login"], u.get("name")
     body["duration_min"] = m.duration_min or DEFAULT_DURATION
+    await ai_push(target, u["login"])          # Claude (sa clé) pour « En ce moment » et le compte rendu final
     r = await wcall(target, "POST", "/meeting/join", json=body)
     if cookies:
         log.info("réunion Zoom de %s sur %s avec sa session", u["login"], target)
@@ -585,6 +588,148 @@ class SpeakerName(BaseModel):
 async def recording_speaker_rename(name: str, file: str, body: SpeakerName, u: dict = CU):
     await rec_meta(name, file, u, edit=True)
     return (await wcall(name, "PATCH", f"/recordings/{file}/speakers", json=body.model_dump())).json()
+
+
+# ----------------------------------------------------------------------------- Claude : clé d'API de chaque compte
+# Chaque compte peut enregistrer sa propre clé d'API Anthropic : ses réunions ont alors un compte rendu final rédigé par
+# Claude Fable 5.2 et « En ce moment » par Claude Haiku ou Sonnet 5.5, facturés sur son compte Anthropic. La clé est
+# gardée chiffrée ici, jamais renvoyée à l'IHM ni écrite dans un journal ; le contrôle l'envoie à l'assistant juste avant
+# ce qui peut en avoir besoin (réunion, compte rendu, import), qui la garde en mémoire seulement.
+AI_REPORT_MODELS = {"claude-fable-5-2": "Claude Fable 5.2"}
+AI_NOW_MODELS = {"claude-haiku-5-5": "Claude Haiku 5.5", "claude-sonnet-5-5": "Claude Sonnet 5.5"}
+
+
+def _ai_all() -> dict:
+    try:
+        return json.loads(AI_FILE.read_text())
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def _ai_write(d: dict):
+    tmp = AI_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(d))
+    os.chmod(tmp, 0o600)
+    tmp.replace(AI_FILE)
+
+
+def ai_info(login: str) -> dict:
+    """Ce que l'IHM peut savoir du réglage Claude d'un compte (jamais la clé : ses 4 derniers caractères au plus)."""
+    a = _ai_all().get(login) or {}
+    return {"configured": bool(a.get("enc")), "hint": a.get("hint"), "saved_at": a.get("saved_at"),
+            "report": a.get("report", "claude-fable-5-2"), "now": a.get("now", "claude-haiku-5-5"),
+            "check": a.get("check"), "checked_at": a.get("checked_at"),
+            "models": {"report": AI_REPORT_MODELS, "now": AI_NOW_MODELS}}
+
+
+def ai_cfg(login: str | None) -> dict | None:
+    """Réglage à envoyer à l'assistant : {key, report, now}, ou None (pas de clé, ou aucun usage choisi)."""
+    a = _ai_all().get(login or "") or {}
+    if not a.get("enc"):
+        return None
+    report = a.get("report", "claude-fable-5-2") if a.get("report", "claude-fable-5-2") in AI_REPORT_MODELS else None
+    now = a.get("now", "claude-haiku-5-5") if a.get("now", "claude-haiku-5-5") in AI_NOW_MODELS else None
+    if not (report or now):
+        return None
+    try:
+        key = _fernet().decrypt(a["enc"].encode()).decode()
+    except Exception as e:
+        log.warning("clé Claude de %s illisible : %s", login, type(e).__name__)
+        return None
+    return {"key": key, "report": report, "now": now}
+
+
+async def ai_push(name: str, login: str | None):
+    """Envoie à l'assistant le réglage Claude du compte (ou l'en efface) avant une réunion, un compte rendu, un import."""
+    if not login:
+        return
+    try:
+        await wcall(name, "POST", "/ai/remember", json={"owner": login, "ai": ai_cfg(login)}, timeout=10)
+    except Exception as e:                 # assistant d'avant cette version, ou injoignable : modèles OVH
+        log.warning("réglage Claude non transmis à %s : %s", name, type(e).__name__)
+
+
+async def ai_push_all(login: str):
+    await asyncio.gather(*(ai_push(n, login) for n in WORKERS))
+
+
+class AiSettings(BaseModel):
+    key: str | None = None          # nouvelle clé (jamais renvoyée) ; absente : clé inchangée
+    report: str | None = None       # modèle du compte rendu final, ou "" : modèles OVH
+    now: str | None = None          # modèle de « En ce moment », ou "" : modèle OVH
+
+    def __repr__(self):
+        return f"AiSettings(key={'…' if self.key else None}, report={self.report!r}, now={self.now!r})"
+    __str__ = __repr__
+
+
+@app.get("/api/me/ai")
+async def me_ai(u: dict = CU):
+    return ai_info(u["login"])
+
+
+@app.put("/api/me/ai")
+async def me_ai_put(body: AiSettings, u: dict = CU):
+    d = _ai_all()
+    a = d.get(u["login"]) or {}
+    if body.key is not None:
+        k = body.key.strip()
+        if not re.fullmatch(r"sk-ant-[A-Za-z0-9_\-]{20,300}", k):
+            raise HTTPException(400, "clé d'API Anthropic invalide (elle commence par « sk-ant- »)")
+        a.update(enc=_fernet().encrypt(k.encode()).decode(), hint="…" + k[-4:], check=None, checked_at=None,
+                 saved_at=dt.datetime.now().astimezone().isoformat(timespec="seconds"))
+    if body.report is not None:
+        if body.report and body.report not in AI_REPORT_MODELS:
+            raise HTTPException(400, "modèle de compte rendu inconnu")
+        a["report"] = body.report
+    if body.now is not None:
+        if body.now and body.now not in AI_NOW_MODELS:
+            raise HTTPException(400, "modèle « En ce moment » inconnu")
+        a["now"] = body.now
+    d[u["login"]] = a
+    _ai_write(d)
+    log.info("réglage Claude de %s : %s%s", u["login"], "clé changée, " if body.key is not None else "",
+             f"compte rendu {a.get('report', 'claude-fable-5-2') or 'OVH'}, en ce moment {a.get('now', 'claude-haiku-5-5') or 'OVH'}")
+    await ai_push_all(u["login"])
+    return ai_info(u["login"])
+
+
+@app.delete("/api/me/ai")
+async def me_ai_delete(u: dict = CU):
+    d = _ai_all()
+    if d.pop(u["login"], None) is not None:
+        _ai_write(d)
+        log.info("clé Claude de %s retirée", u["login"])
+    await ai_push_all(u["login"])          # effacée aussi de la mémoire des assistants
+    return ai_info(u["login"])
+
+
+@app.post("/api/me/ai/test")
+async def me_ai_test(u: dict = CU):
+    """Essai de la clé sur les modèles choisis, par un assistant en ligne (une question minuscule par modèle)."""
+    cfg = ai_cfg(u["login"])
+    a = _ai_all().get(u["login"]) or {}
+    if not a.get("enc"):
+        raise HTTPException(400, "aucune clé enregistrée")
+    key = cfg["key"] if cfg else _fernet().decrypt(a["enc"].encode()).decode()
+    models = [m for m in ((cfg or {}).get("report"), (cfg or {}).get("now")) if m] or ["claude-haiku-5-5"]
+    sts = await asyncio.gather(*(worker_status(n) for n in WORKERS))
+    name = next((st["name"] for st in sts if st.get("online")), None)
+    if not name:
+        raise HTTPException(503, "aucun assistant en ligne pour faire l'essai")
+    try:
+        r = await wcall(name, "POST", "/ai/check", json={"key": key, "models": models}, timeout=300)
+        res = r.json()["models"]
+    except HTTPException as e:              # jamais le détail d'une erreur de validation (il recopierait la clé)
+        raise HTTPException(e.status_code, "essai impossible" if e.status_code == 422 else e.detail)
+    except Exception as e:
+        raise HTTPException(502, f"essai impossible ({type(e).__name__})")
+    d = _ai_all()
+    if u["login"] in d:
+        d[u["login"]].update(check={AI_REPORT_MODELS.get(m) or AI_NOW_MODELS.get(m, m): v for m, v in res.items()},
+                             checked_at=dt.datetime.now().astimezone().isoformat(timespec="seconds"))
+        _ai_write(d)
+    return ai_info(u["login"])
 
 
 # ----------------------------------------------------------------------------- compte Zoom (session de chacun)
@@ -850,7 +995,8 @@ async def recording_report(name: str, file: str, fmt: str = "json", download: in
 
 @app.post("/api/recordings/{name}/{file}/report")
 async def recording_report_build(name: str, file: str, u: dict = CU):
-    await rec_meta(name, file, u, edit=True)
+    meta = await rec_meta(name, file, u, edit=True)
+    await ai_push(name, meta.get("owner") or u["login"])     # Claude : la clé du propriétaire de la réunion
     return (await wcall(name, "POST", f"/recordings/{file}/report")).json()
 
 
@@ -979,6 +1125,7 @@ async def import_start(body: ImportStart, u: dict = IU):
         cands.sort(key=lambda st: (bool((st.get("imports") or {}).get("busy")), st.get("state") != "idle",
                                    -free.get(st["name"], 0)))
         target = cands[0]["name"]
+    await ai_push(target, u["login"])          # Claude : compte rendu de l'import avec la clé de ce compte
     r = await wcall(target, "POST", "/imports", json={**body.model_dump(), "file": fname, "owner": u["login"],
                                                        "me_name": u.get("name")})
     if not same:
@@ -1013,11 +1160,13 @@ async def import_chunk(name: str, jid: str, offset: int, request: Request, u: di
 
 @app.post("/api/imports/{name}/{jid}/finish")
 async def import_finish(name: str, jid: str, u: dict = IU):
+    await ai_push(name, u["login"])
     return {**(await wcall(name, "POST", f"/imports/{jid}/finish", params={"owner": u["login"]})).json(), "worker": name}
 
 
 @app.post("/api/imports/{name}/{jid}/retry")
 async def import_retry(name: str, jid: str, u: dict = IU):
+    await ai_push(name, u["login"])
     return {**(await wcall(name, "POST", f"/imports/{jid}/retry", params=_imp_owner(u))).json(), "worker": name}
 
 
@@ -1037,6 +1186,7 @@ async def recording_transcribe(name: str, file: str, body: TranscribeAgain | Non
     """Transcription après coup (puis compte rendu) d'une vidéo restée sans transcription, ou refaite."""
     meta = await rec_meta(name, file, u, edit=True)
     owner = meta.get("owner") or u["login"]
+    await ai_push(name, owner)
     r = await wcall(name, "POST", f"/recordings/{file}/transcribe",
                     json={"owner": owner, "me_name": USERS.names().get(owner) or u.get("name"),
                           "force": bool(body and body.force)})

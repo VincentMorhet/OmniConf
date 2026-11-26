@@ -143,6 +143,7 @@ class Transcriber:
         self.diar.canon = lambda n: lexicon.load().canonical(n)
         self.dlock = threading.Lock()  # l'empreinte vocale est calculée hors de la boucle asyncio
         self.llm = analyst.LLM()
+        self.ai_lookup = None            # -> réglage Claude du propriétaire de la réunion (agent.ai_for), ou None
         self.an_task: asyncio.Task | None = None
         self.reset()
 
@@ -196,8 +197,8 @@ class Transcriber:
         if not self.active and not n["state"]:
             return None
         return {**(n["state"] or {}), "v": n["v"], "at": n["at"], "running": n["running"], "error": n["error"],
-                "secs": n["secs"], "every": analyst.NOW_EVERY, "model": analyst.NOW_MODEL, "hist": n["hist"][-8:],
-                "live": self.active}
+                "secs": n["secs"], "every": analyst.NOW_EVERY, "model": n.get("model") or analyst.model_name(analyst.NOW_MODEL),
+                "claude_error": n.get("claude_error"), "hist": n["hist"][-8:], "live": self.active}
 
     # ------------------------------------------------------------------ cycle de vie
     async def start(self, base: Path, t0: float, meta: dict, bot_names: tuple = (), me_name: str | None = None):
@@ -713,13 +714,14 @@ class Transcriber:
         topics = list(dict.fromkeys(topics))
         n["running"] = True
         try:
-            res = await analyst.live_now(self.llm, lines, lab, n["state"], n["upto"], topics)
+            res = await analyst.live_now(self.llm, lines, lab, n["state"], n["upto"], topics,
+                                         ai=self.ai_lookup() if self.ai_lookup else None)
         finally:
             n["running"] = False
         if not self.active:
             return
         now_iso = dt.datetime.now().astimezone().isoformat(timespec="seconds")
-        n["secs"] = res.pop("_secs", None)
+        n["secs"], n["model"], n["claude_error"] = res.pop("_secs", None), res.pop("_model", None), res.pop("_claude_error", None)
         if res["niveau"] or not n["state"]:
             res["changed_at"] = now_iso
             n["hist"].append({"t": res["depuis"], "chemin": res["chemin"], "niveau": res["niveau"], "at": now_iso})

@@ -905,3 +905,7 @@ dialog.dlg .seg label { flex-direction: row; align-items: center; gap: 6px; colo
 /* spectateur d'une réunion partagée en direct : regarder et écouter, ni micro ni commandes */
 .viewer .actions, .viewer .b-mic, .viewer .b-ptt, .viewer .lvl, .viewer .tr-toggle, .viewer .an-now, .viewer .screen-hint,
 #tab-focus.viewer #fRecBtn, #tab-focus.viewer #fLeave, #tab-focus.viewer #fHand { display: none !important; }
+.ai-grid { margin: 6px 0 10px; }
+.ai-check { margin: 0; }
+.ai-act { flex-wrap: wrap; }
+.ai-act > button { flex: 1 1 160px; }

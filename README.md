@@ -127,6 +127,16 @@ créé au premier démarrage avec `ADMIN_PASSWORD` (dans `/etc/webconf/control.e
      « ↪ Nouveau sous-sujet », « • Nouveau point ») et le niveau qui a changé reste en évidence 2 minutes, sur
      la carte et sur l'accueil. Les niveaux qui ne changent pas gardent leur intitulé (affichage stable).
      Le **🔀 fil des sujets** garde chaque changement avec son heure (aussi dans la transcription enregistrée).
+   - **Avec Claude (clé d'API Anthropic du compte)** : Réglages › « Claude (Anthropic) pour vos réunions ».
+     Chaque compte peut enregistrer sa propre clé : « En ce moment » est alors suivi par **Claude Haiku 5.5**
+     (rapide) ou **Claude Sonnet 5.5** (plus précis), et le compte rendu final rédigé par **Claude Fable 5.2**
+     (réflexion « high »), facturés sur son compte Anthropic. Seules ses réunions sont concernées (pour un compte
+     rendu refait par un administrateur : la clé du propriétaire de la réunion). La clé est chiffrée sur le
+     contrôle (`ai_keys.json`, même clé que les sessions Zoom), jamais réaffichée ni journalisée ; le contrôle
+     l'envoie à l'assistant juste avant une réunion, un compte rendu ou un import (`/ai/remember`), et
+     l'assistant la garde en mémoire seulement (72 h sans nouvel envoi, `AI_KEY_TTL_HOURS`). « Tester la clé »
+     pose une question minuscule à chaque modèle choisi. Si Claude échoue (clé refusée, crédit épuisé, refus du
+     modèle…), les modèles OVH prennent le relais et l'erreur est affichée. SDK officiel `anthropic` (figé).
 6. **📋 Compte rendu final**, rédigé automatiquement à la fin de la réunion (environ 6 à 15 min selon la
    durée de la réunion et la charge d'OVH) :
    - **plusieurs modèles se contrôlent** :

@@ -32,6 +32,8 @@ import time
 from zoneinfo import ZoneInfo
 
 import httpx
+
+import claude_api
 from collections import Counter
 
 import lexicon
@@ -613,13 +615,25 @@ def merge_now(prev: dict | None, data: dict, t_new: float, t_min: float, t_max: 
 
 
 async def live_now(llm: LLM, lines: list[tuple], lab: dict, prev: dict | None, since: float | None,
-                   topics: list[str] | None = None) -> dict:
-    """« En ce moment » : `lines` = [(t, voix, texte)] de la fin de la transcription (mise en forme et en attente)."""
-    data, res = await llm.chat_json(NOW_MODEL, NOW_SYSTEM, now_user(lines, lab, prev, since, topics or []),
-                                    reasoning="none", max_tokens=800, temperature=0.1, deadline=45)
+                   topics: list[str] | None = None, ai: dict | None = None) -> dict:
+    """« En ce moment » : `lines` = [(t, voix, texte)] de la fin de la transcription (mise en forme et en attente).
+    `ai` : réglage Claude du propriétaire (Haiku ou Sonnet 5.5) ; à défaut, ou en cas d'échec, le modèle OVH."""
+    user = now_user(lines, lab, prev, since, topics or [])
+    data, err = None, None
+    if ai and ai.get("now"):
+        try:
+            data, res = await claude_api.now_json(ai, NOW_SYSTEM, user)
+            used = claude_api.label(res["model"])
+        except Exception as e:
+            data, err = None, claude_api.explain(e)
+            log.warning("en ce moment : Claude indisponible (%s), modèle OVH", err)
+    if data is None:
+        data, res = await llm.chat_json(NOW_MODEL, NOW_SYSTEM, user, reasoning="none", max_tokens=800, temperature=0.1,
+                                        deadline=45)
+        used = model_name(NOW_MODEL)
     t_new = next((t for t, _, _ in lines if since is None or t >= since), lines[-1][0])
     out = merge_now(prev, data, t_new, lines[0][0], lines[-1][0])
-    out["_secs"] = res["secs"]
+    out["_secs"], out["_model"], out["_claude_error"] = res["secs"], used, err
     return out
 
 
@@ -893,7 +907,10 @@ def target_words(doc: dict) -> int:
     return int(min(3500, max(350, round(last * WORDS_PER_MIN / 50) * 50)))
 
 
-async def build_report(llm: LLM, doc: dict, progress=lambda step: None, version: int = REPORT_VERSION) -> dict:
+async def build_report(llm: LLM, doc: dict, progress=lambda step: None, version: int = REPORT_VERSION,
+                       ai: dict | None = None) -> dict:
+    """`ai` : réglage Claude du propriétaire. Avec un modèle de compte rendu (Claude Fable 5.2), il rédige seul le
+    compte rendu ; s'il échoue, la chaîne OVH habituelle (rédactions, confrontation, contrôle) prend le relais."""
     t_start = time.time()
     text = transcript_text(doc)
     if not text.strip():
@@ -907,6 +924,31 @@ async def build_report(llm: LLM, doc: dict, progress=lambda step: None, version:
     drafters = [m for m in REPORT_MODELS
                 if len(text) < next((v for k, v in CTX_CHARS.items() if k in m.lower()), 800_000)]
     steps = []
+
+    if ai and ai.get("report"):
+        name = claude_api.label(ai["report"])
+        progress(f"rédaction par {name}")
+        cr = None
+        for attempt in range(2):          # JSON mal formé : un second essai, comme pour les modèles OVH
+            try:
+                res = await claude_api.report_text(ai, draft_sys, head if attempt == 0 else
+                                                   head + "\n\nRéponds uniquement par un objet JSON valide.")
+                data = extract_json(res["content"])
+                cr = _clean_cr(data.get("compte_rendu", data) if isinstance(data, dict) else None, version)
+                if not cr:
+                    raise ValueError("compte rendu vide ou mal formé")
+                steps.append({"etape": "rédaction", "modele": claude_api.label(res["model"]), "secs": res["secs"],
+                              "ok": True, "usage": res["usage"], **({"bascule": True} if res["fallback"] else {})})
+                break
+            except (ValueError, KeyError) as e:
+                steps.append({"etape": "rédaction", "modele": name, "ok": False, "erreur": str(e)[:200]})
+            except Exception as e:
+                steps.append({"etape": "rédaction", "modele": name, "ok": False, "erreur": claude_api.explain(e)})
+                log.warning("compte rendu par %s : %s ; modèles OVH", name, claude_api.explain(e))
+                break
+        if cr:
+            return _finish_report(cr, doc, version, t_start, [], [], steps, {name: cr})
+        progress(f"{name} indisponible : rédaction par les modèles OVH")
 
     # 1. rédactions indépendantes, en parallèle
     done = 0
@@ -972,6 +1014,13 @@ async def build_report(llm: LLM, doc: dict, progress=lambda step: None, version:
         log.warning("contrôle : %s", e)
         steps.append({"etape": "contrôle", "modele": model_name(REPORT_AUDITOR), "ok": False, "erreur": str(e)[:200]})
 
+    return _finish_report(final, doc, version, t_start, arbitrages, corrections, steps,
+                          {model_name(s): cr for s, cr in drafts})
+
+
+def _finish_report(final: dict, doc: dict, version: int, t_start: float, arbitrages: list, corrections: list,
+                   steps: list, drafts: dict) -> dict:
+    """Vérifications communes : dates recalculées, voix partagées, couverture, horodatages hors réunion."""
     warn = []
     final = fix_dates(final, doc, warn)
     wk = WARN_KEY[2 if version >= 2 else 1]
@@ -985,8 +1034,7 @@ async def build_report(llm: LLM, doc: dict, progress=lambda step: None, version:
                 x["t"] = None
     return {"version": version, "generated_at": dt.datetime.now().astimezone().isoformat(),
             "secs": round(time.time() - t_start), "cr": final, "arbitrages": arbitrages,
-            "corrections": corrections, "steps": steps, "stats": stats(doc),
-            "drafts": {model_name(s): cr for s, cr in drafts}}
+            "corrections": corrections, "steps": steps, "stats": stats(doc), "drafts": drafts}
 
 
 def shared_voices(doc: dict) -> list[dict]:
