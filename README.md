@@ -91,6 +91,16 @@ créé au premier démarrage avec `ADMIN_PASSWORD` (dans `/etc/webconf/control.e
    - **🔑 Ouvrir…** : ouvre une URL, par exemple pour **se connecter une fois** à un compte Teams.
      Le profil Chrome est persistant, la session est conservée (sinon le bot rejoint en invité). Zoom : voir
      « Votre compte Zoom » (la session de chacun n'est chargée que pour ses réunions).
+   - **📷 Caméra « image »** (Réglages > Image de la caméra de l'assistant) : chaque compte choisit une image.
+     L'IHM la prépare en JPEG 1280×720 : image entière, centrée sur un fond flouté. Le contrôle la garde dans
+     `DATA_DIR/camera/<login>.jpg` (mode 600) et l'envoie avec chacune des réunions de ce compte.
+     L'assistant **n'allume jamais sa caméra** : il entre sans caméra, comme avant. Une fois l'entrée
+     confirmée, une caméra « OmniConf (image) » apparaît (éteinte) dans la réunion ; l'utilisateur l'allume
+     lui-même (Prendre la main, bouton caméra de Teams, de Zoom ou de la webconf). Sans image : une carte
+     avec le nom de l'assistant. Mécanisme (`worker/camera.py`) : un script de page remplace
+     `getUserMedia`/`enumerateDevices`, et l'image passe par une liaison Playwright (aucune requête
+     réseau). Jitsi : `config.startWithVideoMuted=true`. Essai de bout en bout dans une vraie réunion
+     Jitsi : `tests/camera_e2e.py`.
    - **Quitter** : quitte la réunion et arrête l'enregistrement. Le bot quitte aussi tout seul quand la
      réunion se termine, ou à la fin de la durée max.
    - **⏱ Prolonger** (carte et « Suivre en grand ») : repousse le départ automatique de +30 min, +1 h, +2 h

@@ -13,6 +13,8 @@ from urllib.parse import parse_qs, urlparse
 
 from playwright.async_api import BrowserContext, Page, async_playwright
 
+from camera import ImageCamera
+
 log = logging.getLogger("meetings")
 
 
@@ -102,6 +104,7 @@ class Browser:
         self._pw = None
         self.ctx: BrowserContext | None = None
         self.lock = asyncio.Lock()
+        self.camera = ImageCamera()     # caméra « image », éteinte (l'utilisateur l'allume lui-même)
 
     async def page(self) -> Page:
         if self.ctx is None:
@@ -154,6 +157,10 @@ class Browser:
         )
         await self.ctx.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
+        try:
+            await self.camera.install(self.ctx)
+        except Exception as e:          # jamais au prix de l'entrée en réunion
+            log.warning("caméra « image » : %s", e)
         self.ctx.on("close", lambda *_: setattr(self, "ctx", None))
         try:      # navigateur relancé (redémarrage, plantage pendant une réunion) : aucune session Zoom n'y reste
             await self.ctx.clear_cookies(domain=ZOOM_DOMAIN)
@@ -412,8 +419,8 @@ class Generic:
     @staticmethod
     def prepare_url(url: str, name: str) -> str:
         u = urlparse(url)
-        if "jit" in (u.hostname or "") and not u.fragment:  # Jitsi : nom passé dans l'URL
-            return url + f'#userInfo.displayName="{name}"'
+        if "jit" in (u.hostname or "") and not u.fragment:  # Jitsi : nom passé dans l'URL, caméra coupée au départ
+            return url + f'#userInfo.displayName="{name}"&config.startWithVideoMuted=true'
         return url
 
     @staticmethod

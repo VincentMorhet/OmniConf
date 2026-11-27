@@ -121,6 +121,7 @@ class JoinReq(BaseModel):
     as_me: bool = False              # Zoom : entrer avec le compte de l'utilisateur (sa session, ci-dessous)
     as_me_required: bool = False     # session expirée : True -> pas d'entrée ; False -> entrée en invité
     session: list[dict] | None = None  # cookies Zoom de l'utilisateur, chargés le temps de la réunion (jamais journalisés)
+    camera_image: str | None = None  # image de la caméra « image » de ce compte (JPEG 1280×720 en base64), facultative
 
     def __repr__(self):              # la session n'apparaît dans aucun journal
         return f"JoinReq(url={self.url!r}, platform={self.platform!r}, owner={self.owner!r}, as_me={self.as_me})"
@@ -306,6 +307,7 @@ async def _run_join(req: JoinReq, platform: str):
             name = req.display_name or BOT_NAME
             global bot_name
             bot_name = name
+            browser.camera.set(req.camera_image, name)   # éteinte ; disponible une fois l'entrée confirmée
             recognized = True
             if impl is None:  # autre plateforme : on ouvre la page, finir à la main via l'écran distant
                 await page.goto(req.url, wait_until="domcontentloaded", timeout=45000)
@@ -339,6 +341,7 @@ async def _run_join(req: JoinReq, platform: str):
         raise
     except AccountBusy as e:          # compte utilisé ailleurs, ou session expirée : on sort sans rien toucher
         log.warning("entrée Zoom avec le compte de l'utilisateur : %s", e)
+        browser.camera.reset()
         await browser.blank()
         await _zoom_release(export=False)
         set_state("error", error=str(e)[:300])
@@ -566,6 +569,10 @@ async def _watchdog():
             seen = True
             if state.get("note"):
                 set_state("in_meeting", note=None)
+            try:                      # caméra « image » : proposée (éteinte) dans la réunion, l'utilisateur l'allume
+                await browser.camera.make_ready(await browser.page())
+            except Exception as e:
+                log.warning("caméra « image » : %s", e)
         missing = 0 if ok else missing + 1
         if seen and missing >= 6:  # ~30 s sans barre d'outils de réunion
             log.info("réunion terminée (détectée)")
@@ -609,6 +616,7 @@ async def _leave(click: bool = True):
             await asyncio.sleep(1)
         except Exception:
             pass
+    browser.camera.reset()
     await browser.blank()
     await _zoom_release()
     set_state("idle", platform=None, url=None, title=None, auto_leave_at=None, error=None, note=None, owner=None)
@@ -663,6 +671,7 @@ async def open_url(req: OpenReq):
         raise HTTPException(409, "réunion en cours")
     if state.get("session_of") and state["session_of"] != req.owner:
         raise HTTPException(409, "session Zoom d'un autre compte chargée")
+    browser.camera.reset()           # page ouverte à la main : pas de caméra « image »
     await browser.goto(req.url)
     _take(req.owner, req.me_name)
     set_state("manual", platform=None, url=req.url, joined_at=_now_iso())
@@ -755,6 +764,7 @@ async def zoom_session_out():
 
 @app.post("/browser/reset", dependencies=[Depends(auth)])
 async def reset():
+    browser.camera.reset()
     await browser.blank()
     await _zoom_release()
     if state["state"] in ("manual", "error"):

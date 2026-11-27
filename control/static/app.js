@@ -2514,6 +2514,55 @@ async function loadAi() {
   };
 }
 $("#aiBox").addEventListener("toggle", () => { if ($("#aiBox").open) loadAi(); });
+
+// ------------------------------------------------------------------ image de la caméra de l'assistant (par compte)
+const CAM_W = 1280, CAM_H = 720;
+function loadCam() {
+  const has = !!me?.camera_image, box = $("#camMine");
+  const name = esc((cfg.defaultNames || {}).teams || me?.name || "Assistant");
+  box.innerHTML = `<div class="cam-prev">${has ? `<img alt="Image de la caméra de l'assistant" src="/api/me/camera?t=${Date.now()}">`
+      : `<div class="cam-card"><b>${name}</b><small>Assistant OmniConf</small></div>`}</div>
+    <p class="hint">${has ? "Votre image (1280 × 720), telle que la verront les participants." : "Aucune image choisie : les participants verraient cette carte."}</p>
+    <div class="row cam-act"><button type="button" class="primary cam-pick">${has ? "Changer d'image…" : "Choisir une image…"}</button>
+      ${has ? `<button type="button" class="ghost danger cam-del">Retirer l'image</button>` : ""}</div>`;
+  $(".cam-pick", box).onclick = () => { $("#camFile").value = ""; $("#camFile").click(); };
+  if ($(".cam-del", box)) $(".cam-del", box).onclick = async () => {
+    if (!await askConfirm("Retirer l'image ?", "La caméra de l'assistant montrera de nouveau une carte avec son nom.", "Retirer", true)) return;
+    try { await api("/api/me/camera", { method: "DELETE" }); me.camera_image = false; toast("Image retirée"); } catch (e) { toast(e.message, 5000); }
+    loadCam();
+  };
+}
+// l'image choisie, entière et centrée sur un fond flouté (photo en hauteur, logo…), en JPEG 1280×720
+async function camCompose(file) {
+  let src;
+  try { src = await createImageBitmap(file); }
+  catch (e) { src = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error("image illisible")); i.src = URL.createObjectURL(file); }); }
+  const w = src.width, h = src.height;
+  if (!w || !h) throw new Error("image illisible");
+  const cv = document.createElement("canvas"); cv.width = CAM_W; cv.height = CAM_H;
+  const g = cv.getContext("2d");
+  g.fillStyle = "#151a2d"; g.fillRect(0, 0, CAM_W, CAM_H);
+  const cover = Math.max(CAM_W / w, CAM_H / h), fit = Math.min(CAM_W / w, CAM_H / h);
+  g.filter = "blur(36px)";
+  g.drawImage(src, (CAM_W - w * cover) / 2, (CAM_H - h * cover) / 2, w * cover, h * cover);
+  g.filter = "none";
+  g.fillStyle = "rgba(10, 12, 24, .55)"; g.fillRect(0, 0, CAM_W, CAM_H);
+  g.drawImage(src, (CAM_W - w * fit) / 2, (CAM_H - h * fit) / 2, w * fit, h * fit);
+  return await new Promise(res => cv.toBlob(res, "image/jpeg", 0.88));
+}
+$("#camFile").onchange = async () => {
+  const f = $("#camFile").files[0];
+  if (!f) return;
+  try {
+    const blob = await camCompose(f);
+    const r = await fetch("/api/me/camera", { method: "PUT", body: blob, headers: { "Content-Type": "image/jpeg" }, credentials: "same-origin" });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "envoi refusé");
+    me.camera_image = true;
+    toast("Image enregistrée : elle servira dès votre prochaine réunion", 5000);
+  } catch (e) { toast("Image : " + e.message, 6000); }
+  loadCam();
+};
+$("#camBox").addEventListener("toggle", () => { if ($("#camBox").open) loadCam(); });
 $("#csAttest").onchange = () => { $("#csOk").disabled = !$("#csAttest").checked; };
 $("#dlgConsent").addEventListener("close", async () => {
   const x = consentTarget; consentTarget = null;

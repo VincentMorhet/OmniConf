@@ -1,6 +1,7 @@
 """VM de contrôle : IHM web + API. Pilote les workers, relaie l'audio WebRTC (signalisation),
 l'écran distant (noVNC) et les enregistrements. Planifie les réunions."""
 import asyncio
+import base64
 import datetime as dt
 import hashlib
 import hmac
@@ -78,6 +79,8 @@ DATA = Path(os.environ.get("DATA_DIR", "/var/lib/webconf"))
 DATA.mkdir(parents=True, exist_ok=True)
 SCHEDULE_FILE = DATA / "schedule.json"
 PUBLIC_FILE = DATA / "public_links.json"     # liens publics des vidéos (jeton secret -> réunion)
+CAM_DIR = DATA / "camera"                     # image de la caméra « image » de l'assistant, une par compte (JPEG)
+CAM_MAX = 2_000_000
 LEXICON_FILE = DATA / "lexicon.md"
 CONSENT_FILE = DATA / "voice_consents.json"   # consentements aux empreintes vocales (attestés par un administrateur)
 VOICEPRINT_FILE = DATA / "voiceprints.json"   # empreintes de référence (personnes consentantes seulement)
@@ -147,7 +150,48 @@ async def logout(request: Request):
 
 
 def me_public(u: dict) -> dict:
-    return {**USERS.public(u), "admin": is_admin(u)}
+    return {**USERS.public(u), "admin": is_admin(u), "camera_image": cam_file(u["login"]).is_file()}
+
+
+# ----------------------------------------------------------------------------- caméra « image » de l'assistant
+def cam_file(login: str) -> Path:
+    return CAM_DIR / f"{login}.jpg"
+
+
+@app.get("/api/me/camera")
+async def my_camera(u: dict = Depends(current_user)):
+    """Image que montre l'assistant quand l'utilisateur allume sa caméra dans une de ses réunions."""
+    f = cam_file(u["login"])
+    if not f.is_file():
+        raise HTTPException(404, "aucune image")
+    return FileResponse(f, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+@app.put("/api/me/camera")
+async def my_camera_set(request: Request, u: dict = Depends(current_user)):
+    """JPEG 1280×720 préparé par l'IHM (image choisie, centrée sur un fond flouté)."""
+    if int(request.headers.get("content-length") or 0) > CAM_MAX:
+        raise HTTPException(413, "image trop lourde (2 Mo au plus)")
+    data = await request.body()
+    if len(data) > CAM_MAX:
+        raise HTTPException(413, "image trop lourde (2 Mo au plus)")
+    if not data.startswith(b"\xff\xd8\xff"):
+        raise HTTPException(400, "image JPEG attendue")
+    CAM_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    f = cam_file(u["login"])
+    tmp = f.with_suffix(".tmp")
+    tmp.write_bytes(data)
+    tmp.chmod(0o600)
+    tmp.replace(f)
+    log.info("%s choisit une image pour la caméra de l'assistant (%d o)", u["login"], len(data))
+    return {"ok": True}
+
+
+@app.delete("/api/me/camera")
+async def my_camera_del(u: dict = Depends(current_user)):
+    cam_file(u["login"]).unlink(missing_ok=True)
+    log.info("%s retire l'image de la caméra de l'assistant", u["login"])
+    return {"ok": True}
 
 
 @app.get("/api/me")
@@ -257,6 +301,7 @@ async def users_delete(login: str, u: dict = Depends(require_admin)):
     except ValueError as e:
         raise HTTPException(400, str(e))
     sess_forget(login)                # sa session Zoom aussi
+    cam_file(login).unlink(missing_ok=True)   # et l'image de sa caméra
     log.info("compte %s supprimé par %s (ses réunions restent, visibles des administrateurs)", login, u["login"])
     return {"ok": True}
 
@@ -486,6 +531,9 @@ async def start_meeting(m: StartMeeting, u: dict) -> dict:
     body["display_name"] = m.display_name or bot_name(u, platform, DEFAULT_NAMES)
     body["owner"], body["me_name"] = u["login"], u.get("name")
     body["duration_min"] = m.duration_min or DEFAULT_DURATION
+    cam = cam_file(u["login"])
+    if cam.is_file():                 # caméra « image » : l'assistant ne l'allume jamais, l'utilisateur le fait
+        body["camera_image"] = base64.b64encode(cam.read_bytes()).decode()
     await ai_push(target, u["login"])          # Claude (sa clé) pour « En ce moment » et le compte rendu final
     r = await wcall(target, "POST", "/meeting/join", json=body)
     if cookies:
