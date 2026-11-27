@@ -1274,7 +1274,7 @@ function recItem(r, started, opts = {}) {
     <div class="rbody">
       <b class="rtitle"></b>
       <div class="rmeta">${esc(when)} · ${esc(plat)}${opts.short ? "" : ` · ${esc(r.worker)}`}</div>
-      <div class="rtags">${state}${r.final_cr ? `<span class="chip ok">CR final</span>` : ""}${r.meta?.imported ? `<span class="chip soft" title="Fichier « ${esc(r.meta.imported.file || "")} » importé${r.meta.imported.at ? " le " + esc(new Date(r.meta.imported.at).toLocaleDateString("fr-FR")) : ""}">Importée</span>` : ""}${owner}</div>
+      <div class="rtags">${state}${r.final_cr ? `<span class="chip ok">CR final</span>` : ""}${r.public_link ? `<span class="chip soft" title="Toute personne qui a le lien peut regarder la vidéo">🌐 Lien public</span>` : ""}${r.meta?.imported ? `<span class="chip soft" title="Fichier « ${esc(r.meta.imported.file || "")} » importé${r.meta.imported.at ? " le " + esc(new Date(r.meta.imported.at).toLocaleDateString("fr-FR")) : ""}">Importée</span>` : ""}${owner}</div>
     </div>
     <button class="icon more" title="Télécharger, partager, renommer, supprimer…" aria-haspopup="menu"><svg class="i"><use href="#i-more"/></svg></button>
     <div class="rmenu hidden" role="menu">
@@ -1285,6 +1285,7 @@ function recItem(r, started, opts = {}) {
         <a href="${url}/final?fmt=pdf" target="_blank" rel="noopener">Compte rendu final (PDF, s'il a été joint)</a>` : ""}
       ${video && !r.transcript && !r.recording && !ij && r.can_edit !== false ? `<button class="trn">Transcrire et faire le compte rendu</button>` : ""}
       ${video && r.transcript && !r.recording && !ij && r.can_edit !== false && r.kind !== "transcript" ? `<button class="retrn">Refaire la transcription</button>` : ""}
+      ${video && r.can_edit !== false && !r.recording ? `<button class="pub">Lien public…</button>` : ""}
       ${r.can_edit === false ? "" : `<button class="share">Partager avec…</button>
       <button class="ren">Renommer</button>
       <button class="del bad" ${r.recording ? "disabled title=\"Enregistrement en cours\"" : ""}>Supprimer</button>`}
@@ -1313,6 +1314,7 @@ function recItem(r, started, opts = {}) {
   el.onclick = () => play();                                     // toute la carte : compte rendu d'abord
   if ($(".play", el)) $(".play", el).onclick = (e) => { e.stopPropagation(); play(undefined, video); };   // lecture immédiate
   if ($(".share", el)) $(".share", el).onclick = () => shareRecording(r, title);
+  if ($(".pub", el)) $(".pub", el).onclick = () => publicLink(r, title);
   if ($(".trn", el)) $(".trn", el).onclick = () => transcribeRecording(r, title);
   if ($(".retrn", el)) $(".retrn", el).onclick = () => transcribeRecording(r, title, true);
   if ($(".ren", el)) $(".ren", el).onclick = () => renameRecording(url, r.meta?.title || r.name);
@@ -1971,6 +1973,46 @@ $("#dlgShare").addEventListener("close", async () => {
   try { await api(recUrl(r) + "/access", { method: "PUT", json: body }); toast("Partage enregistré"); loadRecordings(); }
   catch (e) { toast(e.message); }
 });
+
+// Lien public d'une vidéo : toute personne qui a le lien la regarde, sans compte (propriétaire ou administrateur)
+let pubTarget = null;
+function pubRender(link) {
+  const has = !!link;
+  $("#pbHas").classList.toggle("hidden", !has);
+  $("#pbDel").classList.toggle("hidden", !has);
+  $("#pbCreate").textContent = has ? "Nouveau lien" : "Créer le lien";
+  $("#pbCreate").title = has ? "Remplace ce lien : l'ancien cesse aussitôt de marcher" : "";
+  $("#pbUrl").value = has ? location.origin + link.path : "";
+  if (!has) return;
+  const exp = link.expires ? new Date(link.expires) : null, n = link.views || 0;
+  $("#pbInfo").textContent = `Créé le ${new Date(link.created).toLocaleDateString("fr-FR")} · `
+    + (!link.active ? "⚠️ expiré : créez un nouveau lien" : exp ? `valable jusqu'au ${exp.toLocaleString("fr-FR",
+      { day: "numeric", month: "long", year: "numeric", hour: "2-digit", minute: "2-digit" })}` : "sans limite de durée")
+    + ` · ${n ? `ouvert ${n} fois` : "pas encore ouvert"}`;
+}
+async function publicLink(r, title) {
+  pubTarget = r; $("#pbTitle").textContent = title;
+  try { pubRender((await api(recUrl(r) + "/public")).link); } catch (e) { pubTarget = null; return toast(e.message); }
+  $("#dlgPublic").showModal();
+}
+$("#pbCreate").onclick = async () => {
+  const r = pubTarget; if (!r) return;
+  if (!$("#pbHas").classList.contains("hidden") && !await askConfirm("Remplacer le lien public ?",
+    "Un nouveau lien est créé ; l'ancien cesse aussitôt de marcher pour tous ceux qui l'ont reçu.", "Nouveau lien")) return;
+  try {
+    const d = await api(recUrl(r) + "/public", { method: "POST", json: { days: $("#pbDays").value ? +$("#pbDays").value : null } });
+    pubRender(d.link); $("#pbUrl").select(); toast("Lien public prêt : copiez-le pour l'envoyer"); loadRecordings();
+  } catch (e) { toast(e.message); }
+};
+$("#pbDel").onclick = async () => {
+  const r = pubTarget; if (!r) return;
+  if (!await askConfirm("Retirer le lien public ?", "Le lien cesse aussitôt de marcher : plus personne ne pourra regarder la vidéo par ce lien.",
+    "Retirer le lien", true)) return;
+  try { await api(recUrl(r) + "/public", { method: "DELETE" }); pubRender(null); toast("Lien public retiré"); loadRecordings(); }
+  catch (e) { toast(e.message); }
+};
+$("#pbCopy").onclick = async () => { try { await navigator.clipboard.writeText($("#pbUrl").value); toast("Lien copié"); } catch (e) { $("#pbUrl").select(); } };
+$("#dlgPublic").addEventListener("close", () => { pubTarget = null; });
 
 // Utilisateurs (administrateurs)
 async function loadUsers() {

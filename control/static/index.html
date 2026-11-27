@@ -493,6 +493,26 @@
     <div class="row end"><button value="cancel" class="ghost">Annuler</button><button value="ok" class="primary">Enregistrer</button></div>
   </form>
 </dialog>
+<dialog id="dlgPublic" class="dlg">
+  <form method="dialog">
+    <h2>🌐 Lien public de la vidéo</h2>
+    <p class="hint" id="pbTitle"></p>
+    <p class="hint">Toute personne qui a ce lien peut regarder la vidéo, sans compte OmniConf. Seulement la vidéo : ni la
+      transcription, ni le compte rendu, ni vos autres réunions. Ne l'envoyez qu'aux personnes concernées ; vous pouvez le
+      retirer à tout moment.</p>
+    <div id="pbHas" class="hidden">
+      <div class="row"><input id="pbUrl" readonly spellcheck="false" aria-label="Lien public"><button type="button" id="pbCopy">Copier</button></div>
+      <p class="hint" id="pbInfo"></p>
+    </div>
+    <label>Valable<select id="pbDays"><option value="1">1 jour</option><option value="7">7 jours</option>
+      <option value="30" selected>30 jours</option><option value="365">1 an</option><option value="">sans limite de durée</option></select></label>
+    <div class="row end">
+      <button type="button" id="pbDel" class="danger hidden">Retirer le lien</button>
+      <button value="cancel" class="ghost">Fermer</button>
+      <button type="button" id="pbCreate" class="primary">Créer le lien</button>
+    </div>
+  </form>
+</dialog>
 <dialog id="dlgImport" class="dlg wide">
   <form method="dialog">
     <h2>⬆ Importer des enregistrements</h2>

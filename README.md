@@ -37,6 +37,12 @@ créé au premier démarrage avec `ADMIN_PASSWORD` (dans `/etc/webconf/control.e
 - **Visibilité** : chacun voit les réunions qu'il a lancées, et celles qu'on a partagées avec lui (menu ⋯ → 🔗
   Partager, en lecture seule). Un administrateur voit tout et peut changer le propriétaire d'une réunion. Les
   réunions d'avant les comptes n'ont pas de propriétaire : seuls les administrateurs les voient.
+- **Lien public d'une vidéo** (menu ⋯ → « Lien public… », propriétaire ou administrateur) : toute personne qui a le
+  lien `/v/<jeton>` regarde la vidéo, sans compte, et rien d'autre (ni transcription, ni compte rendu, ni autre réunion).
+  Valable 1 jour, 7 jours, 30 jours, 1 an ou sans limite ; « Nouveau lien » remplace l'ancien, qui cesse aussitôt ;
+  « Retirer le lien » l'arrête. Il s'arrête aussi si la réunion est supprimée ou si le compte qui l'a créé est désactivé.
+  La fenêtre indique combien de fois la page a été ouverte. Jetons dans `/var/lib/webconf/public_links.json` (mode 600) ;
+  page `noindex`, sans référent. Pas pendant un enregistrement en cours.
 - **Assistants** : ils sont communs. Un assistant en réunion n'est accessible qu'à celui qui l'a lancé (et aux
   administrateurs) ; les autres le voient « occupé », sans titre ni écran ni transcription.
 - **Votre compte Zoom (« comme si c'était moi »)** : chacun se connecte une fois à Zoom dans l'écran d'un assistant

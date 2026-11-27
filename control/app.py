@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import time
 import uuid
 from pathlib import Path
@@ -76,6 +77,7 @@ def detect_platform(url: str) -> str:
 DATA = Path(os.environ.get("DATA_DIR", "/var/lib/webconf"))
 DATA.mkdir(parents=True, exist_ok=True)
 SCHEDULE_FILE = DATA / "schedule.json"
+PUBLIC_FILE = DATA / "public_links.json"     # liens publics des vidéos (jeton secret -> réunion)
 LEXICON_FILE = DATA / "lexicon.md"
 CONSENT_FILE = DATA / "voice_consents.json"   # consentements aux empreintes vocales (attestés par un administrateur)
 VOICEPRINT_FILE = DATA / "voiceprints.json"   # empreintes de référence (personnes consentantes seulement)
@@ -870,6 +872,7 @@ async def rec_meta(name: str, file: str, u: dict, edit: bool = False, must_exist
 async def recordings(u: dict = CU):
     lists = await asyncio.gather(*(worker_recordings(n, fresh=True) for n in WORKERS))
     names = USERS.names()
+    pub = {(v["worker"], _stem(v["file"])) for v in pub_live().values()}
     out = []
     for x in (x for l in lists for x in l):
         meta = x.get("meta") or {}
@@ -878,7 +881,7 @@ async def recordings(u: dict = CU):
         owner = meta.get("owner")
         out.append({**x, "owner": owner, "owner_name": names.get(owner, owner) if owner else None,
                     "mine": owner == u["login"], "can_edit": can_edit(u, meta),
-                    "shared_with": meta.get("shared_with") or []})
+                    "shared_with": meta.get("shared_with") or [], "public_link": (x["worker"], _stem(x["name"])) in pub})
     return sorted(out, key=lambda x: -x["mtime"])
 
 
@@ -1014,7 +1017,9 @@ async def recording_report_build(name: str, file: str, u: dict = CU):
 async def recording_delete(name: str, file: str, u: dict = CU):
     await rec_meta(name, file, u, edit=True)
     _rec_cache.pop(name, None)
-    return (await wcall(name, "DELETE", f"/recordings/{file}")).json()
+    res = (await wcall(name, "DELETE", f"/recordings/{file}")).json()
+    pub_drop(name, file)                    # son lien public, s'il y en avait un, ne mène plus à rien : on l'efface
+    return res
 
 
 @app.get("/api/recordings/{name}/{file}/thumb")
@@ -1022,6 +1027,169 @@ async def recording_thumb(name: str, file: str, u: dict = CU):
     await rec_meta(name, file, u)
     r = await wcall(name, "GET", f"/recordings/{file}/thumb")
     return Response(r.content, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=300"})
+
+
+# ----------------------------------------------------------------------------- liens publics des vidéos
+# « Toute personne qui a le lien » : un jeton secret (144 bits) dans l'adresse /v/<jeton> donne la VIDÉO seule (ni
+# transcription, ni compte rendu, ni autre réunion). Créé, renouvelé ou retiré par le propriétaire ou un administrateur ;
+# il s'arrête à son échéance, si la réunion est supprimée, ou si le compte qui l'a créé est désactivé ou supprimé.
+PUB_DAYS = (1, 7, 30, 365)
+PUB_HEADERS = {"X-Robots-Tag": "noindex, nofollow", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"}
+
+
+def _pub_all() -> dict:
+    try:
+        return json.loads(PUBLIC_FILE.read_text())
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def _pub_write(d: dict):
+    tmp = PUBLIC_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(d, ensure_ascii=False, indent=1))
+    os.chmod(tmp, 0o600)
+    tmp.replace(PUBLIC_FILE)
+
+
+def _pub_ok(v: dict, now: dt.datetime) -> bool:
+    if v.get("expires") and dt.datetime.fromisoformat(v["expires"]) <= now:
+        return False
+    by = USERS.get(v.get("by"))
+    return bool(by) and not by.get("disabled")
+
+
+def pub_live() -> dict:
+    now = dt.datetime.now(dt.timezone.utc)
+    return {t: v for t, v in _pub_all().items() if _pub_ok(v, now)}
+
+
+def pub_find(name: str, file: str) -> tuple[str, dict] | tuple[None, None]:
+    stem = _stem(file)
+    return next(((t, v) for t, v in _pub_all().items() if v["worker"] == name and _stem(v["file"]) == stem), (None, None))
+
+
+def pub_drop(name: str, file: str):
+    stem = _stem(file)
+    d = _pub_all()
+    keep = {t: v for t, v in d.items() if not (v["worker"] == name and _stem(v["file"]) == stem)}
+    if len(keep) != len(d):
+        _pub_write(keep)
+
+
+def _pub_view(t: str | None, v: dict | None) -> dict:
+    if not t:
+        return {"link": None}
+    now = dt.datetime.now(dt.timezone.utc)
+    return {"link": {"path": f"/v/{t}", "created": v["created"], "expires": v.get("expires"), "views": v.get("views", 0),
+                     "last_view": v.get("last_view"), "active": _pub_ok(v, now)}}
+
+
+async def _pub_rec(name: str, file: str, u: dict) -> dict:
+    """La réunion dont on gère le lien : modifiable par ce compte, avec une vidéo, enregistrement terminé."""
+    await rec_meta(name, file, u, edit=True)
+    rec = next((x for x in await worker_recordings(name, True) if _stem(x["name"]) == _stem(file)), None)
+    if not rec or rec.get("kind") == "transcript" or not rec["name"].endswith(".mp4"):
+        raise HTTPException(400, "pas de vidéo pour cette réunion")
+    if rec.get("recording"):
+        raise HTTPException(409, "enregistrement en cours : le lien public sera possible une fois la réunion finie")
+    return rec
+
+
+class PublicLink(BaseModel):
+    days: int | None = 30            # 1, 7, 30, 365 ; None = sans échéance
+
+
+@app.get("/api/recordings/{name}/{file}/public")
+async def public_get(name: str, file: str, u: dict = CU):
+    await rec_meta(name, file, u, edit=True)
+    return _pub_view(*pub_find(name, file))
+
+
+@app.post("/api/recordings/{name}/{file}/public")
+async def public_create(name: str, file: str, body: PublicLink, u: dict = CU):
+    """Crée le lien public de la vidéo, ou le remplace (l'ancien lien cesse aussitôt de marcher)."""
+    if body.days is not None and body.days not in PUB_DAYS:
+        raise HTTPException(400, "durée invalide")
+    rec = await _pub_rec(name, file, u)
+    now = dt.datetime.now(dt.timezone.utc)
+    d = {t: v for t, v in _pub_all().items() if not (v["worker"] == name and _stem(v["file"]) == _stem(file))}
+    t = secrets.token_urlsafe(18)
+    d[t] = {"worker": name, "file": rec["name"], "by": u["login"], "created": now.isoformat(timespec="seconds"),
+            "expires": (now + dt.timedelta(days=body.days)).isoformat(timespec="seconds") if body.days else None, "views": 0}
+    _pub_write(d)
+    log.info("lien public créé par %s pour %s/%s (%s)", u["login"], name, _stem(file), f"{body.days} j" if body.days else "sans échéance")
+    return _pub_view(t, d[t])
+
+
+@app.delete("/api/recordings/{name}/{file}/public")
+async def public_delete(name: str, file: str, u: dict = CU):
+    await rec_meta(name, file, u, edit=True)
+    pub_drop(name, file)
+    log.info("lien public retiré par %s pour %s/%s", u["login"], name, _stem(file))
+    return {"link": None}
+
+
+async def _pub_target(token: str) -> tuple[dict, dict]:
+    v = _pub_all().get(token) if 16 <= len(token) <= 64 else None
+    if not v or not _pub_ok(v, dt.datetime.now(dt.timezone.utc)) or v["worker"] not in WORKERS:
+        raise HTTPException(404, "lien inconnu ou expiré", headers=PUB_HEADERS)
+    rec = next((x for x in await worker_recordings(v["worker"]) if x["name"] == v["file"]), None)
+    if not rec or rec.get("recording"):
+        raise HTTPException(404, "lien inconnu ou expiré", headers=PUB_HEADERS)
+    return v, rec
+
+
+@app.get("/v/{token}")
+async def public_page(token: str):
+    return FileResponse(HERE / "static" / "public.html", media_type="text/html; charset=utf-8",
+                        headers={**PUB_HEADERS, "Cache-Control": "no-cache"})
+
+
+@app.get("/api/public/{token}")
+async def public_info(token: str):
+    """Ce que montre la page publique : titre, date, durée (rien d'autre de la réunion)."""
+    v, rec = await _pub_target(token)
+    d = _pub_all()
+    if token in d:                                  # une ouverture de la page = une vue
+        d[token]["views"] = d[token].get("views", 0) + 1
+        d[token]["last_view"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+        _pub_write(d)
+    meta = rec.get("meta") or {}
+    return JSONResponse({"title": rec.get("cr_title") or meta.get("title") or "Réunion", "started_at": meta.get("started_at"),
+                         "duration": rec.get("duration"), "expires": v.get("expires")},
+                        headers={**PUB_HEADERS, "Cache-Control": "no-store"})
+
+
+@app.get("/api/public/{token}/video")
+async def public_video(token: str, request: Request):
+    v, _ = await _pub_target(token)
+    headers = {"X-Agent-Token": TOKEN}
+    if "range" in request.headers:
+        headers["Range"] = request.headers["range"]
+    req = http.build_request("GET", wurl(v["worker"]) + f"/recordings/{v['file']}", headers=headers, timeout=None)
+    r = await http.send(req, stream=True)
+    if r.status_code >= 400:
+        await r.aclose()
+        raise HTTPException(404, "vidéo introuvable", headers=PUB_HEADERS)
+    out_h = {k: x for k, x in r.headers.items() if k.lower() in ("content-length", "content-range", "accept-ranges", "last-modified", "etag")}
+    out_h.update(PUB_HEADERS)
+    out_h["Content-Disposition"] = 'inline; filename="reunion.mp4"'
+    out_h["Cache-Control"] = "private, no-transform"
+
+    async def body():
+        try:
+            async for chunk in r.aiter_raw():
+                yield chunk
+        finally:
+            await r.aclose()
+    return StreamingResponse(body(), status_code=r.status_code, headers=out_h, media_type="video/mp4")
+
+
+@app.get("/api/public/{token}/thumb")
+async def public_thumb(token: str):
+    v, _ = await _pub_target(token)
+    r = await wcall(v["worker"], "GET", f"/recordings/{v['file']}/thumb")
+    return Response(r.content, media_type="image/jpeg", headers={**PUB_HEADERS, "Cache-Control": "private, max-age=300"})
 
 
 class Rename(BaseModel):
