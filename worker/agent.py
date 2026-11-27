@@ -622,6 +622,29 @@ async def leave():
     return await status()
 
 
+class ExtendReq(BaseModel):
+    minutes: int
+
+
+EXTEND_MAX = dt.timedelta(hours=12)   # le départ automatique n'est jamais repoussé à plus de 12 h d'ici
+
+
+@app.post("/meeting/extend", dependencies=[Depends(auth)])
+async def extend(req: ExtendReq):
+    """Repousse le départ automatique de la réunion en cours (« Prolonger ») de N minutes, à partir de l'heure
+    prévue (ou de maintenant si elle vient de passer) ; sans effet sur une réunion sans départ automatique."""
+    if state["state"] not in ("joining", "lobby", "in_meeting") or not state["auto_leave_at"]:
+        raise HTTPException(409, "pas de départ automatique prévu")
+    if not 1 <= req.minutes <= 720:
+        raise HTTPException(400, "durée invalide")
+    now = dt.datetime.now().astimezone()
+    new = min(max(dt.datetime.fromisoformat(state["auto_leave_at"]), now) + dt.timedelta(minutes=req.minutes),
+              now + EXTEND_MAX)
+    state["auto_leave_at"] = new.isoformat()
+    log.info("départ automatique repoussé à %s (+%d min)", new.strftime("%H:%M"), req.minutes)
+    return await status()
+
+
 @app.post("/meeting/mute", dependencies=[Depends(auth)])
 async def mute():
     """Bascule le micro dans la réunion (raccourci clavier de la plateforme)."""

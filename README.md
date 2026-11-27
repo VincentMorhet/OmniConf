@@ -93,6 +93,11 @@ créé au premier démarrage avec `ADMIN_PASSWORD` (dans `/etc/webconf/control.e
      « Votre compte Zoom » (la session de chacun n'est chargée que pour ses réunions).
    - **Quitter** : quitte la réunion et arrête l'enregistrement. Le bot quitte aussi tout seul quand la
      réunion se termine, ou à la fin de la durée max.
+   - **⏱ Prolonger** (carte et « Suivre en grand ») : repousse le départ automatique de +30 min, +1 h, +2 h
+     ou +4 h, à partir de l'heure prévue (12 h d'ici au plus). Le propriétaire de la réunion ou un
+     administrateur ; pas les spectateurs. 15 min avant le départ, la carte le signale et le bouton passe en
+     orange ; 10 min avant, un message s'affiche aussi sur l'accueil. Route de l'assistant :
+     `POST /meeting/extend {"minutes": N}`.
 4. **📝 Transcription en direct** (case « Transcrire », cochée par défaut) : le panneau s'ouvre sur la
    carte du worker dès que la réunion commence.
    - **Intervenants distingués**, chacun avec sa couleur, sous forme de pastilles au-dessus du texte :

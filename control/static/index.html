@@ -160,6 +160,7 @@
       <div class="ftitle"><b id="fTitle"></b><small id="fInfo"></small></div>
       <span id="fRec" class="rec hidden"></span>
       <button id="fRecBtn" title="Démarrer ou arrêter l'enregistrement">⏺ Enregistrer</button>
+      <button id="fExtend" class="hidden" title="Repousser l'heure à laquelle l'assistant quitte la réunion tout seul">⏱ Prolonger</button>
       <button id="fLeave" class="danger" title="Faire quitter la réunion à l'assistant">🚪 Quitter</button>
       <span id="fCtl" class="fctl"></span>
       <button id="fCc" class="on" title="Afficher / masquer les sous-titres">💬 Sous-titres</button>
@@ -348,6 +349,7 @@
           <button class="b-rec">⏺ Enregistrer</button>
           <button class="b-mute" title="Bascule le micro de l'assistant dans la réunion"><svg class="i"><use href="#i-mic-off"/></svg>Muet</button>
           <button class="b-open" title="Ouvrir une page (ex : se connecter à son compte Teams ou Zoom)"><svg class="i"><use href="#i-globe"/></svg>Ouvrir une page</button>
+          <button class="b-extend hidden" title="Repousser l'heure à laquelle l'assistant quitte la réunion tout seul">⏱ Prolonger</button>
           <button class="danger b-leave">Quitter la réunion</button>
         </div>
       </div>
@@ -564,6 +566,17 @@
     <label>Comment les consentements ont été reçus (facultatif)<input id="cmNote" placeholder="ex. courriels du 14/11, accord oral en réunion"></label>
     <label class="attest"><input type="checkbox" id="cmAttest"> <span id="cmText"></span></label>
     <div class="row end"><button value="cancel" class="ghost" formnovalidate>Annuler</button><button id="cmOk" value="ok" class="primary" disabled>Attester</button></div>
+  </form>
+</dialog>
+<dialog id="dlgExtend" class="dlg">
+  <form method="dialog">
+    <h2>⏱ Prolonger la réunion</h2>
+    <p class="hint" id="exText"></p>
+    <div class="row ex-opts">
+      <button value="30">+30 min</button><button value="60" class="primary">+1 h</button>
+      <button value="120">+2 h</button><button value="240">+4 h</button>
+    </div>
+    <div class="row end"><button value="cancel" class="ghost" id="exNo">Annuler</button></div>
   </form>
 </dialog>
 <dialog id="dlgConfirm" class="dlg">

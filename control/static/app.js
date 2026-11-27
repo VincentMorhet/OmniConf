@@ -206,6 +206,7 @@ function card(name) {
   $(".b-mute", el).onclick = act("mute");
   $(".b-rec", el).onclick = () => toggleRecording(name);
   $(".b-live", el).onclick = () => openLiveShare(name);
+  $(".b-extend", el).onclick = () => openExtend(name);
   $(".b-screen", el).onclick = () => toggleVnc(name);
   $(".shot", el).onclick = () => toggleVnc(name, true);
   $(".b-full", el).onclick = () => { toggleVnc(name, false); window.open(vncUrl(name), "_blank"); };
@@ -254,6 +255,12 @@ function fmtDur(iso) {
   return (h ? h + ":" : "") + String(m).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0");
 }
 
+// « Prolonger » : repousser le départ automatique (durée max choisie au lancement) d'une réunion commencée
+const hm = (iso) => new Date(iso).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+const canExtend = (st) => !!(st?.online && st.auto_leave_at && !st.viewer && ["joining", "lobby", "in_meeting"].includes(st.state));
+const leftMin = (st) => Math.max(0, Math.round((new Date(st.auto_leave_at) - Date.now()) / 60000));
+const fmtLeft = (m) => m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, "0")}`;
+
 function render(st) {
   const el = card(st.name), prev = lastStatus[st.name];
   lastStatus[st.name] = st;
@@ -281,7 +288,7 @@ function render(st) {
     if (plat && plat !== st.title) info.push(esc(plat));
     if (st.since) info.push("depuis " + new Date(st.since).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }));
     if (st.listeners) info.push(`🎧 ${st.listeners} à l'écoute`);
-    if (st.auto_leave_at) info.push("départ auto à " + new Date(st.auto_leave_at).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }));
+    if (st.auto_leave_at) info.push("départ auto à " + hm(st.auto_leave_at));
     if (st.viewer) info.push("👥 partagée par " + esc(st.owner_name || "son propriétaire"));
     else if (st.owner_name && !st.mine) info.push("👤 " + esc(st.owner_name));
     if (st.mine && st.viewers?.length) info.push("👥 partagée avec " + esc(dirNames(st.viewers)));
@@ -293,7 +300,15 @@ function render(st) {
   if (st.error) note = `<div class="e">⚠ ${esc(st.error)} — terminez à la main avec « Prendre la main ».</div>`;
   else if (st.note && st.state === "in_meeting") note = `<div class="n">ℹ ${esc(st.note.replace("« Écran »", "« Prendre la main »"))}</div>`;
   if (st.viewer && !st.error) note = `<div class="n">👀 Vous suivez cette réunion en spectateur : écran, son, transcription et compte rendu en direct. Seul ${esc(st.owner_name || "son propriétaire")} peut y parler ou agir sur l'assistant.</div>`;
+  const soon = canExtend(st) && leftMin(st) <= 15;   // départ automatique proche : on le dit, avec le remède
+  if (soon) note += `<div class="n">⏱ L'assistant quittera la réunion tout seul à ${hm(st.auto_leave_at)} (dans ${fmtLeft(leftMin(st))}). « Prolonger » pour qu'il reste plus longtemps.</div>`;
+  if (soon && st.mine && leftMin(st) <= 10 && t.warnedLeave !== st.auto_leave_at) {
+    t.warnedLeave = st.auto_leave_at;
+    toast(`⏱ « ${st.title || platLabel(st) || "La réunion"} » : l'assistant part à ${hm(st.auto_leave_at)}. Ouvrez la réunion et « Prolonger » pour qu'il reste.`, 12000);
+  }
   $(".wnote", el).innerHTML = note;
+  $(".b-extend", el).classList.toggle("hidden", !canExtend(st));
+  $(".b-extend", el).classList.toggle("warn", soon);
   $(".b-rec", el).innerHTML = st.recording ? "<i class=\"dot sq\"></i>Arrêter l'enregistrement" : "<i class=\"dot\"></i>Enregistrer";
   el.classList.toggle("idle", !isBusy(st) && !st.recording);    // assistant libre : seulement les actions utiles
   [el, el._side, el._actl].forEach(x => x.classList.toggle("viewer", !!st.viewer));   // spectateur : regarder et écouter
@@ -590,7 +605,8 @@ function syncFocusButtons() {
 function renderFocus(st) {
   const busy = isBusy(st), title = busy ? (st.title || platLabel(st) || "Réunion") : `Assistant ${st.name}`;
   $("#fTitle").textContent = title; document.title = title + " · OmniConf";
-  $("#fInfo").textContent = busy ? [platLabel(st) !== st.title ? platLabel(st) : "", STATE_FR[st.state] || st.state].filter(Boolean).join(" · ")
+  $("#fInfo").textContent = busy ? [platLabel(st) !== st.title ? platLabel(st) : "", STATE_FR[st.state] || st.state,
+    st.auto_leave_at ? "départ auto à " + hm(st.auto_leave_at) : ""].filter(Boolean).join(" · ")
     : st.online ? "libre" : "hors ligne";
   $("#fRec").classList.toggle("hidden", !st.recording);
   if (st.recording) $("#fRec").textContent = "● REC " + fmtDur(st.recording_since);
@@ -599,6 +615,8 @@ function renderFocus(st) {
   rb.classList.toggle("recording", !!st.recording);
   rb.disabled = !st.online || st.state === "taken" || (!busy && !st.recording);
   $("#fLeave").disabled = !busy;
+  $("#fExtend").classList.toggle("hidden", !canExtend(st));
+  $("#fExtend").classList.toggle("warn", canExtend(st) && leftMin(st) <= 15);
   $("#tab-focus").classList.toggle("viewer", !!st.viewer);
   if (st.viewer && fHand) { fHand = false; if (fRfb) fRfb.viewOnly = true; syncFocusButtons(); }
   const t = trState(st.name);
@@ -627,6 +645,7 @@ $("#fFull").onclick = () => document.fullscreenElement ? document.exitFullscreen
 $("#fFinal").onclick = () => fName && openFinal(fName);
 $("#fRecBtn").onclick = () => fName && toggleRecording(fName);
 $("#fLeave").onclick = () => fName && confirmLeave(fName);
+$("#fExtend").onclick = () => fName && openExtend(fName);
 
 // ------------------------------------------------------------------ confirmations (arrêt de l'enregistrement, départ)
 function askConfirm(title, text, okLabel, danger = false) {
@@ -651,6 +670,25 @@ async function toggleRecording(name) {
     "Vous pourrez relancer un enregistrement : ce sera un fichier séparé.", "⏹ Arrêter l'enregistrement", true);
   if (ok && await workerAct(name, "rec-stop")) toast("Enregistrement arrêté");
 }
+let exName = null;
+function openExtend(name) {
+  const st = lastStatus[name] || {};
+  if (!canExtend(st)) return;
+  exName = name;
+  $("#exText").textContent = `L'assistant ${name} quittera « ${st.title || platLabel(st) || "la réunion"} » tout seul à `
+    + `${hm(st.auto_leave_at)} (dans ${fmtLeft(leftMin(st))}). Repousser ce départ de :`;
+  $("#dlgExtend").returnValue = "";
+  $("#dlgExtend").showModal();
+}
+$("#dlgExtend").addEventListener("close", async () => {
+  const m = parseInt($("#dlgExtend").returnValue);
+  if (!m || !exName) return;
+  try {
+    const d = await api(`/api/workers/${exName}/extend`, { method: "POST", json: { minutes: m } });
+    toast(`Départ automatique repoussé à ${hm(d.auto_leave_at)}`, 5000);
+    refresh();
+  } catch (e) { toast("Erreur : " + e.message, 6000); }
+});
 async function confirmLeave(name) {
   const st = lastStatus[name] || {};
   const what = [st.recording ? "l'enregistrement s'arrête" : "",

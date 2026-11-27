@@ -526,13 +526,28 @@ async def worker_action(name: str, action: str, request: Request, u: dict = CU):
     paths = {"leave": "/meeting/leave", "mute": "/meeting/mute", "rec-start": "/recording/start",
              "rec-stop": "/recording/stop", "open": "/browser/open", "reset": "/browser/reset",
              "offer": "/webrtc/offer", "tr-start": "/transcript/start", "tr-stop": "/transcript/stop",
-             "speakers": "/transcript/speakers", "analyze": "/transcript/analyze"}
+             "speakers": "/transcript/speakers", "analyze": "/transcript/analyze", "extend": "/meeting/extend"}
     if action not in paths:
         raise HTTPException(404)
     st = await worker_for(name, u, live=action in ("speakers", "analyze"), view=action == "offer")
     if action == "mute" and not can_talk(u, st):
         raise HTTPException(403, "seul le propriétaire de la réunion peut activer ou couper le micro")
     body = await request.body()
+    if action == "extend":                # « Prolonger » : repousser le départ automatique, de N minutes seulement
+        try:
+            minutes = int(json.loads(body or b"{}").get("minutes"))
+        except (ValueError, TypeError, AttributeError):
+            raise HTTPException(400, "durée invalide")
+        if not 1 <= minutes <= 720:
+            raise HTTPException(400, "durée invalide")
+        try:
+            r = await wcall(name, "POST", paths[action], json={"minutes": minutes}, timeout=10)
+        except HTTPException as e:
+            if e.status_code == 404:      # assistant pas encore mis à jour (il l'est dès la fin de sa réunion)
+                raise HTTPException(409, "cet assistant ne sait pas encore prolonger une réunion déjà commencée")
+            raise
+        log.info("%s repousse le départ de %s de %d min (%s)", u["login"], name, minutes, r.json().get("auto_leave_at"))
+        return JSONResponse(r.json())
     if action == "offer":                 # le micro n'est transmis que pour le propriétaire (sinon : écoute seule)
         try:
             d = json.loads(body or b"{}")
